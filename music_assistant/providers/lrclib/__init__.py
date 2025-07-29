@@ -149,5 +149,5 @@ class LrclibProvider(MetadataProvider):
                 self.logger.debug("Found synchronized lyrics for %s by %s", track.name, artist_name)
                 return metadata
 
-        self.logger.debug("No synchronized lyrics found for %s by %s", track.name, artist_name)
+        self.logger.debug("No synchronized lyrics found for %s by %s with album name %s and with a duration within 2 secs of %s", track.name, artist_name, album_name, duration)
         return None
