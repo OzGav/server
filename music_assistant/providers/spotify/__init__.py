@@ -438,10 +438,39 @@ class SpotifyProvider(MusicProvider):
         album_obj = await self._get_data(f"albums/{prov_album_id}")
         return self._parse_album(album_obj)
 
-    async def get_track(self, prov_track_id) -> Track:
+    async def get_track(self, prov_track_id: str) -> Track:
         """Get full track details by id."""
-        track_obj = await self._get_data(f"tracks/{prov_track_id}")
-        return self._parse_track(track_obj)
+        track_data = await self._get_data(f"tracks/{prov_track_id}")
+        if not track_data:  # Add a check in case data fetching fails
+            return None
+        track_obj = self._parse_track(track_data)
+        await self._add_lyrics_to_track(track_obj)
+        return track_obj
+
+    async def _add_lyrics_to_track(self, track_obj: Track):
+        """Helper to add lyrics to a Track object using the lrclib provider."""
+        if not hasattr(track_obj, "metadata") or track_obj.metadata is None:
+            track_obj.metadata = MediaItemMetadata()
+
+        # Only attempt to fetch lyrics if the track object exists and doesn't already have lyrics
+        # or lrc_lyrics from a previous lookup (e.g., from file-based tags).
+        # We prefer synced lyrics (lrc_lyrics) if available, otherwise regular lyrics.
+        if track_obj and (not track_obj.metadata.lyrics and not track_obj.metadata.lrc_lyrics):
+            lrclib_provider = self.mass.get_provider("lrclib")
+            if lrclib_provider:
+                try:
+                    self.logger.debug("Calling the lrclib provider for %s", track_obj.name)
+                    lyrics_metadata_result = await lrclib_provider.get_track_metadata(track_obj)
+
+                    if lyrics_metadata_result and lyrics_metadata_result.lrc_lyrics:
+                        track_obj.metadata.lyrics = lyrics_metadata_result.lrc_lyrics
+                        self.logger.debug(
+                            "Successfully added lyrics from lrclib for %s", track_obj.name
+                        )
+                except Exception as err:
+                    self.logger.warning(
+                        "Error fetching lyrics for %s: %s", track_obj.name, err, exc_info=True
+                    )
 
     async def get_playlist(self, prov_playlist_id) -> Playlist:
         """Get full playlist details by id."""
@@ -453,11 +482,14 @@ class SpotifyProvider(MusicProvider):
 
     async def get_album_tracks(self, prov_album_id) -> list[Track]:
         """Get all album tracks for given album id."""
-        return [
-            self._parse_track(item)
-            async for item in self._get_all_items(f"albums/{prov_album_id}/tracks")
-            if item["id"]
-        ]
+        # Fetch raw Spotify track data and parse it into MA Track objects
+        ma_tracks: list[Track] = []
+        async for item in self._get_all_items(f"albums/{prov_album_id}/tracks"):
+            if item["id"]:
+                track = self._parse_track(item)
+                await self._add_lyrics_to_track(track)
+                ma_tracks.append(track)
+        return ma_tracks
 
     async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
         """Get playlist tracks."""
@@ -475,6 +507,7 @@ class SpotifyProvider(MusicProvider):
                 continue
             # use count as position
             track = self._parse_track(item["track"])
+            await self._add_lyrics_to_track(track)
             track.position = offset + index
             result.append(track)
         return result
