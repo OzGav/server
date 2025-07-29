@@ -115,7 +115,7 @@ class LrclibProvider(MetadataProvider):
             return None
 
         artist_name = track.artists[0].name
-        album_name = track.album.name if track.album else "Unknown Album"
+        album_name = track.album.name if track.album else ""
 
         duration = track.duration or 0
 
