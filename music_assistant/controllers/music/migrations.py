@@ -1334,7 +1334,6 @@ async def migrate_database(  # noqa: PLR0915
             [musical_key] TEXT,
             [parent_work_id] INTEGER REFERENCES {DB_TABLE_WORKS}(item_id),
             [metadata] json NOT NULL,
-            [external_ids] json NOT NULL,
             [timestamp_added] INTEGER DEFAULT (cast(strftime('%s','now') as int)),
             [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
             [search_name] TEXT NOT NULL,
