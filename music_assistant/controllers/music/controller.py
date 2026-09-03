@@ -52,6 +52,7 @@ from music_assistant_models.media_items import (
     SearchResults,
     SoundEffect,
     Track,
+    Work,
 )
 from music_assistant_models.media_items.media_item import MediaCollection
 from music_assistant_models.playlog_update import PlaylogUpdate
@@ -1806,7 +1807,7 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
             if (
                 fully_played
                 and not isinstance(
-                    media_item, Album | Artist | Genre | Playlist | Podcast | MediaCollection
+                    media_item, Album | Artist | Genre | Playlist | Podcast | MediaCollection | Work
                 )
                 and isinstance(media_item.duration, int)  # for Radio duration can be None
             ):

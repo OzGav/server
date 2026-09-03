@@ -17,11 +17,12 @@ from contextlib import suppress
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from music_assistant_models.enums import MediaType
+from music_assistant_models.enums import ArtistRole, MediaType
 from music_assistant_models.errors import MusicAssistantError, ProviderUnavailableError
 from music_assistant_models.helpers import create_safe_string
 
 from music_assistant.constants import (
+    DB_TABLE_ALBUM_ARTISTS,
     DB_TABLE_ALBUMS,
     DB_TABLE_ARTISTS,
     DB_TABLE_AUDIO_ANALYSIS,
@@ -38,7 +39,11 @@ from music_assistant.constants import (
     DB_TABLE_PODCASTS,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_RADIOS,
+    DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORK_ARRANGEMENTS,
+    DB_TABLE_WORK_ARTISTS,
+    DB_TABLE_WORKS,
     DEFAULT_GENRE_MAPPING,
     GENRE_ICONS_DIR_NAME,
     LOUDNESS_MEASUREMENT_MIN_LUFS,
@@ -1308,6 +1313,128 @@ async def migrate_database(  # noqa: PLR0915
             await mass.music.genres.restore_default_genres(full_restore=False)
         except Exception as err:
             logger.warning("Could not seed default podcast/audiobook genres: %s", err)
+
+    if prev_version <= 64:
+        # classical music support adds the works table with its work_arrangements and
+        # work_artists junctions, work and movement columns on tracks, role, instrument
+        # and position columns on track_artists / album_artists (existing rows become
+        # 'main_artist'), and the artists.period and is_classical columns
+        await database.execute(
+            f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_WORKS}(
+            [item_id] INTEGER PRIMARY KEY AUTOINCREMENT,
+            [name] TEXT NOT NULL,
+            [sort_name] TEXT NOT NULL,
+            [version] TEXT,
+            [catalog_numbers] json NOT NULL DEFAULT '[]',
+            [catalog_sort] TEXT,
+            [name_sort] TEXT,
+            [work_type] TEXT,
+            [composition_year] INTEGER,
+            [language] TEXT,
+            [musical_key] TEXT,
+            [parent_work_id] INTEGER REFERENCES {DB_TABLE_WORKS}(item_id),
+            [metadata] json NOT NULL,
+            [external_ids] json NOT NULL,
+            [timestamp_added] INTEGER DEFAULT (cast(strftime('%s','now') as int)),
+            [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
+            [search_name] TEXT NOT NULL,
+            [search_sort_name] TEXT NOT NULL
+            );"""
+        )
+        await database.execute(
+            f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_WORK_ARRANGEMENTS}(
+            [work_id] INTEGER NOT NULL,
+            [source_work_id] INTEGER NOT NULL,
+            FOREIGN KEY([work_id]) REFERENCES [{DB_TABLE_WORKS}]([item_id]),
+            FOREIGN KEY([source_work_id]) REFERENCES [{DB_TABLE_WORKS}]([item_id]),
+            UNIQUE(work_id, source_work_id)
+            );"""
+        )
+        await database.execute(
+            f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_WORK_ARTISTS}(
+            [work_id] INTEGER NOT NULL,
+            [artist_id] INTEGER NOT NULL,
+            [role] TEXT NOT NULL DEFAULT '{ArtistRole.COMPOSER.value}',
+            [position] INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY([work_id]) REFERENCES [{DB_TABLE_WORKS}]([item_id]),
+            FOREIGN KEY([artist_id]) REFERENCES [{DB_TABLE_ARTISTS}]([item_id]),
+            UNIQUE(work_id, artist_id, role)
+            );"""
+        )
+        # add the new columns in the order of the fresh install tables; the FK on
+        # tracks.work_id is accepted by SQLite's ALTER TABLE syntax but not enforced at
+        # runtime, so the controller layer guards its integrity
+        for table, column, definition in (
+            (DB_TABLE_ARTISTS, "period", "TEXT"),
+            (DB_TABLE_ARTISTS, "is_classical", "BOOLEAN NOT NULL DEFAULT 0"),
+            (DB_TABLE_ALBUMS, "is_classical", "BOOLEAN NOT NULL DEFAULT 0"),
+            (DB_TABLE_ALBUMS, "classical_tag", "BOOLEAN NOT NULL DEFAULT 0"),
+            (DB_TABLE_TRACKS, "work_id", f"INTEGER REFERENCES {DB_TABLE_WORKS}(item_id)"),
+            (DB_TABLE_TRACKS, "movement_number", "INTEGER"),
+            (DB_TABLE_TRACKS, "movement_total", "INTEGER"),
+            (DB_TABLE_TRACKS, "movement_name", "TEXT"),
+            (DB_TABLE_TRACKS, "is_classical", "BOOLEAN NOT NULL DEFAULT 0"),
+            (DB_TABLE_TRACKS, "classical_tag", "BOOLEAN NOT NULL DEFAULT 0"),
+        ):
+            table_columns = {
+                x["name"]
+                for x in await database.get_rows_from_query(f"PRAGMA table_info({table})", limit=0)
+            }
+            # skip (test) databases without this table and columns added by an earlier run
+            if not table_columns or column in table_columns:
+                continue
+            await database.execute(f"ALTER TABLE {table} ADD COLUMN [{column}] {definition}")
+        # recreate track_artists / album_artists with role/instrument/position columns.
+        # SQLite cannot drop or modify a column-level UNIQUE constraint via ALTER,
+        # so use the canonical 12-step recreation pattern. The DEFAULT 'main_artist'
+        # backfills every existing junction row (each was effectively a headline credit).
+        for table, owner_col in (
+            (DB_TABLE_TRACK_ARTISTS, "track_id"),
+            (DB_TABLE_ALBUM_ARTISTS, "album_id"),
+        ):
+            ref_table = DB_TABLE_TRACKS if owner_col == "track_id" else DB_TABLE_ALBUMS
+            table_columns = {
+                x["name"]
+                for x in await database.get_rows_from_query(f"PRAGMA table_info({table})", limit=0)
+            }
+            if not table_columns:
+                # guard against (test) databases with stand-in tables
+                continue
+            if "role" in table_columns:
+                # already rebuilt by an earlier run of this migration
+                continue
+            # a previous run may have died between the create and the rename
+            await database.execute(f"DROP TABLE IF EXISTS {table}_new")
+            await database.execute(
+                f"""CREATE TABLE {table}_new(
+                [{owner_col}] INTEGER NOT NULL,
+                [artist_id] INTEGER NOT NULL,
+                [role] TEXT NOT NULL DEFAULT '{ArtistRole.MAIN_ARTIST.value}',
+                [instrument] TEXT,
+                [position] INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY([{owner_col}]) REFERENCES [{ref_table}]([item_id]),
+                FOREIGN KEY([artist_id]) REFERENCES [{DB_TABLE_ARTISTS}]([item_id])
+                )"""
+            )
+            await database.execute(
+                f"INSERT INTO {table}_new"
+                f"({owner_col}, artist_id, role, instrument, position) "
+                f"SELECT {owner_col}, artist_id, '{ArtistRole.MAIN_ARTIST.value}', NULL, 0 "
+                f"FROM {table}"
+            )
+            # drop the old indexes, __create_database_indexes recreates them after the
+            # migration finishes
+            for old_idx in (
+                f"{table}_{owner_col}_idx",
+                f"{table}_artist_id_idx",
+            ):
+                await database.execute(f"DROP INDEX IF EXISTS {old_idx}")
+            await database.execute(f"DROP TABLE {table}")
+            await database.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+            await database.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_unique "
+                f"ON {table}({owner_col}, artist_id, role, COALESCE(instrument, ''))"
+            )
 
     # (re)build the FTS search tables so they are in sync with the content tables;
     # this both populates them on first migration to the FTS-enabled schema and

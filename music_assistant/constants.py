@@ -251,6 +251,9 @@ DB_TABLE_GENRES: Final[str] = "genres"
 DB_TABLE_GENRE_MEDIA_ITEM_MAPPING: Final[str] = "genre_media_item_mapping"
 DB_TABLE_GENRE_MEDIA_ITEM_EXCLUSION: Final[str] = "genre_media_item_exclusion"
 DB_TABLE_FAVORITES: Final[str] = "favorites"
+DB_TABLE_WORKS: Final[str] = "works"
+DB_TABLE_WORK_ARRANGEMENTS: Final[str] = "work_arrangements"
+DB_TABLE_WORK_ARTISTS: Final[str] = "work_artists"
 
 # all media item tables, each of which has a search_name column
 # backed by a {table}_fts FTS5 index table
@@ -263,6 +266,7 @@ MEDIA_ITEM_DB_TABLES: Final[tuple[str, ...]] = (
     DB_TABLE_AUDIOBOOKS,
     DB_TABLE_PODCASTS,
     DB_TABLE_GENRES,
+    DB_TABLE_WORKS,
 )
 
 # Min fraction of a database file reclaimable before a startup VACUUM is worth running.
