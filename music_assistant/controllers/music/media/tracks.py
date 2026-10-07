@@ -648,13 +648,14 @@ class TracksController(MediaControllerBase[Track]):
     async def remove_item_from_library(self, item_id: str | int, recursive: bool = True) -> None:
         """Delete record from the database."""
         db_id = int(item_id)  # ensure integer
-        # remove the item before its relations so failed analysis cleanup leaves it intact
-        await super().remove_item_from_library(db_id)
-        # delete entry(s) from albumtracks table
-        await self.mass.music.database.delete(DB_TABLE_ALBUM_TRACKS, {"track_id": db_id})
-        # delete entry(s) from trackartists table
-        await self.mass.music.database.delete(DB_TABLE_TRACK_ARTISTS, {"track_id": db_id})
-        await self.mass.music.database.delete(DB_TABLE_TRACK_CREDITS, {"track_id": db_id})
+        async with self.mass.music.classification.track_removal(db_id):
+            # remove the item before its relations so failed analysis cleanup leaves it intact
+            await super().remove_item_from_library(db_id)
+            # delete entry(s) from albumtracks table
+            await self.mass.music.database.delete(DB_TABLE_ALBUM_TRACKS, {"track_id": db_id})
+            # delete entry(s) from trackartists table
+            await self.mass.music.database.delete(DB_TABLE_TRACK_ARTISTS, {"track_id": db_id})
+            await self.mass.music.database.delete(DB_TABLE_TRACK_CREDITS, {"track_id": db_id})
 
     async def set_identifiers(
         self,
@@ -1601,6 +1602,7 @@ class TracksController(MediaControllerBase[Track]):
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
+                "classical_tag": item.classical_tag,
                 "work_id": await self.mass.music.works.get_library_work_id(item.work)
                 if item.work
                 else None,
@@ -1625,6 +1627,7 @@ class TracksController(MediaControllerBase[Track]):
                 disc_number=getattr(item, "disc_number", 0),
                 track_number=getattr(item, "track_number", 0),
             )
+        await self.mass.music.classification.update(track_ids=[db_id])
         self.logger.debug("added %s to database (id: %s)", item.name, db_id)
         return db_id
 
@@ -1642,6 +1645,12 @@ class TracksController(MediaControllerBase[Track]):
         metadata = update.metadata if overwrite else cur_item.metadata.update(update.metadata)
         metadata.lrc_lyrics = normalize_lrc_lyrics(
             metadata.lrc_lyrics or extract_lrc_lyrics(metadata.lyrics)
+        )
+        update_instances = {x.provider_instance for x in update.provider_mappings}
+        from_streaming = any(
+            (prov := self.mass.get_provider(x, True, provider_type=MusicProvider))
+            and prov.is_streaming_provider
+            for x in update_instances
         )
         cur_item.external_ids.update(update.external_ids)
         name = update.name if overwrite else cur_item.name
@@ -1667,6 +1676,11 @@ class TracksController(MediaControllerBase[Track]):
                 "timestamp_added": int(update.date_added.timestamp())
                 if update.date_added
                 else UNSET,
+                # a re-read file gives its tag as it is now, a streaming source never sets
+                # one so it keeps the stored tag
+                "classical_tag": update.classical_tag
+                if overwrite and not from_streaming
+                else cur_item.classical_tag or update.classical_tag,
                 "work_id": work_id,
                 "movement_number": preferred.movement_number or fallback.movement_number,
                 "movement_total": preferred.movement_total or fallback.movement_total,
@@ -1700,6 +1714,14 @@ class TracksController(MediaControllerBase[Track]):
                 track_number=update.track_number or cur_item.track_number,
                 overwrite=overwrite,
             )
+        # artists that lost their credit on an overwrite are recomputed as well
+        await self.mass.music.classification.update(
+            track_ids=[db_id],
+            artist_ids={
+                *(int(x.item_id) for x in cur_item.artists),
+                *(int(x.artist.item_id) for x in cur_item.credits),
+            },
+        )
         self.logger.debug("updated %s in database: (id %s)", update.name, db_id)
 
     async def _update_library_item_for_merge(self, item_id: int, update: Track) -> None:

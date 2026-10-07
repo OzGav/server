@@ -838,6 +838,7 @@ class AlbumsController(MediaControllerBase[Album]):
         await self.set_provider_mappings(db_id, item.provider_mappings)
         # set track artist(s)
         await self._set_album_artists(db_id, item.artists)
+        await self.mass.music.classification.update(album_ids=[db_id])
         self.logger.debug("added %s to database (id: %s)", item.name, db_id)
         return db_id
 
@@ -888,6 +889,7 @@ class AlbumsController(MediaControllerBase[Album]):
         # set album artist(s)
         artists = update.artists if overwrite else cur_item.artists + update.artists
         await self._set_album_artists(db_id, artists, overwrite=overwrite)
+        await self.mass.music.classification.update(album_ids=[db_id])
         self.logger.debug("updated %s in database: (id %s)", update.name, db_id)
 
     async def _get_provider_album_tracks(

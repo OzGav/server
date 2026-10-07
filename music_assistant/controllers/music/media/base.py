@@ -3458,6 +3458,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             )
             await self._drop_library_item_relations(source_id)
             await MediaControllerBase.remove_item_from_library(self, source_id, recursive=False)
+            await self.mass.music.classification.update_item(self.media_type, target_id)
             merged_item = await self.get_library_item(target_id)
         finally:
             SUPPRESS_MEDIA_ITEM_UPDATES.reset(token)
