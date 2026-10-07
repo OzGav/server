@@ -12,6 +12,8 @@ from music_assistant_models.errors import MusicAssistantError
 from music_assistant_models.helpers import create_safe_string
 
 from music_assistant.constants import (
+    DB_TABLE_ALBUMS,
+    DB_TABLE_ARTISTS,
     DB_TABLE_AUDIO_ANALYSIS,
     DB_TABLE_EXTERNAL_ID_LOOKUP,
     DB_TABLE_FAVORITES,
@@ -22,6 +24,11 @@ from music_assistant.constants import (
     DB_TABLE_PLAY_HISTORY,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_SETTINGS,
+    DB_TABLE_TRACK_CREDITS,
+    DB_TABLE_TRACKS,
+    DB_TABLE_WORK_ARRANGEMENTS,
+    DB_TABLE_WORK_ARTISTS,
+    DB_TABLE_WORKS,
     DEFAULT_GENRE_MAPPING,
 )
 from music_assistant.controllers.music import MusicController, migrations
@@ -1566,3 +1573,112 @@ async def test_migration_moves_apple_music_station_playlists_to_radios(
             ("radio", str(radio_id), "library", radio_image),
             ("radio", "ra.111", "apple_music--abc", radio_image),
         ]
+
+
+CLASSICAL_SCHEMA_TABLES = (
+    DB_TABLE_ALBUMS,
+    DB_TABLE_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
+    DB_TABLE_TRACKS,
+    DB_TABLE_WORK_ARRANGEMENTS,
+    DB_TABLE_WORK_ARTISTS,
+    DB_TABLE_WORKS,
+)
+
+
+async def _schema_snapshot(database: DatabaseConnection) -> dict[str, Any]:
+    """Return the columns and indexes of the tables the classical schema touches."""
+    snapshot: dict[str, Any] = {}
+    for table in CLASSICAL_SCHEMA_TABLES:
+        snapshot[table] = [
+            (row["name"], row["type"], row["notnull"], row["dflt_value"], row["pk"])
+            for row in await database.get_rows_from_query(f"PRAGMA table_info({table})", limit=0)
+        ]
+    snapshot["indexes"] = {
+        (row["tbl_name"], row["name"])
+        for row in await database.get_rows_from_query(
+            "SELECT tbl_name, name FROM sqlite_master WHERE type = 'index'", limit=0
+        )
+        if row["tbl_name"] in CLASSICAL_SCHEMA_TABLES
+    }
+    return snapshot
+
+
+async def test_classical_schema_upgrade_matches_a_fresh_install(
+    mass_minimal: MusicAssistant,
+) -> None:
+    """
+    An upgraded pre-72 database ends up with the same tables and indexes as a fresh install.
+
+    Running the classical schema step again changes nothing.
+    """
+    music = MusicController(mass_minimal)
+    mass_minimal.music = music
+    await music._setup_database()
+    fresh_schema = await _schema_snapshot(music.database)
+    # revert the database to its v71 state, without the works tables, the track credits and
+    # the classical columns
+    for table in (
+        DB_TABLE_TRACK_CREDITS,
+        DB_TABLE_WORK_ARTISTS,
+        DB_TABLE_WORK_ARRANGEMENTS,
+        DB_TABLE_WORKS,
+    ):
+        await music.database.execute(f"DROP TABLE {table}")
+    await music.database.execute(f"DROP INDEX {DB_TABLE_TRACKS}_work_id_idx")
+    for table, column in (
+        (DB_TABLE_ARTISTS, "period"),
+        (DB_TABLE_ARTISTS, "is_classical"),
+        (DB_TABLE_ALBUMS, "is_classical"),
+        (DB_TABLE_TRACKS, "work_id"),
+        (DB_TABLE_TRACKS, "movement_number"),
+        (DB_TABLE_TRACKS, "movement_total"),
+        (DB_TABLE_TRACKS, "movement_name"),
+        (DB_TABLE_TRACKS, "is_classical"),
+        (DB_TABLE_TRACKS, "classical_tag"),
+    ):
+        await music.database.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    await music.database.insert_or_replace(
+        DB_TABLE_SETTINGS, {"key": "version", "value": "71", "type": "str"}
+    )
+    await music.database.commit()
+    await music.database.close()
+
+    # setting up the database again triggers the migration
+    mass_minimal.cache.clear = AsyncMock()  # type: ignore[method-assign]
+    await music._setup_database()
+
+    try:
+        assert await _schema_snapshot(music.database) == fresh_schema
+        await migrate_database(
+            mass_minimal, music.database, MagicMock(), prev_version=71, create_tables=AsyncMock()
+        )
+        assert await _schema_snapshot(music.database) == fresh_schema
+    finally:
+        # an open connection keeps the test from finishing
+        await music.database.close()
+
+
+async def test_works_are_full_text_searchable(mass_minimal: MusicAssistant) -> None:
+    """A fresh install indexes works for full-text search like the other media items."""
+    music = MusicController(mass_minimal)
+    mass_minimal.music = music
+    await music._setup_database()
+    try:
+        await music.database.insert(
+            DB_TABLE_WORKS,
+            {
+                "name": "Symphony No. 5",
+                "sort_name": "symphony no. 5",
+                "metadata": "{}",
+                "search_name": "symphony no 5",
+                "search_sort_name": "symphony no 5",
+            },
+        )
+        rows = await music.database.get_rows_from_query(
+            f"SELECT rowid FROM {DB_TABLE_WORKS}_fts WHERE {DB_TABLE_WORKS}_fts MATCH 'phony'"
+        )
+        assert len(rows) == 1
+    finally:
+        # an open connection keeps the test from finishing
+        await music.database.close()
