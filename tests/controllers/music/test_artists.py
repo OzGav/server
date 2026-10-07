@@ -8,11 +8,18 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from music_assistant_models.enums import AlbumType, ExternalID, ImageType, ProviderFeature
+from music_assistant_models.enums import (
+    AlbumType,
+    ArtistRole,
+    ExternalID,
+    ImageType,
+    ProviderFeature,
+)
 from music_assistant_models.media_items import (
     Album,
     AlbumSummary,
     Artist,
+    Credit,
     ItemMapping,
     MediaItemImage,
     ProviderMapping,
@@ -413,6 +420,51 @@ async def test_appears_on_lists_albums_of_library_tracks(mass: MusicAssistant) -
     assert await mass.music.artists.appears_on(guest.item_id, "library", "tidal_1") == []
     # an album artist without any track credits appears on nothing
     assert await mass.music.artists.appears_on(host.item_id, "library") == []
+
+
+async def test_appears_on_lists_every_credit_of_a_classical_artist(mass: MusicAssistant) -> None:
+    """A classical artist appears on the albums crediting it in any role, others only as artist."""
+    composer = Artist(
+        item_id="composer",
+        provider="spotify_1",
+        name="Composer",
+        provider_mappings={
+            ProviderMapping(
+                item_id="composer", provider_domain="spotify", provider_instance="spotify_1"
+            )
+        },
+    )
+    songwriter = Artist(
+        item_id="songwriter",
+        provider="spotify_1",
+        name="Songwriter",
+        provider_mappings={
+            ProviderMapping(
+                item_id="songwriter", provider_domain="spotify", provider_instance="spotify_1"
+            )
+        },
+    )
+    symphony = create_album("spotify_1", "symphony", "Symphony", "Orchestra", "orchestra")
+    song = create_album("spotify_1", "song", "Song", "Singer", "singer")
+    classical_track = _track_on_album("track_symphony", "orchestra", "Orchestra", symphony)
+    classical_track.metadata.classical_tag = True
+    classical_track.credits = [Credit(artist=composer, role=ArtistRole.COMPOSER)]
+    pop_track = _track_on_album("track_song", "singer", "Singer", song)
+    pop_track.credits = [Credit(artist=songwriter, role=ArtistRole.COMPOSER)]
+    for track in (classical_track, pop_track):
+        await mass.music.tracks.add_item_to_library(track)
+    library_composer = await mass.music.artists.get_library_item_by_prov_id("composer", "spotify_1")
+    library_songwriter = await mass.music.artists.get_library_item_by_prov_id(
+        "songwriter", "spotify_1"
+    )
+    assert library_composer is not None
+    assert library_songwriter is not None
+
+    composer_albums = await mass.music.artists.appears_on(library_composer.item_id, "library")
+    songwriter_albums = await mass.music.artists.appears_on(library_songwriter.item_id, "library")
+
+    assert [album.name for album in composer_albums] == ["Symphony"]
+    assert songwriter_albums == []
 
 
 async def test_appears_on_provider_artist_is_empty(mass: MusicAssistant) -> None:

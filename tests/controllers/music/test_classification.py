@@ -16,6 +16,7 @@ from music_assistant_models.media_items import (
     ProviderMapping,
     Track,
     UniqueList,
+    Work,
 )
 from music_assistant_models.media_items.metadata import MediaItemMetadata
 
@@ -130,6 +131,18 @@ async def _add_track(
     artists = artists or [await _add_artist(mass)]
     return await mass.music.tracks.add_item_to_library(
         _track(artists, album, track_number, classical_tag, **kwargs)
+    )
+
+
+async def _add_work(mass: MusicAssistant) -> Work:
+    """Add a work to the library."""
+    return await mass.music.works.add_item_to_library(
+        Work(
+            item_id=uuid4().hex,
+            provider="works_source",
+            name=f"Work {_token()}",
+            provider_mappings=set(),
+        )
     )
 
 
@@ -466,3 +479,33 @@ class TestHasClassicalContent:
     ) -> MusicAssistant:
         """Return the class-scoped database-only Music Assistant fixture."""
         return _patch_mass(music_mass_class, monkeypatch)
+
+    async def test_has_classical_content(self, mass: MusicAssistant) -> None:
+        """The probe is false for a library without classical music, true with it."""
+        empty = await mass.music.has_classical_content()
+        for genre in ("Rock", "Pop"):
+            album = await _add_album(mass)
+            track = await _add_track(mass, album)
+            await mass.music.genres.sync_media_item_genres(MediaType.TRACK, track.item_id, {genre})
+        await mass.music.classification.update_all()
+        non_classical = await mass.music.has_classical_content()
+        flags = await mass.music.database.get_rows_from_query(
+            f"SELECT is_classical FROM {DB_TABLE_TRACKS} UNION ALL "
+            f"SELECT is_classical FROM {DB_TABLE_ALBUMS} UNION ALL "
+            f"SELECT is_classical FROM {DB_TABLE_ARTISTS}",
+            limit=0,
+        )
+        classical = await _add_track(mass, classical_tag=True)
+        with_track = await mass.music.has_classical_content()
+        await mass.music.tracks.remove_item_from_library(classical.item_id)
+        without_track = await mass.music.has_classical_content()
+        await _add_work(mass)
+        with_only_a_work = await mass.music.has_classical_content()
+
+        assert not empty
+        assert not non_classical
+        assert flags
+        assert not any(row["is_classical"] for row in flags)
+        assert with_track
+        assert not without_track
+        assert not with_only_a_work

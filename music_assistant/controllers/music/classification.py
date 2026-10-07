@@ -16,7 +16,7 @@ The flags are kept current as the library changes.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from music_assistant_models.enums import MediaType
 
@@ -86,6 +86,18 @@ class ClassicalClassifier:
     def __init__(self, mass: MusicAssistant) -> None:
         """Initialize the classifier."""
         self.mass = mass
+
+    async def has_classical_content(self) -> bool:
+        """Return True when the library holds any classical track the calling user sees."""
+        params: dict[str, Any] = {}
+        visible = self.mass.music.tracks.visible_library_clause(params)
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT EXISTS (SELECT 1 FROM {DB_TABLE_TRACKS} "
+            f"WHERE {DB_TABLE_TRACKS}.is_classical = 1 AND {visible}) AS has_content",
+            params,
+            limit=0,
+        )
+        return bool(rows[0]["has_content"])
 
     async def update(
         self,

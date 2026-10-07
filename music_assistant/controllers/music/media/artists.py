@@ -54,6 +54,7 @@ from music_assistant.constants import (
 )
 from music_assistant.controllers.music.constants import SIMILAR_ITEMS_LIMIT
 from music_assistant.controllers.music.helpers import (
+    CREDITED_TRACK_ARTISTS,
     metadata_for_update,
     provider_mappings_for_update,
 )
@@ -1420,6 +1421,9 @@ class ArtistsController(MediaControllerBase[Artist]):
         """
         Return the albums of an artist's library tracks on which it is not an album artist.
 
+        A classical artist appears on every album that credits it on a track, in any role,
+        such as the composer or conductor; other artists only where they are a track artist.
+
         :param item_id: The library item ID of the artist.
         :param provider_filter: Optional provider instance ID to limit the tracks to.
         """
@@ -2061,11 +2065,12 @@ class ArtistsController(MediaControllerBase[Artist]):
                 f"{DB_TABLE_PROVIDER_MAPPINGS}.provider_instance IN :provider_instances"
             )
             query_params["provider_instances"] = provider_instances
+        credited = CREDITED_TRACK_ARTISTS if library_item.is_classical else DB_TABLE_TRACK_ARTISTS
         track_albums = (
             f"SELECT {DB_TABLE_ALBUM_TRACKS}.album_id FROM {DB_TABLE_ALBUM_TRACKS} "
-            f"JOIN {DB_TABLE_TRACK_ARTISTS} "
-            f"ON {DB_TABLE_TRACK_ARTISTS}.track_id = {DB_TABLE_ALBUM_TRACKS}.track_id "
-            f"WHERE {DB_TABLE_TRACK_ARTISTS}.artist_id = :artist_id "
+            f"JOIN {credited} credited "
+            f"ON credited.track_id = {DB_TABLE_ALBUM_TRACKS}.track_id "
+            "WHERE credited.artist_id = :artist_id "
             f"AND EXISTS(SELECT 1 FROM {DB_TABLE_PROVIDER_MAPPINGS} "
             f"WHERE {' AND '.join(track_mapping_conditions)})"
         )
