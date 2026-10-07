@@ -175,32 +175,35 @@ def provider_mappings_for_update(
 
 
 def preferred_thumb(
-    images: Iterable[dict[str, Any]] | None, hidden_sources: AbstractSet[str]
+    images: Iterable[dict[str, Any]] | None,
+    hidden_sources: AbstractSet[str],
+    image_type: ImageType = ImageType.THUMB,
 ) -> dict[str, Any] | None:
     """
-    Return the thumb to show of a library item's stored (raw) images.
+    Return the thumb (or other image type) to show of a library item's stored (raw) images.
 
     A library item can carry the artwork of several music sources, not all of which the
-    viewer can be shown. The first thumb that can be shown is preferred, falling back to
-    the first thumb.
+    viewer can be shown. The first image that can be shown is preferred, falling back to
+    the first image of the type.
 
     :param images: The stored (raw) images of the item.
     :param hidden_sources: Music sources hidden from the viewer.
+    :param image_type: The type of image to pick.
     """
-    thumbs = [image for image in images or () if image["type"] == ImageType.THUMB.value]
+    candidates = [image for image in images or () if image["type"] == image_type.value]
     # same semantics as the MediaItem.available property: an empty cache means unknown
     available_providers: AbstractSet[str] = get_global_cache_value("available_providers") or set()
     return next(
         (
             image
-            for image in thumbs
+            for image in candidates
             if image.get("remotely_accessible")
             or (
                 image["provider"] not in hidden_sources
                 and (not available_providers or image["provider"] in available_providers)
             )
         ),
-        thumbs[0] if thumbs else None,
+        candidates[0] if candidates else None,
     )
 
 

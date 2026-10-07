@@ -204,3 +204,32 @@ def test_movement_tags_still_split_a_movement_title() -> None:
         )
     )
     assert work == TrackWork("Symphony No. 5", None, "I. Allegro con brio", 1)
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        (
+            "Symphony No. 5 in C minor, Op. 67: I. Allegro con brio",
+            TrackWork("Symphony No. 5 in C minor, Op. 67", None, "I. Allegro con brio", 1),
+        ),
+        ("Symphony No. 9: 4. Presto", TrackWork("Symphony No. 9", None, "4. Presto", 4)),
+        (
+            "Five Mystical Songs: No. 4. The Call",
+            TrackWork("Five Mystical Songs", None, "No. 4. The Call", 4),
+        ),
+        ("Adagio for Strings", None),
+        ("Messiah: Hallelujah", None),
+    ],
+)
+def test_without_a_work_tag_a_movement_title_names_the_work(
+    title: str, expected: TrackWork | None
+) -> None:
+    """Without a work tag a track titled as a numbered movement belongs to the parent work."""
+    assert parse_track_work(_tags(title=title, musicbrainzworkid=[WORK_ID])) == expected
+
+
+def test_work_tag_ignores_the_track_title() -> None:
+    """With a work tag the track title does not name the work."""
+    work = parse_track_work(_tags(title="Symphony No. 9: 4. Presto", work=["Symphony No. 5"]))
+    assert work == TrackWork("Symphony No. 5")

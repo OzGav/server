@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from music_assistant_models.enums import (
     ArtistRole,
@@ -48,6 +48,35 @@ FIRST_COMPOSER_SORT_NAME = f"""(SELECT artists.search_sort_name FROM {DB_TABLE_W
 
 # The json_object arguments of a slim work mapping, selected from the works table aliased as w.
 SUMMARY_WORK_FIELDS = "'item_id', w.item_id, 'name', w.name, 'sort_name', w.sort_name"
+
+
+# the sort fields a works listing renders itself
+WORK_SORT_FIELDS: Final[frozenset[SortField]] = frozenset(
+    {SortField.NAME, SortField.COMPOSER, SortField.YEAR}
+)
+
+
+def work_sort_sql(field: SortField, direction: SortDirection | None) -> str:
+    """
+    Return the ORDER BY clause for a works sort on the title, composer or year composed.
+
+    Works without a composer or year come last. Sorting by composer orders each composer's
+    works by catalog number, then title.
+
+    :param field: One of WORK_SORT_FIELDS.
+    :param direction: The sort direction, the works listing's default when None.
+    """
+    default = get_listing_default_direction(ListingType.LIBRARY_WORKS, field)
+    order = (direction or default).value.upper()
+    name_sort = f"{DB_TABLE_WORKS}.name_sort"
+    if field == SortField.COMPOSER:
+        return (
+            f"{FIRST_COMPOSER_SORT_NAME} {order} NULLS LAST, "
+            f"{DB_TABLE_WORKS}.catalog_sort ASC NULLS LAST, {name_sort} ASC"
+        )
+    if field == SortField.YEAR:
+        return f"{DB_TABLE_WORKS}.composition_year {order} NULLS LAST, {name_sort} ASC"
+    return f"{name_sort} {order}"
 
 
 class WorksController(MediaControllerBase[Work]):
@@ -366,19 +395,9 @@ class WorksController(MediaControllerBase[Work]):
             ORDER BY wa.rowid))"""
 
     def _get_sort_sql(self, field: SortField, direction: SortDirection | None) -> str:
-        """Return the ORDER BY clause for a works sort field, works without a value last."""
-        default = get_listing_default_direction(ListingType.LIBRARY_WORKS, field)
-        order = (direction or default).value.upper()
-        name_sort = f"{DB_TABLE_WORKS}.name_sort"
-        if field == SortField.NAME:
-            return f"{name_sort} {order}"
-        if field == SortField.COMPOSER:
-            return (
-                f"{FIRST_COMPOSER_SORT_NAME} {order} NULLS LAST, "
-                f"{DB_TABLE_WORKS}.catalog_sort ASC NULLS LAST, {name_sort} ASC"
-            )
-        if field == SortField.YEAR:
-            return f"{DB_TABLE_WORKS}.composition_year {order} NULLS LAST, {name_sort} ASC"
+        """Return the ORDER BY clause for a works sort field."""
+        if field in WORK_SORT_FIELDS:
+            return work_sort_sql(field, direction)
         return super()._get_sort_sql(field, direction)
 
     def _summary_base_columns(self) -> str:
