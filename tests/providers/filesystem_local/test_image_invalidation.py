@@ -47,3 +47,12 @@ async def test_new_file_does_not_invalidate() -> None:
     item = _file_item("Artist/Album/new-track.mp3")
     await provider._process_item_async(item, prev_checksum=None)
     invalidate_mock.assert_not_awaited()
+
+
+async def test_unchanged_file_read_again_does_not_invalidate() -> None:
+    """A file read again with the same checksum, as in a full re-read, keeps its artwork."""
+    provider, invalidate_mock = _create_provider()
+    item = _file_item("Artist/Album/track.mp3")
+    item.checksum = "12345"
+    await provider._process_item_async(item, prev_checksum="12345")
+    invalidate_mock.assert_not_awaited()

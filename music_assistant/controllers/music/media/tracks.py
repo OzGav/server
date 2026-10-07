@@ -1646,11 +1646,16 @@ class TracksController(MediaControllerBase[Track]):
         metadata.lrc_lyrics = normalize_lrc_lyrics(
             metadata.lrc_lyrics or extract_lrc_lyrics(metadata.lyrics)
         )
+        # an update from the only provider instance the track is known on (e.g. a renamed
+        # file) carries its complete credits, so they replace the stored ones
         update_instances = {x.provider_instance for x in update.provider_mappings}
         from_streaming = any(
             (prov := self.mass.get_provider(x, True, provider_type=MusicProvider))
             and prov.is_streaming_provider
             for x in update_instances
+        )
+        replace_credits = bool(update_instances) and all(
+            x.provider_instance in update_instances for x in cur_item.provider_mappings
         )
         cur_item.external_ids.update(update.external_ids)
         name = update.name if overwrite else cur_item.name
@@ -1703,7 +1708,11 @@ class TracksController(MediaControllerBase[Track]):
             db_id, artists, overwrite=overwrite, resolved_artists=resolved_artists
         )
         await self._set_credits(
-            db_id, update.credits, overwrite=overwrite, resolved_artists=resolved_artists
+            db_id,
+            update.credits,
+            overwrite=overwrite,
+            replace=replace_credits,
+            resolved_artists=resolved_artists,
         )
         # update/set track album
         if update.album and set_album:
@@ -1831,14 +1840,16 @@ class TracksController(MediaControllerBase[Track]):
         db_id: int,
         item_credits: Iterable[Credit],
         overwrite: bool = False,
+        replace: bool = False,
         resolved_artists: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """
-        Store the credits of a track other than its main artists, replaced on overwrite.
+        Store the credits of a track other than its main artists, replacing them on request.
 
         :param db_id: Library id of the track.
         :param item_credits: The track's credits; main artist credits are left out.
         :param overwrite: Replace the stored credits, as a refresh from the source does.
+        :param replace: Replace the stored credits, as an update from the only source does.
         :param resolved_artists: Library ids of the artists resolved so far, by provider and item id.
         """
         resolved = {} if resolved_artists is None else resolved_artists
@@ -1850,7 +1861,7 @@ class TracksController(MediaControllerBase[Track]):
         if not rows:
             # a source without credits keeps the stored ones, like an empty artists list does
             return
-        if overwrite:
+        if overwrite or replace:
             await self.mass.music.database.execute_write(
                 f"DELETE FROM {DB_TABLE_TRACK_CREDITS} WHERE track_id = :db_id",
                 {"db_id": db_id},
@@ -1876,9 +1887,11 @@ class TracksController(MediaControllerBase[Track]):
     async def _get_credit_artist_id(
         self, artist: Artist | ItemMapping, resolved_artists: dict[tuple[str, str], int]
     ) -> int:
-        """Return the library ID of a credited artist."""
+        """Return the library ID of a credited artist, merging library artists with its MBID."""
         key = (artist.provider, artist.item_id)
         artist_id = resolved_artists.get(key) or await self._get_library_artist_id(artist)
+        if mbid := artist.mbid:
+            artist_id = await self.mass.music.artists.merge_library_artists_by_mbid(artist_id, mbid)
         resolved_artists[key] = artist_id
         return artist_id
 
