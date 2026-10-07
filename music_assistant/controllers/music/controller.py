@@ -1100,7 +1100,7 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
 
     @api_command("music/has_classical_content", required_scope=Scope.LIBRARY_READ)
     async def has_classical_content(self) -> bool:
-        """Return True when the library holds any classical track or any work."""
+        """Return True when the library holds any classical track."""
         return await self.classification.has_classical_content()
 
     @api_command("music/in_progress_items", required_scope=Scope.LIBRARY_READ)
