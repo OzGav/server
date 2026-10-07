@@ -17,7 +17,7 @@ MA's current artist model is flat. A track has an `artists` list — period. The
 What classical listeners actually want, synthesised from the MA "Better Classical Music Support" Discord threads, Roon's classical forum discussions, and Apple Music Classical's design choices:
 
 1. **Browse by composer as the primary axis** — "show me all my Bach" is the single most-cited ask.
-2. **Work as a first-class browseable entity** — multiple recordings of the same composition grouped under one entry; movements playable as a unit, gapless.
+2. **Work as a first-class browsable entity** — multiple recordings of the same composition grouped under one entry; movements playable as a unit, gapless.
 3. **Distinct conductor / orchestra / soloist credits** — filterable to "all Karajan recordings", "all Berlin Philharmonic recordings", "all violin recordings" without fuzzy text matching.
 4. **Catalog numbers (BWV, K., Op., HWV) parsed and searchable** — often the canonical handle for a work.
 5. **Roll-up across granularity** — the same recording can appear on multiple albums; the same Work has multiple recordings; arrangements are distinct from sources. All needs to roll up cleanly into searchable / playable units.

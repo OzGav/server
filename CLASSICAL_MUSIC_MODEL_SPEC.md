@@ -18,7 +18,7 @@ Standard tags (the MusicBrainz Picard mapping) and MusicBrainz itself already mo
 Synthesised from the MA Discord "Better Classical Music Support" threads, Roon's classical forum discussions, and Apple Music Classical / IDAGIO design choices:
 
 1. **Browse by composer as the primary axis.** "Show me all my Bach" is the single most-cited ask.
-2. **Work as a first-class browseable entity.** Multiple recordings of the same composition grouped under one entry; movements playable as a unit, gapless.
+2. **Work as a first-class browsable entity.** Multiple recordings of the same composition grouped under one entry; movements playable as a unit, gapless.
 3. **Distinct conductor / orchestra / soloist credits.** Filterable to "all Karajan recordings", "all Berlin Philharmonic recordings", "all violin recordings" without fuzzy text matching.
 4. **Catalog numbers (BWV, K., Op., HWV) parsed and searchable.** Often the canonical handle for a work.
 5. **Roll-up across granularity.** The same recording / track / movement appears in many shapes: a single track, a movement of a full work on its source album, the same single track on a compilation, a transcription across instruments (Mussorgsky's *Pictures at an Exhibition* piano original ↔ Ravel's orchestration; Bach organ ↔ piano transcriptions). The data needs to detect each as distinct *and* roll it up to album / work / composer / performer where appropriate.
@@ -379,9 +379,9 @@ An album is classified as classical if a majority of its tracks satisfy any of t
    - Multi-value `GENRE` tag on tracks where this Artist has a `COMPOSER` credit.
    - `<genre>` elements in `artist.nfo` for this composer.
    - `<genre>` elements in `album.nfo` for albums where this composer has track credits.
-   
+
    If any period name appears in the combined genre set (case-insensitive match: `Baroque`, `Romantic`, `Medieval`, `Renaissance`, `Classical`, `Modern` / `20th Century`, `Contemporary` / `21st Century`), the corresponding `Period` value is stamped on the composer Artist. Source precedence within this tier when multiple sources name different periods: `artist.nfo` > `album.nfo` > track tags.
-   
+
    **Tag-as-override deliberate inversion.** This sits *above* MB enrichment, not below, because period for boundary composers is genuinely subjective (Beethoven could reasonably be Classical or Romantic depending on which works the user listens to most). Giving genre priority makes period **user-overridable today without waiting for a manual-override UI**. Inversion is limited to this one field; the MBID-canonical rule still applies everywhere else.
 
 2. **MusicBrainz enrichment (Stage 6) — secondary, automatic.** When the GENRE-tag path is silent and the Artist has an MBID with birth/death dates, the period is inferred from the composer's **floruit** (productive peak), approximated as the midpoint of `(birth_year + 25, death_year − 5)`:
