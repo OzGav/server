@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 from collections.abc import Callable, Iterable
 from contextlib import suppress
@@ -54,6 +55,63 @@ _ALBUM_DATE_TAGS = ("date", "originaldate", "tdor", "originalyear", "tory")
 # ffprobe surfaces these but keeps only the first value, so we read them with mutagen instead.
 _NARRATOR_TAGS = ("narrator", "narratedby")
 _WRITER_TAGS = ("writers", "writer")
+
+# Classical tag names (normalized) that every format can carry as a plain or user defined tag.
+# The Roon names (ensemble, soloist, personnel, part, section) and the Classical Extras names
+# (groupheading, topwork) are fallbacks the properties only read when the Picard tag is absent.
+_CLASSICAL_MULTI_TAGS = (
+    "composersort",
+    "musicbrainzcomposerid",
+    "conductor",
+    "performer",
+    "lyricist",
+    "arranger",
+    "work",
+    "musicbrainzworkid",
+    "ensemble",
+    "soloist",
+    "personnel",
+    "groupheading",
+    "topwork",
+)
+_CLASSICAL_SINGLE_TAGS = (
+    "movementname",
+    "movement",
+    "movementtotal",
+    "isclassical",
+    "part",
+    "section",
+)
+
+# Roles Picard stores in the ID3 involved people frame next to the performers of ID3v2.3 files
+_ID3_INVOLVED_PEOPLE_ROLES = ("arranger", "engineer", "producer", "DJ-mix", "mix")
+
+_ROMAN_NUMERALS = (
+    "I",
+    "II",
+    "III",
+    "IV",
+    "V",
+    "VI",
+    "VII",
+    "VIII",
+    "IX",
+    "X",
+    "XI",
+    "XII",
+    "XIII",
+    "XIV",
+    "XV",
+    "XVI",
+    "XVII",
+    "XVIII",
+    "XIX",
+    "XX",
+)
+# a movement name such as "II. Andante" or "3 - Scherzo" starts with its number
+_MOVEMENT_NUMBER_PREFIX = re.compile(r"^([IVX]+|\d+)[.:\-\s]", re.IGNORECASE)
+# a performer credit such as "Martha Argerich (piano)" ends with the instrument or role
+_PERFORMER_ROLE_SUFFIX = re.compile(r"^(.+?)\s*\(([^()]*)\)$")
 
 
 def clean_tuple(values: Iterable[str]) -> tuple[str, ...]:
@@ -560,6 +618,137 @@ class AudioTags:
         return split_items(self.tags.get("albumartistsort"), False)
 
     @property
+    def composers(self) -> tuple[str, ...]:
+        """Return composer(s) if present."""
+        return split_items(self.tags.get("composer"))
+
+    @property
+    def composer_sort_names(self) -> tuple[str, ...]:
+        """Return composer sort name tag(s) if present."""
+        return split_items(self.tags.get("composersort"))
+
+    @property
+    def musicbrainz_composerids(self) -> tuple[str, ...]:
+        """Return the valid musicbrainz_composerid tag(s) if present."""
+        return self._musicbrainz_ids("musicbrainzcomposerid")
+
+    @property
+    def conductors(self) -> tuple[str, ...]:
+        """Return conductor(s) if present."""
+        return split_items(self.tags.get("conductor"))
+
+    @property
+    def performers(self) -> tuple[tuple[str, str | None], ...]:
+        """
+        Return the performers as (name, instrument or role) pairs.
+
+        The instrument or role is the text as tagged, or None when the credit names none.
+        Falls back to Roon's PERSONNEL tag when the file has no performer tag.
+        """
+        if tag := self.tags.get("performer"):
+            return tuple(_parse_performer(value) for value in split_items(tag))
+        return tuple(_parse_roon_credit(value) for value in split_items(self.tags.get("personnel")))
+
+    @property
+    def soloists(self) -> tuple[tuple[str, str | None], ...]:
+        """
+        Return the soloists from Roon's SOLOIST tag as (name, instrument or None) pairs.
+
+        Empty when the file has a performer tag, which already credits the soloists.
+        """
+        if self.tags.get("performer"):
+            return ()
+        return tuple(_parse_roon_credit(value) for value in split_items(self.tags.get("soloist")))
+
+    @property
+    def ensembles(self) -> tuple[str, ...]:
+        """
+        Return the ensemble names from Roon's ENSEMBLE tag.
+
+        Empty when the file has a performer tag, which already credits the ensembles.
+        """
+        if self.tags.get("performer"):
+            return ()
+        return split_items(self.tags.get("ensemble"))
+
+    @property
+    def lyricists(self) -> tuple[str, ...]:
+        """Return lyricist(s) if present."""
+        return split_items(self.tags.get("lyricist"))
+
+    @property
+    def arrangers(self) -> tuple[str, ...]:
+        """Return arranger(s) if present."""
+        return split_items(self.tags.get("arranger"))
+
+    @property
+    def works(self) -> tuple[str, ...]:
+        """Return the work(s) the track belongs to, from the most general to the most specific."""
+        for key in ("work", "groupheading", "topwork"):
+            # Classical Extras appends "::" and the movement to the work, which we leave off
+            works = (value.split("::", 1)[0].strip() for value in split_items(self.tags.get(key)))
+            if result := tuple(work for work in works if work):
+                return result
+        return ()
+
+    @property
+    def work(self) -> str | None:
+        """Return the most specific work the track belongs to, if present."""
+        return works[-1] if (works := self.works) else None
+
+    @property
+    def musicbrainz_workids(self) -> tuple[str, ...]:
+        """Return the valid musicbrainz_workid tag(s), from the most general to the most specific."""
+        return self._musicbrainz_ids("musicbrainzworkid")
+
+    @property
+    def musicbrainz_workid(self) -> str | None:
+        """Return the musicbrainz_workid of the most specific work, if present."""
+        return work_ids[-1] if (work_ids := self.musicbrainz_workids) else None
+
+    @property
+    def movement_name(self) -> str | None:
+        """Return the name of the movement the track holds, if present."""
+        name = self.tags.get("movementname")
+        # Classical Extras writes the movement name in MOVEMENT, which Picard keeps for its number
+        if not name and (movement := self.tags.get("movement")):
+            name = None if _parse_movement_number(movement) else movement
+        if not (name := name or self.tags.get("part")):
+            return None
+        # Classical Extras prefixes the movement with its work and "::", which we leave off
+        return str(name).rsplit("::", 1)[-1].strip() or None
+
+    @property
+    def movement_number(self) -> int | None:
+        """Return the number of the movement within its work, if present or evident from its name."""
+        if (tag := self.tags.get("movement")) and (number := _parse_movement_number(tag)):
+            return number
+        if not (name := self.movement_name) or not (number := _movement_number_from_name(name)):
+            return None
+        if (total := self.movement_total) and number > total:
+            return None
+        return number
+
+    @property
+    def movement_total(self) -> int | None:
+        """Return the number of movements in the work, if present."""
+        if tag := self.tags.get("movementtotal"):
+            return _parse_movement_number(tag)
+        if (tag := self.tags.get("movement")) and "/" in str(tag):
+            return _parse_movement_number(str(tag).split("/", 1)[1])
+        return None
+
+    @property
+    def section(self) -> str | None:
+        """Return Roon's SECTION tag (as-is) if present."""
+        return self.tags.get("section")
+
+    @property
+    def is_classical(self) -> bool:
+        """Return whether the file is tagged as classical music."""
+        return str(self.tags.get("isclassical", "")).strip().lower() in ("1", "true", "yes")
+
+    @property
     def album_type(self) -> AlbumType:
         """Return albumtype tag if present."""
         if self.tags.get("compilation", "") == "1":
@@ -733,6 +922,13 @@ class AudioTags:
     def get(self, key: str, default: Any | None = None) -> Any:
         """Get tag by key."""
         return self.tags.get(key, default)
+
+    def _musicbrainz_ids(self, key: str) -> tuple[str, ...]:
+        """Return the valid MusicBrainz identifiers held by the given tag."""
+        mbids = (
+            clean_mbid(value, self.filename) for value in split_items(self.tags.get(key), True)
+        )
+        return tuple(mbid for mbid in mbids if mbid)
 
 
 async def async_parse_tags(
@@ -968,6 +1164,21 @@ def _store_series_tags(result: dict[str, Any], values_by_key: dict[str, list[str
             result[key] = values[0]
 
 
+def _store_classical_tags(result: dict[str, Any], values_by_key: dict[str, list[str]]) -> None:
+    """
+    Store the classical music tags that share their name across tag formats.
+
+    :param result: Dictionary to store parsed tags.
+    :param values_by_key: Tag values keyed by normalized tag name.
+    """
+    for key in _CLASSICAL_MULTI_TAGS:
+        if values := values_by_key.get(key):
+            result[key] = values
+    for key in _CLASSICAL_SINGLE_TAGS:
+        if values := values_by_key.get(key):
+            result[key] = values[0]
+
+
 def _first_present(
     get_values: Callable[[str], list[str] | None], keys: Iterable[str]
 ) -> list[str] | None:
@@ -1120,6 +1331,20 @@ def _parse_mp4_tags(tags: MP4Tags) -> dict[str, Any]:  # noqa: PLR0915
     )
     _store_series_tags(result, freeform)
 
+    # classical credits without an atom of their own are freeform tags as well
+    _store_classical_tags(result, freeform)
+    if "soco" in tags:
+        result["composersort"] = list(tags["soco"])
+    if "©wrk" in tags:
+        result["work"] = list(tags["©wrk"])
+    if "©mvn" in tags:
+        result["movementname"] = tags["©mvn"][0]
+    # the movement number and count atoms hold integers
+    if "©mvi" in tags:
+        result["movement"] = str(tags["©mvi"][0])
+    if "©mvc" in tags:
+        result["movementtotal"] = str(tags["©mvc"][0])
+
     return result
 
 
@@ -1134,6 +1359,30 @@ def _id3_get_tag_text(tags: ID3Tags, key: str) -> Any | None:
         return value.text
 
     return None
+
+
+def _id3_get_people(tags: ID3Tags) -> tuple[list[str], list[str]]:
+    """
+    Get the performer credits and the arrangers from the ID3 people list frames.
+
+    Performer credits take the form "Name (instrument or role)", as in Vorbis comments.
+
+    :param tags: ID3Tags from mutagen.
+    """
+    performers: list[str] = []
+    arrangers: list[str] = []
+    # mutagen reads the ID3v2.3 IPLS frame as TIPL, where Picard puts the performers as well
+    for frame_id in ("TMCL", "TIPL"):
+        for frame in tags.getall(frame_id):  # type: ignore[no-untyped-call]
+            for role, name in frame.people:
+                if frame_id == "TIPL" and role in _ID3_INVOLVED_PEOPLE_ROLES:
+                    if role == "arranger":
+                        arrangers.append(name)
+                elif role and role != "performer":
+                    performers.append(f"{name} ({role})")
+                else:
+                    performers.append(name)
+    return performers, arrangers
 
 
 def _parse_id3_tags(tags: ID3Tags) -> dict[str, Any]:  # noqa: PLR0915
@@ -1235,6 +1484,37 @@ def _parse_id3_tags(tags: ID3Tags) -> dict[str, Any]:  # noqa: PLR0915
         list(composer) if (composer := _id3_get_tag_text(tags, "TCOM")) else None,
     )
     _store_series_tags(result, user_frames)
+
+    _store_classical_tags(result, user_frames)
+    if composersort := _id3_get_tag_text(tags, "TSOC"):
+        result["composersort"] = list(composersort)
+    if conductor := _id3_get_tag_text(tags, "TPE3"):
+        result["conductor"] = list(conductor)
+    if lyricist := _id3_get_tag_text(tags, "TEXT"):
+        result["lyricist"] = list(lyricist)
+    if movementname := _id3_get_tag_text(tags, "MVNM"):
+        result["movementname"] = movementname[0]
+    if movement := _id3_get_tag_text(tags, "MVIN"):
+        result["movement"] = movement[0]
+    # ffprobe reports the conductor frame as performer, so this always replaces it
+    result["performer"], arrangers = _id3_get_people(tags)
+    if arrangers:
+        result["arranger"] = arrangers
+    # Picard writes the work to TIT1 in ID3v2.3 and in its iTunes compatible style, where the
+    # grouping moves to GRP1. A GRP1 frame or a MusicBrainz work id marks such a file, without
+    # either TIT1 stays the grouping.
+    grouping = _id3_get_tag_text(tags, "GRP1")
+    if grouping:
+        result["grouping"] = grouping[0]
+    if (
+        "work" not in result
+        and (grouping or "musicbrainzworkid" in result)
+        and (work := _id3_get_tag_text(tags, "TIT1"))
+    ):
+        result["work"] = list(work)
+        if not grouping:
+            # ffprobe reports TIT1 as the grouping
+            result["grouping"] = None
 
     return result
 
@@ -1380,18 +1660,19 @@ def _parse_vorbis_tags(tags: VCommentDict) -> dict[str, Any]:
     if albumsort := _vorbis_get_single(tags, "ALBUMSORT"):
         result["albumsort"] = albumsort
 
-    # Audiobook credits and series, under whatever casing/separator the tagger favours
-    audiobook_tags = _normalized_tag_values(
+    # Audiobook and classical credits, under whatever casing/separator the tagger favours
+    tag_values = _normalized_tag_values(
         tags.keys(),  # type: ignore[no-untyped-call]
         lambda key: _vorbis_get_multi(tags, key),
     )
     _store_audiobook_tags(
         result,
-        _first_present(audiobook_tags.get, _NARRATOR_TAGS),
-        _first_present(audiobook_tags.get, _WRITER_TAGS),
-        audiobook_tags.get("composer"),
+        _first_present(tag_values.get, _NARRATOR_TAGS),
+        _first_present(tag_values.get, _WRITER_TAGS),
+        tag_values.get("composer"),
     )
-    _store_series_tags(result, audiobook_tags)
+    _store_series_tags(result, tag_values)
+    _store_classical_tags(result, tag_values)
 
     return result
 
@@ -1534,18 +1815,19 @@ def _parse_apev2_tags(tags: APEv2) -> dict[str, Any]:  # noqa: PLR0915
     if albumsort := _apev2_get_single(tags, "ALBUMSORT"):
         result["albumsort"] = albumsort
 
-    # Audiobook credits and series, under whatever casing/separator the tagger favours
-    audiobook_tags = _normalized_tag_values(
+    # Audiobook and classical credits, under whatever casing/separator the tagger favours
+    tag_values = _normalized_tag_values(
         tags.keys(),  # type: ignore[no-untyped-call]
         lambda key: _apev2_get_multi(tags, key),
     )
     _store_audiobook_tags(
         result,
-        _first_present(audiobook_tags.get, _NARRATOR_TAGS),
-        _first_present(audiobook_tags.get, _WRITER_TAGS),
-        audiobook_tags.get("composer"),
+        _first_present(tag_values.get, _NARRATOR_TAGS),
+        _first_present(tag_values.get, _WRITER_TAGS),
+        tag_values.get("composer"),
     )
-    _store_series_tags(result, audiobook_tags)
+    _store_series_tags(result, tag_values)
+    _store_classical_tags(result, tag_values)
 
     return result
 
@@ -1990,3 +2272,34 @@ def _parse_release_date(value: str) -> datetime | None:
         with suppress(ValueError):
             return datetime(year, 1, 1, tzinfo=UTC)
     return None
+
+
+def _parse_movement_number(value: Any) -> int | None:
+    """Return the number of a movement tag such as "2" or "2/4", or None if it holds none."""
+    number = str(value).split("/", 1)[0].strip()
+    return int(number) if number.isdecimal() else None
+
+
+def _movement_number_from_name(name: str) -> int | None:
+    """Return the Roman or Arabic movement number a movement name starts with, if any."""
+    if not (match := _MOVEMENT_NUMBER_PREFIX.match(name)):
+        return None
+    numeral = match.group(1).upper()
+    if numeral.isdecimal():
+        return int(numeral)
+    return _ROMAN_NUMERALS.index(numeral) + 1 if numeral in _ROMAN_NUMERALS else None
+
+
+def _parse_roon_credit(credit: str) -> tuple[str, str | None]:
+    """Return a Roon credit such as "Wolfgang Schulz - Flute" as a (name, role) pair."""
+    name, separator, role = credit.rpartition(" - ")
+    if separator and name.strip() and role.strip():
+        return name.strip(), role.strip()
+    return _parse_performer(credit)
+
+
+def _parse_performer(credit: str) -> tuple[str, str | None]:
+    """Return a performer credit such as "Martha Argerich (piano)" as a (name, role) pair."""
+    if match := _PERFORMER_ROLE_SUFFIX.match(credit):
+        return match.group(1), match.group(2).strip() or None
+    return credit, None

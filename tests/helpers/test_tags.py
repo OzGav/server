@@ -4,6 +4,7 @@ import pathlib
 import shutil
 import subprocess
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
 
 import mutagen
@@ -11,7 +12,24 @@ import pytest
 from music_assistant_models.errors import InvalidDataError
 from mutagen.apev2 import APEv2
 from mutagen.flac import FLAC
-from mutagen.id3 import ID3, TCOM, TDOR, TDRC, TXXX, UFID
+from mutagen.id3 import (
+    GRP1,
+    ID3,
+    IPLS,
+    MVIN,
+    MVNM,
+    TCOM,
+    TDOR,
+    TDRC,
+    TEXT,
+    TIPL,
+    TIT1,
+    TMCL,
+    TPE3,
+    TSOC,
+    TXXX,
+    UFID,
+)
 from mutagen.mp4 import MP4, MP4FreeForm
 
 from music_assistant.constants import UNKNOWN_ARTIST
@@ -935,7 +953,7 @@ async def test_parse_ufid_frame_with_dirty_payload(tmp_path: pathlib.Path) -> No
     assert clean_mbid(_tags.musicbrainz_recordingid) == VALID_MBID
 
 
-def _tags_with(raw_tags: dict[str, str]) -> tags.AudioTags:
+def _tags_with(raw_tags: dict[str, Any]) -> tags.AudioTags:
     """Build an AudioTags instance carrying the given raw tags."""
     return tags.AudioTags(
         raw={},
@@ -1267,3 +1285,414 @@ async def test_audiobook_without_a_series_tag_has_none() -> None:
     _tags = await tags.async_parse_tags(FILE_M4A)
 
     assert (_tags.series, _tags.series_part) == (None, None)
+
+
+COMPOSER_MBID = "24f1766e-9635-4d58-a4d4-9413f9f98a4c"
+PARENT_WORK_MBID = "6bc0d3d3-f6e1-3f87-9a4e-2e7a8a4f45d2"
+WORK_MBID = "d6f6f1d4-3b70-4b0f-9d0a-7c8c1f2c4e11"
+
+
+async def test_classical_tags_are_read_from_an_id3v24_file(tmp_path: pathlib.Path) -> None:
+    """Picard's ID3v2.4 frames give every classical credit, the work and the movement."""
+    dest = tmp_path / "classical.mp3"
+    shutil.copy(FILE_MP3, dest)
+    id3 = ID3(str(dest))  # type: ignore[no-untyped-call]
+    id3.add(TCOM(encoding=3, text=["Ludwig van Beethoven", "Franz Liszt"]))  # type: ignore[no-untyped-call]
+    id3.add(TSOC(encoding=3, text=["Beethoven, Ludwig van", "Liszt, Franz"]))  # type: ignore[no-untyped-call]
+    id3.add(TXXX(encoding=3, desc="MusicBrainz Composer Id", text=[COMPOSER_MBID]))  # type: ignore[no-untyped-call]
+    id3.add(TPE3(encoding=3, text=["Carlos Kleiber", "Herbert von Karajan"]))  # type: ignore[no-untyped-call]
+    id3.add(
+        TMCL(  # type: ignore[no-untyped-call]
+            encoding=3,
+            people=[["piano", "Martha Argerich"], ["performer", "Wiener Philharmoniker"]],
+        )
+    )
+    id3.add(TIPL(encoding=3, people=[["arranger", "Franz Liszt"], ["producer", "Someone"]]))  # type: ignore[no-untyped-call]
+    id3.add(TEXT(encoding=3, text=["Friedrich Schiller"]))  # type: ignore[no-untyped-call]
+    id3.add(TXXX(encoding=3, desc="WORK", text=["Symphonies", "Symphony No. 5"]))  # type: ignore[no-untyped-call]
+    id3.add(
+        TXXX(  # type: ignore[no-untyped-call]
+            encoding=3, desc="MusicBrainz Work Id", text=[PARENT_WORK_MBID, WORK_MBID]
+        )
+    )
+    id3.add(MVNM(encoding=3, text=["Allegro con brio"]))  # type: ignore[no-untyped-call]
+    id3.add(MVIN(encoding=3, text=["1/4"]))  # type: ignore[no-untyped-call]
+    id3.add(TXXX(encoding=3, desc="is_classical", text=["1"]))  # type: ignore[no-untyped-call]
+    id3.save(v2_version=4)
+
+    _tags = await tags.async_parse_tags(str(dest))
+
+    assert _tags.composers == ("Ludwig van Beethoven", "Franz Liszt")
+    assert _tags.composer_sort_names == ("Beethoven, Ludwig van", "Liszt, Franz")
+    assert _tags.musicbrainz_composerids == (COMPOSER_MBID,)
+    assert _tags.conductors == ("Carlos Kleiber", "Herbert von Karajan")
+    assert _tags.performers == (("Martha Argerich", "piano"), ("Wiener Philharmoniker", None))
+    assert _tags.arrangers == ("Franz Liszt",)
+    assert _tags.lyricists == ("Friedrich Schiller",)
+    assert _tags.works == ("Symphonies", "Symphony No. 5")
+    assert _tags.work == "Symphony No. 5"
+    assert _tags.musicbrainz_workids == (PARENT_WORK_MBID, WORK_MBID)
+    assert _tags.musicbrainz_workid == WORK_MBID
+    assert (_tags.movement_name, _tags.movement_number, _tags.movement_total) == (
+        "Allegro con brio",
+        1,
+        4,
+    )
+    assert _tags.is_classical
+
+
+async def test_classical_tags_are_read_from_an_id3v23_file(tmp_path: pathlib.Path) -> None:
+    """ID3v2.3 keeps performers and arrangers in one people list and the composer sort in TXXX."""
+    dest = tmp_path / "classical.mp3"
+    shutil.copy(FILE_MP3, dest)
+    id3 = ID3(str(dest))  # type: ignore[no-untyped-call]
+    id3.add(TCOM(encoding=3, text=["Ludwig van Beethoven", "Franz Liszt"]))  # type: ignore[no-untyped-call]
+    id3.add(TXXX(encoding=3, desc="COMPOSERSORT", text=["Beethoven, Ludwig van"]))  # type: ignore[no-untyped-call]
+    id3.add(
+        IPLS(  # type: ignore[no-untyped-call]
+            encoding=3,
+            people=[["arranger", "Franz Liszt"], ["piano", "Glenn Gould"], ["engineer", "X"]],
+        )
+    )
+    id3.add(MVIN(encoding=3, text=["2/4"]))  # type: ignore[no-untyped-call]
+    id3.update_to_v23()  # type: ignore[no-untyped-call]
+    id3.save(v2_version=3, v23_sep="; ")
+
+    _tags = await tags.async_parse_tags(str(dest))
+
+    assert _tags.composers == ("Ludwig van Beethoven", "Franz Liszt")
+    assert _tags.composer_sort_names == ("Beethoven, Ludwig van",)
+    assert _tags.performers == (("Glenn Gould", "piano"),)
+    assert _tags.arrangers == ("Franz Liszt",)
+    assert (_tags.movement_number, _tags.movement_total) == (2, 4)
+
+
+async def test_conductor_is_not_read_as_performer_from_an_id3_file(tmp_path: pathlib.Path) -> None:
+    """The conductor frame, which ffprobe calls performer, never credits a performer."""
+    dest = tmp_path / "classical.mp3"
+    shutil.copy(FILE_MP3, dest)
+    id3 = ID3(str(dest))  # type: ignore[no-untyped-call]
+    id3.add(TPE3(encoding=3, text=["Carlos Kleiber"]))  # type: ignore[no-untyped-call]
+    id3.save(v2_version=4)
+
+    _tags = await tags.async_parse_tags(str(dest))
+
+    assert _tags.conductors == ("Carlos Kleiber",)
+    assert _tags.performers == ()
+
+
+@pytest.mark.parametrize(
+    ("frames", "expected_work", "expected_grouping"),
+    [
+        # TIT1 is the grouping, as it always was
+        ({"TIT1": "My Grouping"}, None, "My Grouping"),
+        # Picard's iTunes compatible style puts the work in TIT1 and the grouping in GRP1
+        ({"TIT1": "Symphony No. 5", "GRP1": "My Grouping"}, "Symphony No. 5", "My Grouping"),
+        # an explicit work tag wins over TIT1
+        ({"TIT1": "Symphony No. 5", "WORK": "The Work"}, "The Work", "Symphony No. 5"),
+        ({"TIT1": "Other", "GRP1": "My Grouping", "WORK": "The Work"}, "The Work", "My Grouping"),
+        # Picard's ID3v2.3 files carry the work in TIT1 next to its MusicBrainz work id
+        (
+            {"TIT1": "Orchestersuite Nr. 3 D-Dur, BWV 1068: II. Air", "WORKID": WORK_MBID},
+            "Orchestersuite Nr. 3 D-Dur, BWV 1068: II. Air",
+            None,
+        ),
+    ],
+)
+async def test_mp3_work_and_grouping(
+    tmp_path: pathlib.Path,
+    frames: dict[str, str],
+    expected_work: str | None,
+    expected_grouping: str | None,
+) -> None:
+    """The work comes from TXXX:WORK, else from TIT1 when GRP1 or a MusicBrainz work id marks it."""
+    dest = tmp_path / "classical.mp3"
+    shutil.copy(FILE_MP3, dest)
+    id3 = ID3(str(dest))  # type: ignore[no-untyped-call]
+    if "TIT1" in frames:
+        id3.add(TIT1(encoding=3, text=[frames["TIT1"]]))  # type: ignore[no-untyped-call]
+    if "GRP1" in frames:
+        id3.add(GRP1(encoding=3, text=[frames["GRP1"]]))  # type: ignore[no-untyped-call]
+    if "WORK" in frames:
+        id3.add(TXXX(encoding=3, desc="WORK", text=[frames["WORK"]]))  # type: ignore[no-untyped-call]
+    if "WORKID" in frames:
+        id3.add(TXXX(encoding=3, desc="MusicBrainz Work Id", text=[frames["WORKID"]]))  # type: ignore[no-untyped-call]
+    id3.save(v2_version=4)
+
+    _tags = await tags.async_parse_tags(str(dest))
+
+    assert _tags.work == expected_work
+    assert _tags.get("grouping") == expected_grouping
+
+
+async def test_classical_tags_are_read_from_a_flac_file(tmp_path: pathlib.Path) -> None:
+    """Vorbis comments repeat a field per value and name the instrument in parentheses."""
+    dest = tmp_path / "classical.flac"
+    shutil.copy(FILE_FLAC, dest)
+    flac = FLAC(str(dest))  # type: ignore[no-untyped-call]
+    flac["COMPOSER"] = ["Ludwig van Beethoven", "Franz Liszt"]
+    flac["COMPOSERSORT"] = ["Beethoven, Ludwig van", "Liszt, Franz"]
+    flac["MUSICBRAINZ_COMPOSERID"] = [COMPOSER_MBID]
+    flac["CONDUCTOR"] = ["Carlos Kleiber"]
+    flac["PERFORMER"] = ["Martha Argerich (piano)", "Wiener Philharmoniker", "AC/DC (guest band)"]
+    flac["LYRICIST"] = ["Friedrich Schiller"]
+    flac["ARRANGER"] = ["Franz Liszt; Ferruccio Busoni"]
+    flac["WORK"] = ["Symphonies", "Symphony No. 5"]
+    flac["MUSICBRAINZ_WORKID"] = [PARENT_WORK_MBID, WORK_MBID]
+    flac["MOVEMENTNAME"] = ["Andante con moto"]
+    flac["MOVEMENT"] = ["2"]
+    flac["MOVEMENTTOTAL"] = ["4"]
+    flac["IS_CLASSICAL"] = ["Yes"]
+    flac.save()
+
+    _tags = await tags.async_parse_tags(str(dest))
+
+    assert _tags.composers == ("Ludwig van Beethoven", "Franz Liszt")
+    assert _tags.composer_sort_names == ("Beethoven, Ludwig van", "Liszt, Franz")
+    assert _tags.musicbrainz_composerids == (COMPOSER_MBID,)
+    assert _tags.conductors == ("Carlos Kleiber",)
+    assert _tags.performers == (
+        ("Martha Argerich", "piano"),
+        ("Wiener Philharmoniker", None),
+        ("AC/DC", "guest band"),
+    )
+    assert _tags.lyricists == ("Friedrich Schiller",)
+    assert _tags.arrangers == ("Franz Liszt", "Ferruccio Busoni")
+    assert _tags.works == ("Symphonies", "Symphony No. 5")
+    assert _tags.work == "Symphony No. 5"
+    assert _tags.musicbrainz_workids == (PARENT_WORK_MBID, WORK_MBID)
+    assert _tags.musicbrainz_workid == WORK_MBID
+    assert (_tags.movement_name, _tags.movement_number, _tags.movement_total) == (
+        "Andante con moto",
+        2,
+        4,
+    )
+    assert _tags.is_classical
+
+
+def test_classical_tags_are_read_from_a_wavpack_file(tmp_path: pathlib.Path) -> None:
+    """
+    APEv2 uses Picard's mixed case keys and separates values with a null byte.
+
+    Uses parse_tags_mutagen directly since the minimal WavPack fixture
+    does not contain valid audio data for ffprobe to parse.
+    """
+    dest = tmp_path / "classical.wv"
+    shutil.copy(FILE_WV, dest)
+    ape = APEv2(str(dest))  # type: ignore[no-untyped-call]
+    ape["Composer"] = ["Ludwig van Beethoven", "Franz Liszt"]
+    ape["Composersort"] = "Beethoven, Ludwig van"
+    ape["Musicbrainz_Composerid"] = COMPOSER_MBID
+    ape["Conductor"] = "Carlos Kleiber"
+    ape["Performer"] = ["Martha Argerich (piano)", "Wiener Philharmoniker"]
+    ape["Lyricist"] = "Friedrich Schiller"
+    ape["Arranger"] = "Franz Liszt"
+    ape["Work"] = ["Symphonies", "Symphony No. 5"]
+    ape["Musicbrainz_Workid"] = [PARENT_WORK_MBID, WORK_MBID]
+    ape["MOVEMENTNAME"] = "Scherzo"
+    ape["MOVEMENT"] = "3"
+    ape["MOVEMENTTOTAL"] = "4"
+    ape["Is_Classical"] = "true"
+    ape.save(str(dest))
+
+    _tags = _tags_with(parse_tags_mutagen(str(dest)))
+
+    assert _tags.composers == ("Ludwig van Beethoven", "Franz Liszt")
+    assert _tags.composer_sort_names == ("Beethoven, Ludwig van",)
+    assert _tags.musicbrainz_composerids == (COMPOSER_MBID,)
+    assert _tags.conductors == ("Carlos Kleiber",)
+    assert _tags.performers == (("Martha Argerich", "piano"), ("Wiener Philharmoniker", None))
+    assert _tags.lyricists == ("Friedrich Schiller",)
+    assert _tags.arrangers == ("Franz Liszt",)
+    assert _tags.work == "Symphony No. 5"
+    assert _tags.musicbrainz_workids == (PARENT_WORK_MBID, WORK_MBID)
+    assert (_tags.movement_name, _tags.movement_number, _tags.movement_total) == ("Scherzo", 3, 4)
+    assert _tags.is_classical
+
+
+async def test_classical_tags_are_read_from_an_m4a_file(tmp_path: pathlib.Path) -> None:
+    """MP4 has atoms for the composer, work and movement and freeform tags for the rest."""
+    dest = tmp_path / "classical.m4a"
+    shutil.copy(FILE_M4A, dest)
+    mp4 = MP4(str(dest))  # type: ignore[no-untyped-call]
+    mp4["\xa9wrt"] = ["Ludwig van Beethoven", "Franz Liszt"]
+    mp4["soco"] = ["Beethoven, Ludwig van", "Liszt, Franz"]
+    mp4["----:com.apple.iTunes:MusicBrainz Composer Id"] = [
+        MP4FreeForm(COMPOSER_MBID.encode())  # type: ignore[no-untyped-call]
+    ]
+    mp4["----:com.apple.iTunes:CONDUCTOR"] = [MP4FreeForm(b"Carlos Kleiber")]  # type: ignore[no-untyped-call]
+    mp4["----:com.apple.iTunes:LYRICIST"] = [MP4FreeForm(b"Friedrich Schiller")]  # type: ignore[no-untyped-call]
+    mp4["\xa9wrk"] = ["Symphony No. 5"]
+    mp4["----:com.apple.iTunes:MusicBrainz Work Id"] = [
+        MP4FreeForm(PARENT_WORK_MBID.encode()),  # type: ignore[no-untyped-call]
+        MP4FreeForm(WORK_MBID.encode()),  # type: ignore[no-untyped-call]
+    ]
+    mp4["\xa9mvn"] = ["Allegro"]
+    mp4["\xa9mvi"] = [4]
+    mp4["\xa9mvc"] = [4]
+    mp4["----:com.apple.iTunes:IS_CLASSICAL"] = [MP4FreeForm(b"1")]  # type: ignore[no-untyped-call]
+    mp4.save()  # type: ignore[no-untyped-call]
+
+    _tags = await tags.async_parse_tags(str(dest))
+
+    assert _tags.composers == ("Ludwig van Beethoven", "Franz Liszt")
+    assert _tags.composer_sort_names == ("Beethoven, Ludwig van", "Liszt, Franz")
+    assert _tags.musicbrainz_composerids == (COMPOSER_MBID,)
+    assert _tags.conductors == ("Carlos Kleiber",)
+    assert _tags.lyricists == ("Friedrich Schiller",)
+    assert _tags.work == "Symphony No. 5"
+    assert _tags.musicbrainz_workids == (PARENT_WORK_MBID, WORK_MBID)
+    assert _tags.musicbrainz_workid == WORK_MBID
+    assert (_tags.movement_name, _tags.movement_number, _tags.movement_total) == ("Allegro", 4, 4)
+    assert _tags.is_classical
+
+
+async def test_classical_tags_leave_artists_and_narrators_unchanged(tmp_path: pathlib.Path) -> None:
+    """The composer stays the audiobook narrator fallback and the artists are untouched."""
+    dest = tmp_path / "classical.mp3"
+    shutil.copy(FILE_MP3, dest)
+    id3 = ID3(str(dest))  # type: ignore[no-untyped-call]
+    id3.add(TCOM(encoding=3, text=["Ludwig van Beethoven"]))  # type: ignore[no-untyped-call]
+    id3.add(TPE3(encoding=3, text=["Carlos Kleiber"]))  # type: ignore[no-untyped-call]
+    id3.add(TMCL(encoding=3, people=[["piano", "Martha Argerich"]]))  # type: ignore[no-untyped-call]
+    id3.save(v2_version=4)
+
+    _tags = await tags.async_parse_tags(str(dest))
+    _untouched = await tags.async_parse_tags(FILE_MP3)
+
+    assert _tags.artists == _untouched.artists
+    assert _tags.narrators == ("Ludwig van Beethoven",)
+
+
+@pytest.mark.parametrize(
+    ("raw_tags", "expected"),
+    [
+        # the movement tag holds the number, alone or with the total
+        ({"movement": "3", "movementname": "IV. Finale"}, (3, None)),
+        ({"movement": "2/4"}, (2, 4)),
+        ({"movement": "2", "movementtotal": "4"}, (2, 4)),
+        # without a number tag, a leading Roman or Arabic numeral gives it away
+        ({"movementname": "II. Andante"}, (2, None)),
+        ({"movementname": "iv: Finale", "movementtotal": "4"}, (4, 4)),
+        ({"movementname": "XIV - Fugue"}, (14, None)),
+        ({"movementname": "XX Finale"}, (20, None)),
+        ({"movementname": "3. Scherzo"}, (3, None)),
+        ({"movementname": "12 Allegro"}, (12, None)),
+        # an inferred number beyond the known total is not the movement number
+        ({"movementname": "V. Finale", "movementtotal": "4"}, (None, 4)),
+        # words that merely start with a numeral letter, and numerals beyond XX, are no number
+        ({"movementname": "Vivace"}, (None, None)),
+        ({"movementname": "XXI. Finale"}, (None, None)),
+        ({"movementname": "Andante"}, (None, None)),
+        ({}, (None, None)),
+    ],
+)
+def test_movement_number(raw_tags: dict[str, str], expected: tuple[int | None, int | None]) -> None:
+    """The movement number comes from its tag, or from the movement name as a last resort."""
+    audio_tags = _tags_with(raw_tags)
+    assert (audio_tags.movement_number, audio_tags.movement_total) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw_tags", "expected_name", "expected_number"),
+    [
+        # Classical Extras writes the movement name where Picard keeps its number
+        ({"movement": "II. Andante"}, "II. Andante", 2),
+        # Roon names the movement in PART
+        ({"part": "3. Scherzo"}, "3. Scherzo", 3),
+        ({"movementname": "Allegro", "part": "Other"}, "Allegro", None),
+        # the work in front of a Classical Extras hierarchy separator is left off
+        ({"movementname": "Symphony No. 5:: I. Allegro con brio"}, "I. Allegro con brio", 1),
+    ],
+)
+def test_movement_name_fallbacks(
+    raw_tags: dict[str, str], expected_name: str, expected_number: int | None
+) -> None:
+    """The movement name falls back to the Classical Extras and Roon tags."""
+    audio_tags = _tags_with(raw_tags)
+    assert (audio_tags.movement_name, audio_tags.movement_number) == (
+        expected_name,
+        expected_number,
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_tags", "expected"),
+    [
+        ({"work": "Symphony No. 5", "groupheading": "Other"}, ("Symphony No. 5",)),
+        # Classical Extras names the work in groupheading or top_work
+        ({"groupheading": "Symphony No. 5::", "topwork": "Other"}, ("Symphony No. 5",)),
+        ({"topwork": "Der Ring des Nibelungen"}, ("Der Ring des Nibelungen",)),
+        ({"work": "Symphony No. 5:: I. Allegro"}, ("Symphony No. 5",)),
+        ({"work": "Symphonies; Symphony No. 5"}, ("Symphonies", "Symphony No. 5")),
+        ({}, ()),
+    ],
+)
+def test_works(raw_tags: dict[str, str], expected: tuple[str, ...]) -> None:
+    """The work falls back to the Classical Extras tags and drops their hierarchy separator."""
+    assert _tags_with(raw_tags).works == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("1", True), ("True", True), ("YES", True), ("0", False), ("no", False), ("", False)],
+)
+def test_is_classical(value: str, expected: bool) -> None:
+    """Only a true value marks the file as classical."""
+    assert _tags_with({"isclassical": value}).is_classical is expected
+
+
+def test_is_classical_without_the_tag() -> None:
+    """A file without the tag is not marked as classical."""
+    assert not _tags_with({}).is_classical
+
+
+def test_roon_credits_are_read_without_a_performer_tag() -> None:
+    """Roon's personnel, soloist and ensemble tags, written as "Name - Role", fill in for a missing performer tag."""
+    audio_tags = _tags_with(
+        {
+            "personnel": "Martha Argerich - Piano; Gidon Kremer (violin); Andreas Spreer",
+            "soloist": "Martha Argerich - Piano",
+            "ensemble": "Wiener Philharmoniker",
+            "section": "Act I",
+        }
+    )
+
+    assert audio_tags.performers == (
+        ("Martha Argerich", "Piano"),
+        ("Gidon Kremer", "violin"),
+        ("Andreas Spreer", None),
+    )
+    assert audio_tags.soloists == (("Martha Argerich", "Piano"),)
+    assert audio_tags.ensembles == ("Wiener Philharmoniker",)
+    assert audio_tags.section == "Act I"
+
+
+def test_roon_credits_are_ignored_with_a_performer_tag() -> None:
+    """Picard's performer tag already credits everyone Roon's tags would."""
+    audio_tags = _tags_with(
+        {
+            "performer": "Gidon Kremer (violin)",
+            "personnel": "Martha Argerich - Piano",
+            "soloist": "Martha Argerich - Piano",
+            "ensemble": "Wiener Philharmoniker",
+        }
+    )
+
+    assert audio_tags.performers == (("Gidon Kremer", "violin"),)
+    assert audio_tags.soloists == ()
+    assert audio_tags.ensembles == ()
+
+
+def test_work_and_composer_mbids() -> None:
+    """Invalid identifiers are dropped and ID3v2.3's slash joined identifiers are split."""
+    audio_tags = _tags_with(
+        {
+            "musicbrainzworkid": ["not-an-id", f"{PARENT_WORK_MBID}/{WORK_MBID}"],
+            "musicbrainzcomposerid": "not-an-id",
+        }
+    )
+
+    assert audio_tags.musicbrainz_workids == (PARENT_WORK_MBID, WORK_MBID)
+    assert audio_tags.musicbrainz_workid == WORK_MBID
+    assert audio_tags.musicbrainz_composerids == ()
