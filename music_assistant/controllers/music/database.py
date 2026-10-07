@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from music_assistant_models.enums import MediaType
 
     from music_assistant import MusicAssistant
+    from music_assistant.controllers.music.classification import ClassicalClassifier
     from music_assistant.controllers.music.media.albums import AlbumsController
     from music_assistant.controllers.music.media.artists import ArtistsController
     from music_assistant.controllers.music.media.audiobooks import AudiobooksController
@@ -88,7 +89,7 @@ class MusicDatabaseSetupMixin:
     - logger: logging.Logger instance
     - database: the active DatabaseConnection
     - the per-media-type controllers (albums, artists, tracks, playlists, radio,
-      podcasts, audiobooks, genres, works)
+      podcasts, audiobooks, genres, works) and the classical classifier
     - close() and start_sync() methods
     """
 
@@ -106,6 +107,7 @@ class MusicDatabaseSetupMixin:
         audiobooks: AudiobooksController
         genres: GenreController
         works: WorksController
+        classification: ClassicalClassifier
 
         @property
         def database(self) -> DatabaseConnection: ...  # noqa: D102
@@ -211,6 +213,8 @@ class MusicDatabaseSetupMixin:
         while db_rows := await self.database.get_rows_from_query(orphaned_works_query, limit=5000):
             for db_row in db_rows:
                 await self.works.remove_item_from_library(db_row["item_id"])
+        update_current_task_progress_text("Updating classical classification")
+        await self.classification.update_all()
         update_current_task_progress_text("Database cleanup finished")
         self.logger.debug("Database cleanup done")
 
