@@ -153,11 +153,17 @@ def test_every_legacy_key_maps_to_a_defined_field() -> None:
         assert key.endswith("_desc") == (direction == SortDirection.DESC), key
 
 
+# the classical sort fields came after the legacy keys and have none
+TYPED_ONLY_FIELDS = {SortField.COMPOSER, SortField.RECORDING_COUNT, SortField.WORK_COUNT}
+
+
 def test_legacy_keys_cover_every_offered_field(mass: MusicAssistant) -> None:
     """Every field a media type offers is reachable through its legacy key, in both directions."""
     for media_type, fields in MEDIA_TYPE_SORT_FIELDS.items():
         controller = mass.music.get_controller(media_type)
         for field in fields:
+            if field in TYPED_ONLY_FIELDS:
+                continue
             key = (
                 LEGACY_ARTIST_NAME_KEYS[media_type]
                 if field == SortField.ARTIST_NAME
@@ -184,12 +190,13 @@ def test_get_default_direction_falls_back_to_asc_for_random_fields() -> None:
 
 
 def test_sort_options_command_serves_every_library_listing(mass: MusicAssistant) -> None:
-    """Every library listing has its row, the default SORT_NAME first, matching its media type."""
+    """Every library listing has its row, matching its media type, SORT_NAME first but for works."""
     for media_type, listing in LIBRARY_LISTINGS.items():
         options = mass.music.sort_options(listing)
         assert options == list(LISTING_SORT_OPTIONS[listing])
         assert all(isinstance(option, SortOptionInfo) for option in options)
-        assert options[0].field == SortField.SORT_NAME
+        if media_type != MediaType.WORK:
+            assert options[0].field == SortField.SORT_NAME
         assert [option.field for option in options] == list(MEDIA_TYPE_SORT_FIELDS[media_type])
 
 
@@ -241,7 +248,8 @@ def test_library_sort_options_hold_the_listing_specific_fields() -> None:
     assert SortField.DURATION in fields[ListingType.LIBRARY_AUDIOBOOKS]
     own_fields = {SortField.YEAR, SortField.ARTIST_NAME, SortField.DURATION}
     assert own_fields.isdisjoint(fields[ListingType.LIBRARY_ARTISTS])
-    for listing in LIBRARY_LISTINGS.values():
+    # works are not played themselves and offer no shared library fields
+    for listing in set(LIBRARY_LISTINGS.values()) - {ListingType.LIBRARY_WORKS}:
         options = LISTING_SORT_OPTIONS[listing]
         random_options = options[-2:]
         assert [o.field for o in random_options] == [SortField.RANDOM, SortField.RANDOM_PLAY_COUNT]
