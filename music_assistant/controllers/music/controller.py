@@ -69,6 +69,7 @@ from music_assistant.constants import (
     DB_TABLE_TRACKS,
     PROVIDERS_WITH_SHAREABLE_URLS,
 )
+from music_assistant.controllers.music.classification import ClassicalClassifier
 from music_assistant.controllers.music.constants import (
     CACHE_CATEGORY_SEARCH_RESULTS,
     CONF_DELETED_PROVIDERS,
@@ -318,6 +319,7 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         self.recommendations = RecommendationsController(self.mass)
         self.recency = RecencyEngine(self.mass)
         self.favorites = FavoritesStore(self.mass)
+        self.classification = ClassicalClassifier(self.mass)
         self._database: DatabaseConnection | None = None
         self._sync_lock = asyncio.Lock()
         self.manifest.name = "Music controller"
@@ -1095,6 +1097,11 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         return await self.tracks.library_items(
             limit=limit, order_by="timestamp_added_desc", summary=False
         )
+
+    @api_command("music/has_classical_content", required_scope=Scope.LIBRARY_READ)
+    async def has_classical_content(self) -> bool:
+        """Return True when the library holds any classical track or any work."""
+        return await self.classification.has_classical_content()
 
     @api_command("music/in_progress_items", required_scope=Scope.LIBRARY_READ)
     async def in_progress_items(

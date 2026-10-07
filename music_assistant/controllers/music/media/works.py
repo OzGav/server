@@ -121,10 +121,18 @@ class WorksController(MediaControllerBase[Work]):
         """
         db_id = int(item_id)  # ensure integer
         await super().remove_item_from_library(db_id)
+        track_rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT item_id FROM {DB_TABLE_TRACKS} WHERE work_id = :db_id",
+            {"db_id": db_id},
+            limit=0,
+        )
         # the movement fields stay on the tracks as they describe the recording
         await self.mass.music.database.execute_write(
             f"UPDATE {DB_TABLE_TRACKS} SET work_id = NULL WHERE work_id = :db_id",
             {"db_id": db_id},
+        )
+        await self.mass.music.classification.update(
+            track_ids=[row["item_id"] for row in track_rows]
         )
         await self.mass.music.database.execute_write(
             f"UPDATE {DB_TABLE_WORKS} SET parent_work_id = NULL WHERE parent_work_id = :db_id",

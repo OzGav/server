@@ -1293,7 +1293,6 @@ class ArtistsController(MediaControllerBase[Artist]):
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
                 "artist_type": item.artist_type,
                 "period": item.period,
-                "is_classical": item.is_classical,
             },
         )
         # update/set external id lookup table
@@ -1328,9 +1327,6 @@ class ArtistsController(MediaControllerBase[Artist]):
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
         period = update.period if overwrite else cur_item.period or update.period
-        is_classical = (
-            update.is_classical if overwrite else cur_item.is_classical or update.is_classical
-        )
         await self.mass.music.database.update(
             self.db_table,
             {"item_id": db_id},
@@ -1345,7 +1341,6 @@ class ArtistsController(MediaControllerBase[Artist]):
                 else UNSET,
                 "artist_type": update.artist_type,
                 "period": period,
-                "is_classical": is_classical,
             },
         )
         self.logger.debug("updated %s in database: %s", update.name, db_id)

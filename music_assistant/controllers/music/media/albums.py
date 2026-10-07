@@ -808,7 +808,7 @@ class AlbumsController(MediaControllerBase[Album]):
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
-                "is_classical": item.is_classical,
+                "classical_tag": item.classical_tag,
             },
         )
         # update/set external id lookup table
@@ -818,6 +818,7 @@ class AlbumsController(MediaControllerBase[Album]):
         # set album artist(s) and credits
         await self._set_album_artists(db_id, item.artists)
         await self._set_credits(db_id, item.credits)
+        await self.mass.music.classification.update(album_ids=[db_id])
         self.logger.debug("added %s to database (id: %s)", item.name, db_id)
         return db_id
 
@@ -835,9 +836,6 @@ class AlbumsController(MediaControllerBase[Album]):
         cur_item.external_ids.update(update.external_ids)
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
-        is_classical = (
-            update.is_classical if overwrite else cur_item.is_classical or update.is_classical
-        )
         await self.mass.music.database.update(
             self.db_table,
             {"item_id": db_id},
@@ -857,7 +855,8 @@ class AlbumsController(MediaControllerBase[Album]):
                 "timestamp_added": int(update.date_added.timestamp())
                 if update.date_added
                 else UNSET,
-                "is_classical": is_classical,
+                # only positive classical tags exist, so a source without one keeps it
+                "classical_tag": cur_item.classical_tag or update.classical_tag,
             },
         )
         # update/set external id lookup table
@@ -873,6 +872,7 @@ class AlbumsController(MediaControllerBase[Album]):
         artists = update.artists if overwrite else cur_item.artists + update.artists
         await self._set_album_artists(db_id, artists, overwrite=overwrite)
         await self._set_credits(db_id, update.credits, overwrite=overwrite)
+        await self.mass.music.classification.update(album_ids=[db_id])
         self.logger.debug("updated %s in database: (id %s)", update.name, db_id)
 
     async def _get_provider_album_tracks(

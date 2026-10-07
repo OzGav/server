@@ -604,12 +604,13 @@ class TracksController(MediaControllerBase[Track]):
     async def remove_item_from_library(self, item_id: str | int, recursive: bool = True) -> None:
         """Delete record from the database."""
         db_id = int(item_id)  # ensure integer
-        # remove the item before its relations so failed analysis cleanup leaves it intact
-        await super().remove_item_from_library(db_id)
-        # delete entry(s) from albumtracks table
-        await self.mass.music.database.delete(DB_TABLE_ALBUM_TRACKS, {"track_id": db_id})
-        # delete entry(s) from trackartists table
-        await self.mass.music.database.delete(DB_TABLE_TRACK_ARTISTS, {"track_id": db_id})
+        async with self.mass.music.classification.track_removal(db_id):
+            # remove the item before its relations so failed analysis cleanup leaves it intact
+            await super().remove_item_from_library(db_id)
+            # delete entry(s) from albumtracks table
+            await self.mass.music.database.delete(DB_TABLE_ALBUM_TRACKS, {"track_id": db_id})
+            # delete entry(s) from trackartists table
+            await self.mass.music.database.delete(DB_TABLE_TRACK_ARTISTS, {"track_id": db_id})
 
     async def set_identifiers(
         self,
@@ -1535,7 +1536,7 @@ class TracksController(MediaControllerBase[Track]):
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
-                "is_classical": item.is_classical,
+                "classical_tag": item.classical_tag,
                 "work_id": await self.mass.music.works.get_library_work_id(item.work)
                 if item.work
                 else None,
@@ -1559,6 +1560,7 @@ class TracksController(MediaControllerBase[Track]):
                 disc_number=getattr(item, "disc_number", 0),
                 track_number=getattr(item, "track_number", 0),
             )
+        await self.mass.music.classification.update(track_ids=[db_id])
         self.logger.debug("added %s to database (id: %s)", item.name, db_id)
         return db_id
 
@@ -1580,9 +1582,6 @@ class TracksController(MediaControllerBase[Track]):
         cur_item.external_ids.update(update.external_ids)
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
-        is_classical = (
-            update.is_classical if overwrite else cur_item.is_classical or update.is_classical
-        )
         cur_work_id = int(cur_item.work.item_id) if cur_item.work else None
         new_work_id = (
             await self.mass.music.works.get_library_work_id(update.work) if update.work else None
@@ -1604,7 +1603,8 @@ class TracksController(MediaControllerBase[Track]):
                 "timestamp_added": int(update.date_added.timestamp())
                 if update.date_added
                 else UNSET,
-                "is_classical": is_classical,
+                # only positive classical tags exist, so a source without one keeps it
+                "classical_tag": cur_item.classical_tag or update.classical_tag,
                 "work_id": work_id,
                 "movement_number": preferred.movement_number or fallback.movement_number,
                 "movement_total": preferred.movement_total or fallback.movement_total,
@@ -1633,6 +1633,10 @@ class TracksController(MediaControllerBase[Track]):
                 track_number=update.track_number or cur_item.track_number,
                 overwrite=overwrite,
             )
+        # artists that lost their credit on an overwrite are recomputed as well
+        await self.mass.music.classification.update(
+            track_ids=[db_id], artist_ids={int(x.artist.item_id) for x in cur_item.credits}
+        )
         self.logger.debug("updated %s in database: (id %s)", update.name, db_id)
 
     async def _update_library_item_for_merge(self, item_id: int, update: Track) -> None:

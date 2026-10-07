@@ -2454,8 +2454,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         db_row_dict = dict(db_row)
         db_row_dict["provider"] = "library"
         db_row_dict["favorite"] = parse_optional_bool(db_row_dict["favorite"])
-        if "is_classical" in db_row_dict:
-            db_row_dict["is_classical"] = bool(db_row_dict["is_classical"])
+        for key in ("is_classical", "classical_tag"):
+            if key in db_row_dict:
+                db_row_dict[key] = bool(db_row_dict[key])
         db_row_dict["item_id"] = str(db_row_dict["item_id"])
         db_row_dict["date_added"] = datetime.fromtimestamp(
             db_row_dict["timestamp_added"], tz=UTC
@@ -3070,6 +3071,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             )
             await self._drop_library_item_relations(source_id)
             await MediaControllerBase.remove_item_from_library(self, source_id, recursive=False)
+            await self.mass.music.classification.update_item(self.media_type, target_id)
             merged_item = await self.get_library_item(target_id)
         finally:
             SUPPRESS_MEDIA_ITEM_UPDATES.reset(token)
