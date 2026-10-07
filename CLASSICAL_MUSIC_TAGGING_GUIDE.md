@@ -81,14 +81,14 @@ Plus optional sub-genres (`Baroque`, `Opera`, `Symphony`, `Chamber Music`, etc.)
 
 ```
 MOVEMENTNAME:   I. Allegro con brio
-MOVEMENTNUMBER: 1
+MOVEMENT: 1
 MOVEMENTTOTAL:  4
 ```
 
 These three tags together enable proper multi-movement playback: gapless within a Work, in correct order, with the right movement labels.
 
 - `MOVEMENTNAME` is the title of *this* movement (e.g. "I. Allegro con brio", "II. Andante con moto"). Don't include the parent work title.
-- `MOVEMENTNUMBER` is an integer — `1`, `2`, `3`, `4`.
+- `MOVEMENT` is an integer — `1`, `2`, `3`, `4`.
 - `MOVEMENTTOTAL` is the total number of movements in the parent Work.
 
 For single-movement works (Pachelbel Canon, Albinoni Adagio, *Spiegel im Spiegel*, individual opera arias), leave the movement fields blank.
@@ -147,7 +147,7 @@ A short list of things to watch for:
 
 1. **Don't put the composer in the ARTIST field** unless they're literally performing on the track. The ARTIST field is for the headline performer (the conductor, soloist, ensemble, or whichever credit is the album's billed credit). The composer goes in `COMPOSER`. Putting Beethoven in ARTIST muddles the data.
 2. **WORK is composition only.** Don't append movement info — that goes in MOVEMENTNAME.
-3. **Movement metadata is essential for multi-movement playback.** Skipping MOVEMENTNUMBER / MOVEMENTTOTAL means MA can't sequence movements gaplessly. Many tag editors don't write these by default — check after saving.
+3. **Movement metadata is essential for multi-movement playback.** Skipping MOVEMENT / MOVEMENTTOTAL means MA can't sequence movements gaplessly. Many tag editors don't write these by default — check after saving.
 4. **Be consistent with name spelling** across your library. Without MBIDs, name matching is all MA has. Use canonical full names (look up on MusicBrainz if unsure).
 5. **One album-artist convention per release.** Don't mix "Various Artists" on one classical compilation and the composer's name on another similar compilation — pick a convention.
 6. **Skip the Classical Extras Picard plugin** for new tagging. It writes non-standard tag names (`groupheading`, `top_work`, `is_classical`, `MOVEMENT`) which MA *does* read as fallbacks, but it also destructively rewrites your ARTIST field with potentially unwanted values. Standard Picard with iTunes movement tags enabled (covered below) gives MA everything it needs without that risk.
@@ -192,7 +192,7 @@ The names above are Vorbis comment names (FLAC, Ogg). Equivalents for other form
 | Work title | `WORK` | `TIT1` (or `TXXX:WORK`) | `©wrk` |
 | Work MBID | `MUSICBRAINZ_WORKID` | `TXXX:MusicBrainz Work Id` | freeform `MusicBrainz Work Id` |
 | Movement name | `MOVEMENTNAME` | `MVNM` | `©mvn` |
-| Movement number | `MOVEMENTNUMBER` | `MVIN` (number part) | `©mvi` |
+| Movement number | `MOVEMENT` | `MVIN` (number part) | `©mvi` |
 | Movement total | `MOVEMENTTOTAL` | `MVIN` (total part) | `©mvc` |
 | Lyricist | `LYRICIST` | `TEXT` | freeform |
 | Genre | `GENRE` | `TCON` | `©gen` |
@@ -204,7 +204,7 @@ Most modern tag editors handle the format-specific mapping automatically when yo
 For libraries above a handful of albums, doing this manually is tedious. **MusicBrainz Picard** automates almost everything in this guide. Recommended setup:
 
 1. **Install Picard** from picard.musicbrainz.org. Current versions handle classical metadata well.
-2. **Enable iTunes-style movement tags.** In Picard preferences → Tags / Tag Compatibility (the exact menu path varies by version), enable the option for writing `MOVEMENTNAME` / `MOVEMENTNUMBER` / `MOVEMENTTOTAL` / `SHOWMOVEMENT`. Without this, Picard won't write the movement-sequencing tags MA needs.
+2. **Enable iTunes-style movement tags.** In Picard preferences → Tags / Tag Compatibility (the exact menu path varies by version), enable the option for writing `MOVEMENTNAME` / `MOVEMENT` / `MOVEMENTTOTAL` / `SHOWMOVEMENT`. Without this, Picard won't write the movement-sequencing tags MA needs.
 3. **Do NOT install the Classical Extras plugin.** Standard Picard writes everything MA needs. Classical Extras destructively rewrites `ARTIST` and has other configuration quirks — it's been deliberately advised against for new tagging.
 4. **Load your files** in Picard, cluster them by album, match each cluster against MusicBrainz, and save. Picard fetches all the metadata (composer, conductor, performers, work, movements, MBIDs) from MB and writes the standard tags.
 
@@ -235,7 +235,7 @@ PERFORMER (multi-valued):    Berliner Philharmoniker (orchestra)
 WORK:                        Symphony No. 5 in C minor, Op. 67
 MUSICBRAINZ_WORKID:          d03bff61-26fc-301b-98ac-4d8e85771cbc
 MOVEMENTNAME:                I. Allegro con brio
-MOVEMENTNUMBER:              1
+MOVEMENT:              1
 MOVEMENTTOTAL:               4
 SHOWMOVEMENT:                1
 GENRE:                       Classical
