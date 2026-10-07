@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import re
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from xml.parsers.expat import ExpatError
 
 import xmltodict
+from music_assistant_models.enums import ArtistRole, Period
 from music_assistant_models.errors import MediaNotFoundError
 
 from music_assistant.helpers.compare import compare_strings
@@ -26,6 +28,8 @@ from .constants import IMAGE_EXTENSIONS, METADATA_IMAGE_STEMS, NFO_FILENAMES
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from music_assistant.helpers.tags import AudioTags
+
 logger = logging.getLogger(__name__)
 
 # number of consecutive unreadable directories that marks the storage itself as gone
@@ -33,6 +37,69 @@ MAX_CONSECUTIVE_SCAN_ERRORS = 10
 
 # number of example paths kept for the scan summary the user gets to see
 MAX_REPORTED_FAILED_PATHS = 5
+
+# a movement title such as "I. Allegro", "3. Presto" or "No. 4. The Call" starts with its
+# number and a full stop
+_NUMBERED_MOVEMENT = re.compile(r"^(?:No\.\s)?([IVX]+|\d+)\.\s")
+_ROMAN_NUMERALS = (
+    "I",
+    "II",
+    "III",
+    "IV",
+    "V",
+    "VI",
+    "VII",
+    "VIII",
+    "IX",
+    "X",
+    "XI",
+    "XII",
+    "XIII",
+    "XIV",
+    "XV",
+    "XVI",
+    "XVII",
+    "XVIII",
+    "XIX",
+    "XX",
+)
+
+# a person leading a choir, credited as a performer rather than as a choir
+_CHOIR_LEADER_ROLE = re.compile(r"\b(choir\s?master|chorus\s(master|director))\b", re.IGNORECASE)
+# the credit roles a performer credit's role or instrument text names, matched on whole words
+_PERFORMER_ROLE_PATTERNS = tuple(
+    (role, re.compile(rf"\b({'|'.join(keywords)})\b", re.IGNORECASE))
+    for role, keywords in (
+        (
+            ArtistRole.ORCHESTRA,
+            ("orchestra", "philharmonic", "sinfonia", "symphoniker", "philharmoniker"),
+        ),
+        (ArtistRole.CHOIR, ("choir", "chorus", "chorale", "chor", "schola", "singers")),
+        (ArtistRole.ENSEMBLE, ("ensemble", "quartet", "quintet", "trio", "consort", "band")),
+        (ArtistRole.CONDUCTOR, ("conductor",)),
+    )
+)
+
+_PERIOD_NAMES = {
+    "medieval": Period.MEDIEVAL,
+    "renaissance": Period.RENAISSANCE,
+    "baroque": Period.BAROQUE,
+    "romantic": Period.ROMANTIC,
+    "modern": Period.MODERN,
+    "20th century": Period.MODERN,
+    "contemporary": Period.CONTEMPORARY,
+    "21st century": Period.CONTEMPORARY,
+}
+# lowercase genre names that name a classical period; the genre "Classical" names the whole
+# tradition, so the classical period only counts when named as a period or era
+_PERIOD_GENRES = {
+    **_PERIOD_NAMES,
+    **{
+        f"{name} {suffix}": period
+        for name, period in {**_PERIOD_NAMES, "classical": Period.CLASSICAL}.items()
+        for suffix in ("period", "era")
+    },
+}
 
 IGNORE_DIRS = (
     "recycle",
@@ -321,6 +388,76 @@ def get_valid_isrcs(isrcs: Iterable[str], path: str, log: logging.Logger) -> lis
         else:
             log.warning("Ignoring invalid ISRC '%s' in %s", isrc, path)
     return valid_isrcs
+
+
+@dataclass(frozen=True)
+class TrackWork:
+    """The work a track belongs to, with the movement its work title names."""
+
+    name: str
+    mbid: str | None = None
+    movement_name: str | None = None
+    movement_number: int | None = None
+
+
+def parse_track_work(tags: AudioTags) -> TrackWork | None:
+    """
+    Return the work a track belongs to, or None when the track has no work tag.
+
+    With movement tags the track belongs to the most general work, otherwise to the most
+    specific one. When that work's title is a parent title followed by a numbered movement,
+    the track belongs to the parent work and the movement is returned with it.
+
+    :param tags: The tags of the track.
+    """
+    if not (works := tags.works):
+        return None
+    work_ids = tags.musicbrainz_workids
+    # the work and id tags pair up by position only when they hold as many values
+    paired_ids = work_ids if len(work_ids) == len(works) else (None,) * len(works)
+    index = 0 if tags.movement_name or tags.movement_number or tags.movement_total else -1
+    # MusicBrainz titles movement works "Parent: I. Movement" (see its classical style guide)
+    parent, _, movement = works[index].rpartition(": ")
+    if parent and (match := _NUMBERED_MOVEMENT.match(movement)):
+        numeral = match.group(1)
+        number = int(numeral) if numeral.isdecimal() else _roman_number(numeral)
+        if number:
+            return TrackWork(parent, movement_name=movement, movement_number=number)
+    return TrackWork(works[index], paired_ids[index])
+
+
+def is_placeholder_artist(name: str) -> bool:
+    """Return whether a credited name is a MusicBrainz placeholder such as [anonymous]."""
+    # MusicBrainz names its special purpose artists in square brackets, like [traditional]
+    return name.startswith("[") and name.endswith("]")
+
+
+def performer_credit_role(role: str | None) -> tuple[ArtistRole, str | None]:
+    """
+    Return the credit role and instrument for the role or instrument of a performer credit.
+
+    :param role: The role or instrument as tagged, such as "orchestra" or "piano".
+    """
+    if not role or role.strip().lower() == "performer":
+        return ArtistRole.PERFORMER, None
+    if _CHOIR_LEADER_ROLE.search(role):
+        return ArtistRole.PERFORMER, role
+    for credit_role, pattern in _PERFORMER_ROLE_PATTERNS:
+        if pattern.search(role):
+            return credit_role, None
+    return ArtistRole.SOLOIST, role
+
+
+def period_from_genres(genres: Iterable[str]) -> Period | None:
+    """
+    Return the classical period the given genre names name most often, if any.
+
+    :param genres: Genre names, such as the genre tags of a track.
+    """
+    periods = Counter(
+        period for genre in genres if (period := _PERIOD_GENRES.get(genre.strip().lower()))
+    )
+    return periods.most_common(1)[0][0] if periods else None
 
 
 def get_artist_dir(
@@ -765,3 +902,8 @@ def _record_dir_failure(
             base_path,
             scan_errors.consecutive_failures,
         )
+
+
+def _roman_number(numeral: str) -> int | None:
+    """Return the value of a Roman numeral from I to XX, or None for any other text."""
+    return _ROMAN_NUMERALS.index(numeral) + 1 if numeral in _ROMAN_NUMERALS else None

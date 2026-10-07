@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
-from music_assistant_models.enums import AlbumType, ArtistRole
+from music_assistant_models.enums import AlbumType, ArtistRole, ExternalID
+from music_assistant_models.errors import MediaNotFoundError
 from music_assistant_models.media_items import (
     Album,
     Artist,
@@ -21,6 +22,7 @@ from music_assistant.constants import DB_TABLE_TRACK_ARTISTS
 from music_assistant.mass import MusicAssistant
 
 PROVIDER_INSTANCE = "credits_instance"
+OTHER_PROVIDER_INSTANCE = "other_credits_instance"
 
 
 @pytest.fixture(name="mass")
@@ -29,12 +31,12 @@ def mass_fixture(music_mass_module: MusicAssistant) -> MusicAssistant:
     return music_mass_module
 
 
-def _mapping() -> ProviderMapping:
+def _mapping(provider_instance: str = PROVIDER_INSTANCE) -> ProviderMapping:
     """Create a provider mapping with a unique provider item id."""
     return ProviderMapping(
         item_id=uuid4().hex,
         provider_domain="credits",
-        provider_instance=PROVIDER_INSTANCE,
+        provider_instance=provider_instance,
         in_library=True,
     )
 
@@ -102,6 +104,31 @@ def _credit_rows(item: Track | Album) -> list[tuple[str, ArtistRole, str | None,
 def _artist_ids(item: Track | Album) -> list[str]:
     """Return the item ids of the (main) artists of an item, in order."""
     return [x.item_id for x in item.artists]
+
+
+async def _add_spellings(mass: MusicAssistant) -> tuple[Artist, Artist]:
+    """Store two library artists, oldest first, that hold the same MusicBrainz id."""
+    mbid = str(uuid4())
+    spellings = []
+    for name in ("Edward Elgar", "Elgar"):
+        artist = await _add_artist(mass, name)
+        await mass.music.artists.set_external_ids(artist.item_id, {(ExternalID.MB_ARTIST, mbid)})
+        spellings.append(await mass.music.artists.get_library_item(artist.item_id))
+    return spellings[0], spellings[1]
+
+
+def _credit_artist(artist: Artist, mbid: str | None = None) -> Artist:
+    """Return the provider artist a credit names for the given library artist."""
+    mapping = next(iter(artist.provider_mappings))
+    credited = Artist(
+        item_id=mapping.item_id,
+        provider=mapping.provider_instance,
+        name=artist.name,
+        provider_mappings={mapping},
+    )
+    if mbid:
+        credited.mbid = mbid
+    return credited
 
 
 async def test_track_credits_round_trip(mass: MusicAssistant) -> None:
@@ -234,13 +261,14 @@ async def test_artists_win_over_main_artist_credits(mass: MusicAssistant) -> Non
 
 
 async def test_update_without_overwrite_adds_credits(mass: MusicAssistant) -> None:
-    """A merging update keeps the stored credits and adds the new ones."""
+    """A merging update from another provider keeps the stored credits and adds the new ones."""
     main_1 = await _add_artist(mass, "Main One")
     main_2 = await _add_artist(mass, "Main Two")
     composer_1 = await _add_artist(mass, "Composer One")
     composer_2 = await _add_artist(mass, "Composer Two")
     track = await _add_track(mass, [main_1], [Credit(artist=composer_1, role=ArtistRole.COMPOSER)])
     update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping(OTHER_PROVIDER_INSTANCE)}
     update.artists = UniqueList([main_2])
     update.credits = [
         Credit(artist=composer_1, role=ArtistRole.COMPOSER, position=5),
@@ -255,6 +283,52 @@ async def test_update_without_overwrite_adds_credits(mass: MusicAssistant) -> No
         (main_2.item_id, ArtistRole.MAIN_ARTIST, None, 1),
         (composer_1.item_id, ArtistRole.COMPOSER, None, 0),
         (composer_2.item_id, ArtistRole.COMPOSER, None, 1),
+    ]
+
+
+async def test_update_from_the_only_provider_replaces_credits(mass: MusicAssistant) -> None:
+    """A merging update from the only provider of a track, like a renamed file, replaces them."""
+    main = await _add_artist(mass, "Renamed Main")
+    old_composer = await _add_artist(mass, "Old Composer")
+    lyricist = await _add_artist(mass, "Old Lyricist")
+    new_composer = await _add_artist(mass, "New Composer")
+    track = await _add_track(
+        mass,
+        [main],
+        [
+            Credit(artist=old_composer, role=ArtistRole.COMPOSER),
+            Credit(artist=lyricist, role=ArtistRole.LYRICIST),
+        ],
+    )
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.credits = [Credit(artist=new_composer, role=ArtistRole.COMPOSER)]
+
+    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+
+    assert _credit_rows(stored) == [
+        (main.item_id, ArtistRole.MAIN_ARTIST, None, 0),
+        (new_composer.item_id, ArtistRole.COMPOSER, None, 0),
+    ]
+
+
+async def test_update_of_a_track_on_two_providers_adds_credits(mass: MusicAssistant) -> None:
+    """A merging update from one of the providers of a track keeps the stored credits."""
+    main = await _add_artist(mass, "Shared Main")
+    composer = await _add_artist(mass, "Shared Composer")
+    conductor = await _add_artist(mass, "Shared Conductor")
+    track = await _add_track(mass, [main], [Credit(artist=composer, role=ArtistRole.COMPOSER)])
+    await mass.music.tracks.add_provider_mapping(track.item_id, _mapping(OTHER_PROVIDER_INSTANCE))
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.credits = [Credit(artist=conductor, role=ArtistRole.CONDUCTOR)]
+
+    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+
+    assert _credit_rows(stored) == [
+        (main.item_id, ArtistRole.MAIN_ARTIST, None, 0),
+        (composer.item_id, ArtistRole.COMPOSER, None, 0),
+        (conductor.item_id, ArtistRole.CONDUCTOR, None, 0),
     ]
 
 
@@ -374,6 +448,44 @@ async def test_merging_artists_keeps_credit_roles(mass: MusicAssistant) -> None:
         (main.item_id, ArtistRole.MAIN_ARTIST, None, 0),
         (soloist.item_id, ArtistRole.SOLOIST, "cello", 2),
     ]
+
+
+async def test_credit_merges_artists_sharing_its_mbid(mass: MusicAssistant) -> None:
+    """A credit with an MBID joins the library artists holding that MBID into the oldest one."""
+    main = await _add_artist(mass, "Main")
+    oldest, spelling = await _add_spellings(mass)
+    credited = _credit_artist(spelling, oldest.mbid)
+
+    track = await _add_track(mass, [main], [Credit(artist=credited, role=ArtistRole.COMPOSER)])
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert _credit_rows(stored) == [
+        (main.item_id, ArtistRole.MAIN_ARTIST, None, 0),
+        (oldest.item_id, ArtistRole.COMPOSER, None, 0),
+    ]
+    merged = await mass.music.artists.get_library_item(oldest.item_id)
+    assert merged.name == oldest.name
+    assert spelling.provider_mappings <= merged.provider_mappings
+    with pytest.raises(MediaNotFoundError):
+        await mass.music.artists.get_library_item(spelling.item_id)
+
+
+async def test_credit_without_mbid_keeps_artists_apart(mass: MusicAssistant) -> None:
+    """A credit without an MBID leaves library artists that share one alone."""
+    main = await _add_artist(mass, "Main")
+    oldest, spelling = await _add_spellings(mass)
+
+    track = await _add_track(
+        mass, [main], [Credit(artist=_credit_artist(spelling), role=ArtistRole.COMPOSER)]
+    )
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert _credit_rows(stored) == [
+        (main.item_id, ArtistRole.MAIN_ARTIST, None, 0),
+        (spelling.item_id, ArtistRole.COMPOSER, None, 0),
+    ]
+    assert await mass.music.artists.get_library_item(oldest.item_id)
+    assert await mass.music.artists.get_library_item(spelling.item_id)
 
 
 async def test_merging_tracks_keeps_credit_roles(mass: MusicAssistant) -> None:

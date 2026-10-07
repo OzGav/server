@@ -1,6 +1,6 @@
 """Tests for filesystem provider sync configuration behavior."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from music_assistant_models.enums import MediaType, ProviderFeature
@@ -138,6 +138,7 @@ class TestProcessItemRespectsConfig:
 
         mock_track = MagicMock()
         provider._parse_track = AsyncMock(return_value=mock_track)  # type: ignore[method-assign]
+        provider._set_track_work = AsyncMock()  # type: ignore[method-assign]
         provider.mass.music.tracks.add_item_to_library = AsyncMock()  # type: ignore[method-assign,misc]
 
         with patch(
@@ -147,6 +148,7 @@ class TestProcessItemRespectsConfig:
             result = await provider._process_item_async(item, None)
 
         assert result is True
+        provider._set_track_work.assert_awaited_once_with(mock_track, ANY)
         provider.mass.music.tracks.add_item_to_library.assert_called_once()
 
     @pytest.mark.asyncio

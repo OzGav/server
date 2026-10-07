@@ -1326,7 +1326,10 @@ class ArtistsController(MediaControllerBase[Artist]):
 
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
-        period = update.period if overwrite else cur_item.period or update.period
+        # a source without a period keeps the stored one, as only composers carry one
+        period = (
+            (update.period or cur_item.period) if overwrite else cur_item.period or update.period
+        )
         await self.mass.music.database.update(
             self.db_table,
             {"item_id": db_id},

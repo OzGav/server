@@ -726,6 +726,41 @@ class TestParseCueTracks:
         assert track.metadata.description == "Live at Wembley"
         assert track.metadata.explicit is True
 
+    @pytest.mark.asyncio
+    async def test_classical_tags_of_the_audio_file_are_not_used(self, tmp_path: Path) -> None:
+        """CUE tracks take no credits, work, movement or classical tag from their audio file."""
+        (tmp_path / "album.flac").write_bytes(b"")
+        cue_item = _make_cue_item(tmp_path, SAMPLE_CUE)
+        provider = _make_provider(base_path=str(tmp_path))
+        add_track = AsyncMock()
+        add_work = AsyncMock()
+        provider.mass.music.tracks.add_item_to_library = add_track  # type: ignore[method-assign,misc]
+        provider.mass.music.works.add_item_to_library = add_work  # type: ignore[method-assign,misc]
+        tags = _make_audio_tags(
+            album="Album",
+            composer="Composer",
+            conductor="Conductor",
+            work="Symphony No. 5: I. Allegro",
+            movementname="Allegro",
+            isclassical="1",
+        )
+        self._wire_provider_for_parse(provider)
+
+        with patch(
+            "music_assistant.providers.filesystem_local.cue.async_parse_tags",
+            AsyncMock(return_value=tags),
+        ):
+            assert await provider._process_item_async(cue_item, None)
+
+        added = [call.args[0] for call in add_track.await_args_list]
+        assert len(added) == 3
+        for track in added:
+            assert not track.credits
+            assert track.work is None
+            assert track.movement_name is None
+            assert not track.classical_tag
+        add_work.assert_not_awaited()
+
 
 class TestGetStreamDetailsForCueTrack:
     """Tests for _get_stream_details_for_cue_track."""

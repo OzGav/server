@@ -19,6 +19,7 @@ import aiofiles
 import shortuuid
 from aiofiles.os import wrap
 from music_assistant_models.enums import (
+    ArtistRole,
     ArtistType,
     ContentType,
     EventType,
@@ -41,6 +42,7 @@ from music_assistant_models.media_items import (
     Audiobook,
     AudioFormat,
     BrowseFolder,
+    Credit,
     ItemMapping,
     MediaItemChapter,
     MediaItemCollection,
@@ -54,6 +56,7 @@ from music_assistant_models.media_items import (
     SoundEffect,
     Track,
     UniqueList,
+    Work,
     is_track,
 )
 from music_assistant_models.streamdetails import MultiPartPath, StreamDetails
@@ -107,6 +110,7 @@ from .constants import (
     CACHE_CATEGORY_PODCAST_METADATA,
     CACHE_CATEGORY_SOUND_EFFECTS,
     CONF_AUTHOR_NARRATOR_REPARSE_DONE,
+    CONF_CLASSICAL_REPARSE_DONE,
     CONF_CONTENT_TYPE,
     CONF_ENTRY_CONTENT_TYPE,
     CONF_ENTRY_IGNORE_ALBUM_PLAYLISTS,
@@ -151,7 +155,11 @@ from .helpers import (
     is_disc_dir,
     is_image_file,
     is_metadata_file,
+    is_placeholder_artist,
     parse_nfo_root,
+    parse_track_work,
+    performer_credit_role,
+    period_from_genres,
     recursive_iter,
     sorted_scandir,
 )
@@ -223,8 +231,8 @@ class LocalFileSystemProvider(MusicProvider):
     _SYNC_CONCURRENCY: ClassVar[int] = 16
     _sync_tracks: bool = True
     _sync_playlists: bool = True
-    # set for the single sync that has to reparse an audiobook library that was
-    # indexed before authors/narrators became artists
+    # set for the single sync that has to reparse a library that was indexed before
+    # classical tags were read (music) or authors/narrators became artists (audiobooks)
     _force_full_reparse: bool = False
 
     def __init__(
@@ -534,6 +542,12 @@ class LocalFileSystemProvider(MusicProvider):
             )
             if not self._sync_tracks and not self._sync_playlists:
                 return
+            self._force_full_reparse = (
+                self._sync_tracks
+                and not self.mass.config.get_raw_provider_config_value(
+                    self.instance_id, CONF_CLASSICAL_REPARSE_DONE, False
+                )
+            )
         elif self.media_content_type == "audiobooks":
             if not self.config.get_value(CONF_ENTRY_LIBRARY_SYNC_AUDIOBOOKS.key):
                 return
@@ -715,10 +729,16 @@ class LocalFileSystemProvider(MusicProvider):
             await self._process_deletions(deleted_files)
             await self._process_orphaned_albums_and_artists()
 
-        # disable a full rescan after promoting authors/ narrators to artists once the scan completed without errors
+        # disable the one-off full rescan (which reads the classical tags of music files and
+        # promotes authors/ narrators to artists) once the scan completed without errors
         if self._force_full_reparse and not scan_errors.incomplete:
             self._force_full_reparse = False
-            self._update_config_value(CONF_AUTHOR_NARRATOR_REPARSE_DONE, True, immediate=True)
+            reparse_done_key = (
+                CONF_CLASSICAL_REPARSE_DONE
+                if self.media_content_type == "music"
+                else CONF_AUTHOR_NARRATOR_REPARSE_DONE
+            )
+            self._update_config_value(reparse_done_key, True, immediate=True)
 
         # flag provider as available again if an earlier sync had marked it down
         self._set_available(True)
@@ -2242,6 +2262,7 @@ class LocalFileSystemProvider(MusicProvider):
                     return False
                 tags = await async_parse_tags(item.absolute_path, item.file_size)
                 track = await self._parse_track(item, tags)
+                await self._set_track_work(track, tags)
                 # TODO: implement favorite status based on rating ?
                 await self.mass.music.tracks.add_item_to_library(
                     track, overwrite_existing=prev_checksum is not None
@@ -2615,6 +2636,7 @@ class LocalFileSystemProvider(MusicProvider):
                 name, sort_name=sort_name, mbid=mbid, representative_track=file_item.relative_path
             )
             track.artists.append(artist)
+        track.credits = await self._parse_track_credits(track, tags)
 
         # handle embedded cover image
         if tags.has_cover_image:
@@ -2648,6 +2670,22 @@ class LocalFileSystemProvider(MusicProvider):
         track.metadata.lyrics = tags.lyrics
         track.metadata.grouping = tags.get("grouping")
         track.metadata.description = tags.get("comment")
+        track.classical_tag = tags.is_classical
+        track.movement_name = tags.movement_name
+        track.movement_number = tags.movement_number
+        track.movement_total = tags.movement_total
+        track_work = parse_track_work(tags)
+        if track_work:
+            track.movement_name = track.movement_name or track_work.movement_name
+            track.movement_number = track.movement_number or track_work.movement_number
+        # the MusicBrainz work ids the linked work does not carry stay on the track for
+        # enrichment, which may hold several as a recording can be linked to several works
+        linked_work_id = track_work.mbid if track_work else None
+        track.external_ids.update(
+            (ExternalID.MB_WORK, work_id)
+            for work_id in tags.musicbrainz_workids
+            if work_id != linked_work_id
+        )
         explicit_tag = tags.get("itunesadvisory")
         if explicit_tag is not None:
             track.metadata.explicit = explicit_tag == "1"
@@ -2777,6 +2815,112 @@ class LocalFileSystemProvider(MusicProvider):
             (x for x in album.artists if (mbid and x.mbid == mbid) or x.name == name),
             None,
         )
+
+    async def _parse_track_credits(self, track: Track, tags: AudioTags) -> list[Credit]:
+        """Return the composer, conductor, performer, lyricist and arranger credits of a track."""
+        album = track.album if isinstance(track.album, Album) else None
+        # a credited artist that is a track or album artist as well reuses that (fuller) artist
+        known_artists: list[Artist | ItemMapping] = [
+            *track.artists,
+            *(album.artists if album else ()),
+        ]
+        track_credits: list[Credit] = []
+
+        def add_credit(
+            role: ArtistRole,
+            name: str,
+            instrument: str | None = None,
+            sort_name: str | None = None,
+            mbid: str | None = None,
+        ) -> Artist | ItemMapping | None:
+            if is_placeholder_artist(name):
+                return None
+            artist = next(
+                (
+                    x
+                    for x in known_artists
+                    if (x.mbid == mbid if mbid and x.mbid else x.name == name)
+                ),
+                None,
+            )
+            if artist is None:
+                artist = self._parse_credit_artist(name, sort_name, mbid)
+                known_artists.append(artist)
+            if not any(
+                x.role == role and x.artist is artist and x.instrument == instrument
+                for x in track_credits
+            ):
+                position = sum(x.role == role for x in track_credits)
+                track_credits.append(
+                    Credit(artist=artist, role=role, instrument=instrument, position=position)
+                )
+            return artist
+
+        album_genres = album.metadata.genres if album else None
+        for name, mbid, sort_name in await self._resolve_artists_with_mbids(
+            tags.composers,
+            tags.musicbrainz_composerids,
+            tags.composer_sort_names,
+            log_label="COMPOSER tag",
+        ):
+            composer = add_credit(ArtistRole.COMPOSER, name, sort_name=sort_name, mbid=mbid)
+            # the genres of the composer's artist.nfo come first, then album.nfo, then the track
+            if isinstance(composer, Artist) and (
+                period := period_from_genres(composer.metadata.genres or ())
+                or period_from_genres(album_genres or ())
+                or period_from_genres(tags.genres)
+            ):
+                composer.period = period
+        for name in tags.conductors:
+            add_credit(ArtistRole.CONDUCTOR, name)
+        for name, role_text in tags.performers:
+            role, instrument = performer_credit_role(role_text)
+            add_credit(role, name, instrument)
+        for name, instrument in tags.soloists:
+            add_credit(ArtistRole.SOLOIST, name, instrument)
+        for name in tags.ensembles:
+            add_credit(ArtistRole.ENSEMBLE, name)
+        for name in tags.lyricists:
+            add_credit(ArtistRole.LYRICIST, name)
+        for name in tags.arrangers:
+            add_credit(ArtistRole.ARRANGER, name)
+        return track_credits
+
+    def _parse_credit_artist(self, name: str, sort_name: str | None, mbid: str | None) -> Artist:
+        """Build the Artist for a credit, identified by name like an artist without a folder."""
+        artist = Artist(
+            item_id=name,
+            provider=self.instance_id,
+            name=name,
+            sort_name=sort_name,
+            provider_mappings={
+                ProviderMapping(
+                    item_id=name,
+                    provider_domain=self.domain,
+                    provider_instance=self.instance_id,
+                    in_library=True,
+                )
+            },
+        )
+        if mbid:
+            artist.mbid = mbid
+        return artist
+
+    async def _set_track_work(self, track: Track, tags: AudioTags) -> None:
+        """Link a track to its work, adding the work to the library when needed."""
+        if not (track_work := parse_track_work(tags)):
+            return
+        work = Work(
+            item_id=track_work.name,
+            provider=self.instance_id,
+            name=track_work.name,
+            provider_mappings=set(),
+            composers=UniqueList(track.composers),
+        )
+        if track_work.mbid:
+            work.mbid = track_work.mbid
+        library_work = await self.mass.music.works.add_item_to_library(work)
+        track.work = ItemMapping.from_item(library_work)
 
     def _parse_audiobook_artist(self, name: str, artist_type: ArtistType) -> Artist:
         """

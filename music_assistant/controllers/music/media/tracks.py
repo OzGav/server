@@ -1615,6 +1615,12 @@ class TracksController(MediaControllerBase[Track]):
         await self.set_external_ids(
             db_id, update.external_ids if overwrite else cur_item.external_ids
         )
+        # an update from the only provider instance the track is known on (e.g. a renamed
+        # file) carries its complete credits, so they replace the stored ones
+        update_instances = {x.provider_instance for x in update.provider_mappings}
+        replace_credits = bool(update_instances) and all(
+            x.provider_instance in update_instances for x in cur_item.provider_mappings
+        )
         # update/set provider_mappings table
         provider_mappings = provider_mappings_for_update(
             cur_item.provider_mappings, update.provider_mappings, overwrite
@@ -1623,7 +1629,7 @@ class TracksController(MediaControllerBase[Track]):
         # set track artist(s) and credits
         artists = update.artists if overwrite else cur_item.artists + update.artists
         await self._set_track_artists(db_id, artists, overwrite=overwrite)
-        await self._set_credits(db_id, update.credits, overwrite=overwrite)
+        await self._set_credits(db_id, update.credits, overwrite=overwrite, replace=replace_credits)
         # update/set track album
         if update.album and set_album:
             await self._set_track_album(

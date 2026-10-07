@@ -3194,14 +3194,18 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             )
 
     async def _set_credits(
-        self, db_id: int, item_credits: Iterable[Credit], overwrite: bool = False
+        self,
+        db_id: int,
+        item_credits: Iterable[Credit],
+        overwrite: bool = False,
+        replace: bool = False,
     ) -> None:
-        """Store the non main artist credits of a track or album, replaced on overwrite if given."""
+        """Store the non main artist credits of an item, replacing them on overwrite or replace."""
         table, owner_column = ARTIST_CREDIT_TABLES[self.media_type]
         rows = [
             {
                 "db_id": db_id,
-                "artist_id": await self._get_library_artist_id(credit.artist, overwrite),
+                "artist_id": await self._get_credit_artist_id(credit.artist, overwrite),
                 "role": credit.role.value,
                 "instrument": credit.instrument,
                 "position": credit.position,
@@ -3210,7 +3214,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             if credit.role != ArtistRole.MAIN_ARTIST
         ]
         # a source without credits keeps the stored ones, like an empty artists list does
-        if overwrite and rows:
+        if (overwrite or replace) and rows:
             await self.mass.music.database.execute_write(
                 f"DELETE FROM {table} WHERE {owner_column} = :db_id AND role != :main_artist",
                 {"db_id": db_id, "main_artist": ArtistRole.MAIN_ARTIST.value},
@@ -3246,6 +3250,30 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                 artist_to_add, overwrite_existing=overwrite
             )
         return int(db_artist.item_id)
+
+    async def _get_credit_artist_id(
+        self, artist: Artist | ItemMapping, overwrite: bool = False
+    ) -> int:
+        """Return the library ID of a credited artist, merging library artists with its MBID."""
+        artist_id = await self._get_library_artist_id(artist, overwrite)
+        if not (mbid := artist.mbid):
+            return artist_id
+        artists_ctrl = self.mass.music.artists
+        same_mbid = await artists_ctrl.get_library_items_by_external_id(
+            mbid, ExternalID.MB_ARTIST, limit=None
+        )
+        # the oldest library artist keeps its name and absorbs the other spellings
+        target_id, *source_ids = sorted({artist_id, *(int(x.item_id) for x in same_mbid)})
+        for source_id in source_ids:
+            try:
+                await artists_ctrl.merge_library_items(target_id, source_id)
+            except MediaNotFoundError:
+                continue  # already merged by a concurrent add
+            except InvalidDataError as err:
+                self.logger.debug("Not merging artists with MusicBrainz ID %s: %s", mbid, err)
+                if source_id == artist_id:
+                    return artist_id
+        return target_id
 
     async def _copy_library_item_relations(self, target_id: int, source_id: int) -> None:
         """Copy the relations that reference the merged media item onto the target."""
