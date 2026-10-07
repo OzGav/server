@@ -403,27 +403,23 @@ class TrackWork:
 
 def parse_track_work(tags: AudioTags) -> TrackWork | None:
     """
-    Return the work a track belongs to, or None when the track has no work tag.
+    Return the work a track belongs to, or None when it belongs to no work.
 
     With movement tags the track belongs to the most general work, otherwise to the most
     specific one. When that work's title is a parent title followed by a numbered movement,
-    the track belongs to the parent work and the movement is returned with it.
+    the track belongs to the parent work and the movement is returned with it. A track
+    without a work tag belongs to a work only when its own title is such a movement title.
 
     :param tags: The tags of the track.
     """
     if not (works := tags.works):
-        return None
+        return _split_movement_title(tags.title)
     work_ids = tags.musicbrainz_workids
     # the work and id tags pair up by position only when they hold as many values
     paired_ids = work_ids if len(work_ids) == len(works) else (None,) * len(works)
     index = 0 if tags.movement_name or tags.movement_number or tags.movement_total else -1
-    # MusicBrainz titles movement works "Parent: I. Movement" (see its classical style guide)
-    parent, _, movement = works[index].rpartition(": ")
-    if parent and (match := _NUMBERED_MOVEMENT.match(movement)):
-        numeral = match.group(1)
-        number = int(numeral) if numeral.isdecimal() else _roman_number(numeral)
-        if number:
-            return TrackWork(parent, movement_name=movement, movement_number=number)
+    if track_work := _split_movement_title(works[index]):
+        return track_work
     return TrackWork(works[index], paired_ids[index])
 
 
@@ -1011,6 +1007,18 @@ def _real_path_of(fd: int) -> str:
         # 1024 is MAXPATHLEN, the buffer size F_GETPATH writes the path into
         return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0])
     return str(Path(f"/proc/self/fd/{fd}").readlink())
+
+
+def _split_movement_title(title: str) -> TrackWork | None:
+    """Return the parent work of a numbered movement title, or None for any other title."""
+    # MusicBrainz titles movement works "Parent: I. Movement" (see its classical style guide)
+    parent, _, movement = title.rpartition(": ")
+    if parent and (match := _NUMBERED_MOVEMENT.match(movement)):
+        numeral = match.group(1)
+        number = int(numeral) if numeral.isdecimal() else _roman_number(numeral)
+        if number:
+            return TrackWork(parent, movement_name=movement, movement_number=number)
+    return None
 
 
 def _roman_number(numeral: str) -> int | None:

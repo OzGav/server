@@ -127,13 +127,13 @@ async def _add_track(
     )
 
 
-async def _add_work(mass: MusicAssistant) -> Work:
+async def _add_work(mass: MusicAssistant, name: str | None = None) -> Work:
     """Add a work to the library."""
     return await mass.music.works.add_item_to_library(
         Work(
             item_id=uuid4().hex,
             provider="works_source",
-            name=f"Work {_token()}",
+            name=name or f"Work {_token()}",
             provider_mappings=set(),
         )
     )
@@ -177,6 +177,14 @@ async def test_tagged_track_is_classical(mass: MusicAssistant) -> None:
 async def test_track_with_work_is_not_classical_by_that_alone(mass: MusicAssistant) -> None:
     """A track linked to a work is not classical without a classical tag or genre."""
     work = await _add_work(mass)
+    track = await _add_track(mass, work=ItemMapping.from_item(work))
+
+    assert not await _is_classical(mass, track)
+
+
+async def test_track_with_work_named_by_type_is_not_classical(mass: MusicAssistant) -> None:
+    """A track is not classical by a work whose title names a work type."""
+    work = await _add_work(mass, name="Symphony")
     track = await _add_track(mass, work=ItemMapping.from_item(work))
 
     assert not await _is_classical(mass, track)

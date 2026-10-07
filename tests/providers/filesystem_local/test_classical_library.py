@@ -443,6 +443,46 @@ async def test_work_ids_without_matching_titles_stay_on_the_track(
     assert _work_ids(track) == work_ids
 
 
+async def test_movement_titles_without_a_work_tag_share_the_parent_work(
+    provider: LocalFileSystemProvider, mass: MusicAssistant
+) -> None:
+    """Tracks titled as numbered movements link one work, the movement tags keep their values."""
+    token = _token()
+    work_id = str(uuid4())
+    first_path, second_path = f"{token}/Album/01.flac", f"{token}/Album/02.flac"
+    first = await _add_track(
+        provider,
+        first_path,
+        _tags(
+            first_path,
+            title=f"Symphony {token}: I. Allegro",
+            album=f"Album {token}",
+            composer=f"Composer {token}",
+            musicbrainzworkid=[work_id],
+        ),
+    )
+    second = await _add_track(
+        provider,
+        second_path,
+        _tags(
+            second_path,
+            title=f"Symphony {token}: II. Adagio",
+            album=f"Album {token}",
+            composer=f"Composer {token}",
+            movementname="Adagio molto",
+        ),
+    )
+
+    assert first.work is not None
+    assert second.work is not None
+    assert first.work.item_id == second.work.item_id
+    work = await mass.music.works.get_library_item(first.work.item_id)
+    assert (work.name, work.get_external_id(ExternalID.MB_WORK)) == (f"Symphony {token}", None)
+    assert (first.movement_name, first.movement_number) == ("I. Allegro", 1)
+    assert (second.movement_name, second.movement_number) == ("Adagio molto", 2)
+    assert _work_ids(first) == {work_id}
+
+
 async def test_pop_track_with_a_work_tag_stays_non_classical(
     provider: LocalFileSystemProvider, mass: MusicAssistant
 ) -> None:
