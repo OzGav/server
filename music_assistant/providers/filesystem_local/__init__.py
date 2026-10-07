@@ -75,6 +75,7 @@ from music_assistant.constants import (
     DB_TABLE_AUDIOBOOK_ARTISTS,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
     DEFAULT_AUDIOBOOK_PODCAST_GENRE,
     VARIOUS_ARTISTS_MBID,
     VARIOUS_ARTISTS_NAME,
@@ -2673,11 +2674,12 @@ class LocalFileSystemProvider(MusicProvider):
         ):
             await self.mass.music.albums.remove_item_from_library(db_row["item_id"])
 
-        # Remove artists without any tracks, albums or audiobooks.
+        # Remove artists without any tracks, albums, track credits or audiobooks.
         query = (
             f"SELECT item_id FROM {DB_TABLE_ARTISTS} "
             f"WHERE item_id not in "
             f"( select artist_id from {DB_TABLE_TRACK_ARTISTS} "
+            f"UNION SELECT artist_id from {DB_TABLE_TRACK_CREDITS} "
             f"UNION SELECT artist_id from {DB_TABLE_ALBUM_ARTISTS} "
             f"UNION SELECT artist_id from {DB_TABLE_AUDIOBOOK_ARTISTS} ) "
             f"AND item_id in ( SELECT item_id from {DB_TABLE_PROVIDER_MAPPINGS} "

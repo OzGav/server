@@ -7,14 +7,22 @@ from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import aiohttp
 import pytest
-from music_assistant_models.enums import AlbumType, MediaType, ProviderFeature, SortField
+from music_assistant_models.enums import (
+    AlbumType,
+    ArtistRole,
+    MediaType,
+    ProviderFeature,
+    SortField,
+)
 from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
 from music_assistant_models.helpers import set_global_cache_values
 from music_assistant_models.media_items import (
     Album,
     Artist,
+    Credit,
     MediaItemMetadata,
     ProviderMapping,
+    Track,
     UniqueList,
 )
 
@@ -441,6 +449,54 @@ async def test_reconcile_duplicate_albums_ignores_same_title_by_other_artist(
     ]
     for index, artist in enumerate(artists):
         await _add_album(mass, "The Collection", artist, provider_instance=f"qobuz_{index}")
+
+    assert await _reconciled_ids(mass) == set()
+
+
+async def test_reconcile_duplicate_albums_ignores_same_title_sharing_only_a_composer(
+    mass: MusicAssistant,
+) -> None:
+    """Same-titled albums by other artists whose tracks share a composer are no duplicates."""
+
+    async def add_artist(name: str) -> Artist:
+        return await mass.music.artists.add_item_to_library(
+            Artist(
+                item_id="0",
+                provider="library",
+                name=name,
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=f"artist-{name}",
+                        provider_domain="test",
+                        provider_instance="library",
+                    )
+                },
+            )
+        )
+
+    composer = await add_artist("Frédéric Chopin")
+    for index, name in enumerate(("Martha Argerich", "Maurizio Pollini")):
+        artist = await add_artist(name)
+        album = await _add_album(mass, "Préludes", artist, provider_instance=f"qobuz_{index}")
+        await mass.music.tracks.add_item_to_library(
+            Track(
+                item_id="0",
+                provider="library",
+                name="Prélude No. 1",
+                artists=UniqueList([artist]),
+                credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)],
+                album=album,
+                disc_number=1,
+                track_number=1,
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=f"track-{index}",
+                        provider_domain="qobuz",
+                        provider_instance=f"qobuz_{index}",
+                    )
+                },
+            )
+        )
 
     assert await _reconciled_ids(mass) == set()
 

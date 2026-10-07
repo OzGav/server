@@ -65,6 +65,7 @@ from music_assistant.constants import (
     DB_TABLE_PLAY_HISTORY,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
     MASS_LOGGER_NAME,
 )
 from music_assistant.controllers.music.constants import (
@@ -127,6 +128,7 @@ ItemCls = TypeVar("ItemCls", bound="MediaItemType")
 
 JSON_KEYS = (
     "artists",
+    "credits",
     "track_album",
     "metadata",
     "provider_mappings",
@@ -148,6 +150,13 @@ RELATION_TABLE_COLUMNS = {
     DB_TABLE_ALBUM_TRACKS: ("track_id", "album_id", "disc_number", "track_number"),
     DB_TABLE_AUDIOBOOK_ARTISTS: ("audiobook_id", "artist_id"),
     DB_TABLE_TRACK_ARTISTS: ("track_id", "artist_id"),
+    DB_TABLE_TRACK_CREDITS: ("track_id", "artist_id", "role", "instrument", "position"),
+}
+
+# The (table, owner column) holding the main artists of each media type that has them.
+MAIN_ARTIST_TABLES = {
+    MediaType.ALBUM: (DB_TABLE_ALBUM_ARTISTS, "album_id"),
+    MediaType.TRACK: (DB_TABLE_TRACK_ARTISTS, "track_id"),
 }
 
 # When set (task-local), per-item MEDIA_ITEM_ADDED/UPDATED events and the on_item_updated
@@ -3662,6 +3671,37 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             await self._update_library_item_from_provider(db_id, update)
         return True
 
+    async def _set_main_artists(
+        self,
+        db_id: int,
+        artists: Iterable[Artist | ItemMapping],
+        overwrite: bool = False,
+        resolved_artists: dict[tuple[str, str], int] | None = None,
+    ) -> None:
+        """
+        Store the main artists of a track or album.
+
+        :param db_id: Library id of the item.
+        :param artists: The main artists, in credited order.
+        :param overwrite: Replace the stored main artists.
+        :param resolved_artists: Library ids of the artists resolved so far, by provider and item id.
+        """
+        table, owner_column = MAIN_ARTIST_TABLES[self.media_type]
+        resolved = {} if resolved_artists is None else resolved_artists
+        artist_ids = []
+        for artist in artists:
+            key = (artist.provider, artist.item_id)
+            if key not in resolved:
+                resolved[key] = await self._get_library_artist_id(artist)
+            artist_ids.append(resolved[key])
+        if overwrite:
+            await self.mass.music.database.delete(table, {owner_column: db_id})
+        # different (provider) artists may resolve to the same library artist
+        for artist_id in dict.fromkeys(artist_ids):
+            await self.mass.music.database.insert_or_replace(
+                table, {owner_column: db_id, "artist_id": artist_id}
+            )
+
     async def _get_library_artist_id(self, artist: Artist | ItemMapping) -> int:
         """
         Return the library ID of the given artist, adding it to the library when needed.
@@ -3734,6 +3774,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                 (DB_TABLE_ALBUM_ARTISTS, "artist_id"),
                 (DB_TABLE_AUDIOBOOK_ARTISTS, "artist_id"),
                 (DB_TABLE_TRACK_ARTISTS, "artist_id"),
+                (DB_TABLE_TRACK_CREDITS, "artist_id"),
             )
         if self.media_type == MediaType.AUDIOBOOK:
             return ((DB_TABLE_AUDIOBOOK_ARTISTS, "audiobook_id"),)
@@ -3741,6 +3782,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             return (
                 (DB_TABLE_ALBUM_TRACKS, "track_id"),
                 (DB_TABLE_TRACK_ARTISTS, "track_id"),
+                (DB_TABLE_TRACK_CREDITS, "track_id"),
             )
         return ()
 

@@ -4,9 +4,16 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from music_assistant_models.enums import ExternalID, MediaType
+from music_assistant_models.enums import ArtistRole, ExternalID, MediaType
 from music_assistant_models.errors import MediaNotFoundError, ProviderUnavailableError
-from music_assistant_models.media_items import Album, Artist, ProviderMapping, Track, UniqueList
+from music_assistant_models.media_items import (
+    Album,
+    Artist,
+    Credit,
+    ProviderMapping,
+    Track,
+    UniqueList,
+)
 
 from music_assistant.controllers.streams.constants import AA_TABLE_ANALYSIS
 from music_assistant.mass import MusicAssistant
@@ -326,6 +333,21 @@ async def test_renamed_album_drops_the_old_artist(
         assert {x.item_id for x in album.provider_mappings} == {NEW}
     rows = await mass.music.database.get_rows_from_query("SELECT name FROM artists")
     assert {row["name"] for row in rows} == {NEW}
+
+
+async def test_cleanup_keeps_artists_with_only_track_credits(mass: MusicAssistant) -> None:
+    """An artist credited only on a track stays, an artist without anything is removed."""
+    provider, _ = _create_provider()
+    provider.mass = mass
+    track = _fs_track(OLD, OLD)
+    track.credits = [Credit(artist=_fs_artist("Composer"), role=ArtistRole.COMPOSER)]
+    await mass.music.tracks.add_item_to_library(track)
+    await mass.music.artists.add_item_to_library(_fs_artist("Unused"))
+
+    await provider._process_orphaned_albums_and_artists()
+
+    rows = await mass.music.database.get_rows_from_query("SELECT name FROM artists")
+    assert {row["name"] for row in rows} == {OLD, "Composer"}
 
 
 async def test_get_album_of_a_removed_folder_is_not_found(
