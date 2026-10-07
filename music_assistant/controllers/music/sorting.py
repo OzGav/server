@@ -257,6 +257,7 @@ LIBRARY_LISTINGS: Final[dict[MediaType, ListingType]] = {
     MediaType.AUDIOBOOK: ListingType.LIBRARY_AUDIOBOOKS,
     MediaType.PODCAST: ListingType.LIBRARY_PODCASTS,
     MediaType.GENRE: ListingType.LIBRARY_GENRES,
+    MediaType.WORK: ListingType.LIBRARY_WORKS,
 }
 
 # the sort fields the library listing of each media type offers, the listing default first
@@ -274,3 +275,15 @@ def get_default_direction(field: SortField) -> SortDirection:
     :return: The field's default direction, ASC for fields without one.
     """
     return SORT_FIELD_DEFINITIONS[field].default_direction or SortDirection.ASC
+
+
+def get_listing_default_direction(listing: ListingType, field: SortField) -> SortDirection:
+    """
+    Get the default sort direction of a field in a listing.
+
+    :param listing: The listing being sorted.
+    :param field: The sort field.
+    :return: The listing's default direction for the field, else the field's own default.
+    """
+    option = next((x for x in LISTING_SORT_OPTIONS[listing] if x.field == field), None)
+    return (option and option.default_direction) or get_default_direction(field)

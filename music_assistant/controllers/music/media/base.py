@@ -66,6 +66,7 @@ from music_assistant.constants import (
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACK_CREDITS,
+    DB_TABLE_WORK_ARTISTS,
     MASS_LOGGER_NAME,
 )
 from music_assistant.controllers.music.constants import (
@@ -129,6 +130,11 @@ ItemCls = TypeVar("ItemCls", bound="MediaItemType")
 JSON_KEYS = (
     "artists",
     "credits",
+    "composers",
+    "catalog_numbers",
+    "parent_work",
+    "arrangement_of",
+    "work",
     "track_album",
     "metadata",
     "provider_mappings",
@@ -151,6 +157,7 @@ RELATION_TABLE_COLUMNS = {
     DB_TABLE_AUDIOBOOK_ARTISTS: ("audiobook_id", "artist_id"),
     DB_TABLE_TRACK_ARTISTS: ("track_id", "artist_id"),
     DB_TABLE_TRACK_CREDITS: ("track_id", "artist_id", "role", "instrument", "position"),
+    DB_TABLE_WORK_ARTISTS: ("work_id", "artist_id", "role", "position"),
 }
 
 # The (table, owner column) holding the main artists of each media type that has them.
@@ -158,6 +165,11 @@ MAIN_ARTIST_TABLES = {
     MediaType.ALBUM: (DB_TABLE_ALBUM_ARTISTS, "album_id"),
     MediaType.TRACK: (DB_TABLE_TRACK_ARTISTS, "track_id"),
 }
+
+# The json_object arguments of a slim artist mapping in a summary row.
+SUMMARY_ARTIST_FIELDS = (
+    "'item_id', artists.item_id, 'name', artists.name, 'sort_name', artists.sort_name"
+)
 
 # When set (task-local), per-item MEDIA_ITEM_ADDED/UPDATED events and the on_item_updated
 # provider write-back are suppressed, so bulk operations (provider sync, provider cleanup)
@@ -3775,6 +3787,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                 (DB_TABLE_AUDIOBOOK_ARTISTS, "artist_id"),
                 (DB_TABLE_TRACK_ARTISTS, "artist_id"),
                 (DB_TABLE_TRACK_CREDITS, "artist_id"),
+                (DB_TABLE_WORK_ARTISTS, "artist_id"),
             )
         if self.media_type == MediaType.AUDIOBOOK:
             return ((DB_TABLE_AUDIOBOOK_ARTISTS, "audiobook_id"),)
