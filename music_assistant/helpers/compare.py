@@ -24,6 +24,7 @@ from music_assistant_models.media_items import (
     Podcast,
     Radio,
     Track,
+    Work,
 )
 
 from music_assistant.helpers.external_ids import is_valid_isrc, normalize_external_id
@@ -173,6 +174,10 @@ def compare_media_item(
         assert isinstance(base_item, Podcast | ItemMapping)  # for type checking
         assert isinstance(compare_item, Podcast | ItemMapping)  # for type checking
         return compare_podcast(base_item, compare_item, strict)
+    if base_item.media_type == MediaType.WORK and compare_item.media_type == MediaType.WORK:
+        assert isinstance(base_item, Work)  # for type checking
+        assert isinstance(compare_item, Work)  # for type checking
+        return compare_work(base_item, compare_item)
     assert isinstance(base_item, ItemMapping)  # for type checking
     assert isinstance(compare_item, ItemMapping)  # for type checking
     return compare_item_mapping(base_item, compare_item, strict)
@@ -831,6 +836,27 @@ def compare_podcast(
         and compare_item.publisher
         and not compare_strings(base_item.publisher, compare_item.publisher, strict=True)
     )
+
+
+def compare_work(base_item: Work, compare_item: Work) -> bool:
+    """
+    Compare two works and return True if they match.
+
+    Works match on their MusicBrainz work id. Without one, their titles must match the way
+    artist and album names do and they must share a composer, or both have no composer.
+    """
+    if compare_item_ids(base_item, compare_item):
+        return True
+    external_id_match = compare_external_ids(
+        base_item.external_ids, compare_item.external_ids, ExternalID.MB_WORK
+    )
+    if external_id_match is not None:
+        return external_id_match
+    if not compare_strings(base_item.name, compare_item.name, strict=True):
+        return False
+    if base_item.composers and compare_item.composers:
+        return compare_artists(list(base_item.composers), list(compare_item.composers))
+    return not base_item.composers and not compare_item.composers
 
 
 def compare_item_mapping(

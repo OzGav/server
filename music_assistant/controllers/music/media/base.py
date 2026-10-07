@@ -61,6 +61,7 @@ from music_assistant.constants import (
     DB_TABLE_PLAYLOG,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_WORK_ARTISTS,
     MASS_LOGGER_NAME,
 )
 from music_assistant.controllers.music.constants import CACHE_CATEGORY_SEARCH_RESULTS
@@ -109,6 +110,11 @@ ItemCls = TypeVar("ItemCls", bound="MediaItemType")
 JSON_KEYS = (
     "artists",
     "credits",
+    "composers",
+    "catalog_numbers",
+    "parent_work",
+    "arrangement_of",
+    "work",
     "track_album",
     "metadata",
     "provider_mappings",
@@ -130,6 +136,7 @@ RELATION_TABLE_COLUMNS = {
     DB_TABLE_ALBUM_TRACKS: ("track_id", "album_id", "disc_number", "track_number"),
     DB_TABLE_AUDIOBOOK_ARTISTS: ("audiobook_id", "artist_id"),
     DB_TABLE_TRACK_ARTISTS: ("track_id", "artist_id", "role", "instrument", "position"),
+    DB_TABLE_WORK_ARTISTS: ("work_id", "artist_id", "role", "position"),
 }
 
 # The (table, owner column) holding the artist credits of each credited media type.
@@ -2048,6 +2055,10 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             "AND favorite = :favorite)"
         )
 
+    def _sort_key(self, order_by: str) -> str | None:
+        """Return the ORDER BY expression for a library listing sort, None when unknown."""
+        return SORT_KEYS.get(order_by) or self._favorite_sort_key(order_by)
+
     @final
     def _favorite_sort_key(self, order_by: str | None) -> str | None:
         """Return the ORDER BY expression for a sort on the calling user's favorite moment."""
@@ -2426,7 +2437,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             sql_query += f" GROUP BY {self.db_table}.item_id"
 
         if order_by:
-            if sort_key := SORT_KEYS.get(order_by) or self._favorite_sort_key(order_by):
+            if sort_key := self._sort_key(order_by):
                 sql_query += f" ORDER BY {sort_key}"
 
         return sql_query, base_query_params
@@ -3264,6 +3275,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                 (DB_TABLE_ALBUM_ARTISTS, "artist_id"),
                 (DB_TABLE_AUDIOBOOK_ARTISTS, "artist_id"),
                 (DB_TABLE_TRACK_ARTISTS, "artist_id"),
+                (DB_TABLE_WORK_ARTISTS, "artist_id"),
             )
         if self.media_type == MediaType.AUDIOBOOK:
             return ((DB_TABLE_AUDIOBOOK_ARTISTS, "audiobook_id"),)

@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from music_assistant.controllers.music.media.podcasts import PodcastsController
     from music_assistant.controllers.music.media.radio import RadioController
     from music_assistant.controllers.music.media.tracks import TracksController
+    from music_assistant.controllers.music.media.works import WorksController
 
 # the playlog's unique constraint: one row per item, per media type, per user
 PLAYLOG_CONFLICT_KEYS: Final[tuple[str, ...]] = ("item_id", "provider", "media_type", "userid")
@@ -85,7 +86,7 @@ class MusicDatabaseSetupMixin:
     - logger: logging.Logger instance
     - database: the active DatabaseConnection
     - the per-media-type controllers (albums, artists, tracks, playlists, radio,
-      podcasts, audiobooks, genres)
+      podcasts, audiobooks, genres, works)
     - close() and start_sync() methods
     """
 
@@ -102,6 +103,7 @@ class MusicDatabaseSetupMixin:
         podcasts: PodcastsController
         audiobooks: AudiobooksController
         genres: GenreController
+        works: WorksController
 
         @property
         def database(self) -> DatabaseConnection: ...  # noqa: D102
@@ -176,10 +178,37 @@ class MusicDatabaseSetupMixin:
             (DB_TABLE_AUDIOBOOK_ARTISTS, "audiobook_id", DB_TABLE_AUDIOBOOKS),
             (DB_TABLE_TRACK_ARTISTS, "artist_id", DB_TABLE_ARTISTS),
             (DB_TABLE_TRACK_ARTISTS, "track_id", DB_TABLE_TRACKS),
+            (DB_TABLE_WORK_ARRANGEMENTS, "source_work_id", DB_TABLE_WORKS),
+            (DB_TABLE_WORK_ARRANGEMENTS, "work_id", DB_TABLE_WORKS),
+            (DB_TABLE_WORK_ARTISTS, "artist_id", DB_TABLE_ARTISTS),
+            (DB_TABLE_WORK_ARTISTS, "work_id", DB_TABLE_WORKS),
         ):
             await self.database.delete_where_query(
                 table, f"{column} not in (SELECT item_id from {parent_table})"
             )
+        for table, column in (
+            (DB_TABLE_TRACKS, "work_id"),
+            (DB_TABLE_WORKS, "parent_work_id"),
+        ):
+            await self.database.execute_write(
+                f"UPDATE {table} SET {column} = NULL "
+                f"WHERE {column} not in (SELECT item_id from {DB_TABLE_WORKS})"
+            )
+        update_current_task_progress_text(f"Cleaning {self.works.media_type.value} library records")
+        # works are library-only, so a work is orphaned once no track links to it and no
+        # other work refers to it as its parent or as the original of an arrangement;
+        # removing an arrangement can orphan its original, hence the repeat
+        orphaned_works_query = (
+            f"SELECT item_id FROM {DB_TABLE_WORKS} "
+            f"WHERE item_id not in (SELECT work_id FROM {DB_TABLE_TRACKS} "
+            "WHERE work_id IS NOT NULL) "
+            f"AND item_id not in (SELECT parent_work_id FROM {DB_TABLE_WORKS} "
+            "WHERE parent_work_id IS NOT NULL) "
+            f"AND item_id not in (SELECT source_work_id FROM {DB_TABLE_WORK_ARRANGEMENTS})"
+        )
+        while db_rows := await self.database.get_rows_from_query(orphaned_works_query, limit=5000):
+            for db_row in db_rows:
+                await self.works.remove_item_from_library(db_row["item_id"])
         update_current_task_progress_text("Database cleanup finished")
         self.logger.debug("Database cleanup done")
 

@@ -44,6 +44,7 @@ from music_assistant.constants import (
     DB_TABLE_ALBUMS,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORKS,
 )
 from music_assistant.controllers.music.helpers import (
     provider_mappings_for_update,
@@ -71,6 +72,7 @@ from .base import (
     MediaControllerBase,
     TrackSyncDetails,
 )
+from .works import SUMMARY_WORK_FIELDS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -149,6 +151,12 @@ class TracksController(MediaControllerBase[Track]):
                 'sort_name', artists.sort_name,
                 'media_type', 'artist',
                 'external_ids', json({self._external_ids_query(MediaType.ARTIST, "artists")})"""
+        work_fields = f"""
+                'item_id', w.item_id,
+                'provider', 'library',
+                'name', w.name,
+                'sort_name', w.sort_name,
+                'media_type', '{MediaType.WORK.value}'"""
         # NOTE: the track_album subquery is fully self-contained (correlated) so the
         # outer query needs no join with album_tracks (which would fan out rows for
         # tracks that appear on multiple albums and force a GROUP BY). For tracks on
@@ -162,6 +170,7 @@ class TracksController(MediaControllerBase[Track]):
             {self._provider_mappings_query()} AS provider_mappings,
             {self._main_artists_query(artist_fields)} AS artists,
             {self._credits_query(artist_fields)} AS credits,
+            {self._work_query(work_fields)} AS work,
             (SELECT
                 json_object(
                 'item_id', albums.item_id,
@@ -195,7 +204,11 @@ class TracksController(MediaControllerBase[Track]):
             json_extract(tracks.metadata, '$.explicit') AS explicit,
             json_extract(tracks.metadata, '$.release_date') AS release_date,
             {self._provider_mappings_query()} AS provider_mappings,
+            tracks.movement_number,
+            tracks.movement_total,
+            tracks.movement_name,
             {self._main_artists_query(SUMMARY_ARTIST_FIELDS)} AS artists,
+            {self._work_query(SUMMARY_WORK_FIELDS)} AS work,
             (SELECT
                 json_object(
                 'item_id', albums.item_id,
@@ -1523,6 +1536,12 @@ class TracksController(MediaControllerBase[Track]):
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
                 "is_classical": item.is_classical,
+                "work_id": await self.mass.music.works.get_library_work_id(item.work)
+                if item.work
+                else None,
+                "movement_number": item.movement_number,
+                "movement_total": item.movement_total,
+                "movement_name": item.movement_name,
             },
         )
         # update/set external id lookup table
@@ -1564,6 +1583,13 @@ class TracksController(MediaControllerBase[Track]):
         is_classical = (
             update.is_classical if overwrite else cur_item.is_classical or update.is_classical
         )
+        cur_work_id = int(cur_item.work.item_id) if cur_item.work else None
+        new_work_id = (
+            await self.mass.music.works.get_library_work_id(update.work) if update.work else None
+        )
+        # like the artists, a source without a work or movement keeps the stored one
+        preferred, fallback = (update, cur_item) if overwrite else (cur_item, update)
+        work_id = (new_work_id or cur_work_id) if overwrite else (cur_work_id or new_work_id)
         await self.mass.music.database.update(
             self.db_table,
             {"item_id": db_id},
@@ -1579,6 +1605,10 @@ class TracksController(MediaControllerBase[Track]):
                 if update.date_added
                 else UNSET,
                 "is_classical": is_classical,
+                "work_id": work_id,
+                "movement_number": preferred.movement_number or fallback.movement_number,
+                "movement_total": preferred.movement_total or fallback.movement_total,
+                "movement_name": preferred.movement_name or fallback.movement_name,
             },
         )
         # update/set external id lookup table
@@ -1675,6 +1705,11 @@ class TracksController(MediaControllerBase[Track]):
             return
         await self._set_main_artists(db_id, all_artists, overwrite=overwrite)
 
+    def _work_query(self, work_fields: str) -> str:
+        """Return a subquery selecting the work mapping of a track as a JSON object."""
+        return f"""(SELECT json_object({work_fields})
+            FROM {DB_TABLE_WORKS} w WHERE w.item_id = {DB_TABLE_TRACKS}.work_id)"""
+
     def _sync_details_query_parts(self) -> tuple[str, str, dict[str, Any]]:
         """Return extra (columns, joins, params) for the tracks sync-details query."""
         # the sync loop needs to know if the track has (valid) album and artist links
@@ -1715,6 +1750,18 @@ class TracksController(MediaControllerBase[Track]):
         if raw_release_date := db_row["release_date"]:
             item.metadata.release_date = datetime.fromisoformat(raw_release_date)
         item.artists = self._parse_summary_artist_mappings(db_row)
+        item.movement_number = db_row["movement_number"]
+        item.movement_total = db_row["movement_total"]
+        item.movement_name = db_row["movement_name"]
+        if raw_work := db_row["work"]:
+            work: dict[str, Any] = json_loads(raw_work)
+            item.work = ItemMappingSummary(
+                media_type=MediaType.WORK,
+                item_id=str(work["item_id"]),
+                provider="library",
+                name=work["name"],
+                sort_name=work["sort_name"],
+            )
         if raw_album := db_row["track_album"]:
             album: dict[str, Any] = json_loads(raw_album)
             album_thumb = self._summary_thumb(album.get("images"), hidden_sources)
