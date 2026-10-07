@@ -550,7 +550,7 @@ The contract the frontend's Classical view is built against (Decisions log #79).
 | `music/classical/composers` | `ClassicalComposer` rows | none | `sort_name` (default), `name`, `work_count` |
 | `music/classical/performers` | `ClassicalPerformer` rows | `role`: performers holding that role among their roles (#47) | `name` (default), `recording_count` |
 | `music/classical/works` | `ClassicalWorkEntry` rows | `composer_id`; `performer_id` (recording counts scoped to that performer, #32); `year_from` / `year_to` on composition year (#43) | `composer` (default, then catalogue number), `name`, `composition_year`, `recording_count` (#60) |
-| `music/classical/recordings` | `Recording` list in the fixed order of #18 | `work_id` (required); `performer_id` | none |
+| `music/classical/recordings` | `Recording` list in the fixed order of #18 | `work_id`; `performer_id`; at least one of them (#81) | none |
 | `music/classical/other_tracks` | `Track` list of classical tracks without a work (#33) | `artist_id` (required); `as_composer`: composer credits when true, other credits when false | `name` (default), `year`, `timestamp_added` |
 | `music/has_classical_content` | `bool` (Stage 3c) | none | none |
 
@@ -779,6 +779,8 @@ Records of the substantive design questions that came up during drafting and the
 78. **Favouriting a recording is done by the frontend.** *Resolved (refines #23):* the recording's heart favourites all its movements by calling the existing favourite command per movement track; the heart shows as on when every movement is a favourite. No server command is added.
 79. **The Stage 3d API contract.** *Resolved:* the commands, filters, sorts and row types in the Classical API section are the contract the frontend is built against.
 80. **Classical lists follow the library visibility rules.** *Resolved:* every `music/classical/*` command and `music/has_classical_content` respect the calling user's allowed music sources and only consider tracks that are in the library, the same rules as the normal library lists, so the Classical view never shows a user something the Tracks or Albums views hide. The stored classical flags stay library-wide. `music/classical/recordings` takes no search or paging, as it returns one work's recordings in a fixed order.
+81. **All of a performer's recordings in one call.** *Resolved:* `music/classical/recordings` accepts `performer_id` without `work_id` and returns every recording that performer performs on, per work in the order of the works listing and within a work in the #18 order. A performer page then needs one request instead of one per work. One of `work_id` and `performer_id` is required.
+82. **Arrangement links carry their composers.** *Resolved, built in Stage 6:* on the full Work (`music/works/get`), `arrangement_of` lists the original works and a new `arrangements` field lists the works arranged from this one (decision #19's reverse direction), each as a slim work that includes its composers, so the page can show "Arrangement of Mussorgsky — Pictures at an Exhibition" and the reverse list from one call, following the #80 visibility rules. The links themselves come from MusicBrainz's "arrangement of" relationship in Stage 6; tags cannot supply them.
 
 ## Correction to earlier entries
 
