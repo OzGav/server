@@ -291,7 +291,7 @@ Priority order:
 
 1. `MUSICBRAINZ_WORKID` present → match or create the Work by MBID.
 2. `WORK` tag present with composer → dedup by composer + normalised title.
-3. `WORK` tag present without composer → dedup by normalised title alone (weaker; may create duplicates that a later enrichment pass merges).
+3. `WORK` tag present without composer → dedup by normalised title, but only against other works without a composer (Decisions log #57). A composer-less work never merges into a work that has a composer; a later enrichment pass can merge it once the composer is known.
 
 Multi-value WORKID: see below.
 
@@ -711,6 +711,9 @@ Records of the substantive design questions that came up during drafting and the
 52. **List views carry no credits.** *Resolved:* the summary (list) versions of tracks and albums do not include credits, so long lists stay as light as before; credits come with the full item and with the classical commands. The models still serialise an empty `credits` list on summaries, which is accepted.
 53. **Build order.** *Resolved:* 3a, 3b, 3c, then Stage 4, then 3d. The browse commands of 3d are built after tag parsing so they can be checked against a real tagged library; the 3d branch stacks on Stage 4.
 54. **A refresh without credits keeps stored credits.** *Resolved:* when an item is fully refreshed (overwrite) from a source that sends no credits, the stored non-main credits stay, the same rule as an empty `artists` list. A source that does send credits replaces them.
+55. **Works are full-text searchable.** *Resolved:* the `works` table joins the other media tables in the FTS5 search index, so the Works list supports the same search as other library lists (#48). Part of the Stage 2 schema.
+56. **Works without tracks are removed.** *Resolved:* the library clean-up removes a work once no tracks link to it, unless another work still refers to it as its parent work or as the original of an arrangement.
+57. **Composer-less works only match each other.** *Resolved (corrects the Work matching policy):* a work with a title but no composer is matched by normalised title only against other works that also have no composer. Common titles ("Symphony No. 5", "Requiem") would otherwise merge a badly tagged recording into another composer's work. Works without a composer come from incomplete tags, sources that name a work but no composer, and anonymous or traditional works.
 
 ## Correction to earlier entries
 
