@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
@@ -404,7 +405,11 @@ async def test_library_items_sort_by_title_in_natural_order(mass: MusicAssistant
 
 
 async def test_library_items_sort_by_composer_in_catalogue_order(mass: MusicAssistant) -> None:
-    """Sorting by composer orders each composer's works by catalogue number, numbers naturally."""
+    """
+    Sorting by composer orders each composer's works by catalogue number, numbers naturally.
+
+    Works are listed this way when no sort is requested.
+    """
     token = _token()
     bach = await _add_artist(mass, f"Bach {token}")
     mozart = await _add_artist(mass, f"Mozart {token}")
@@ -418,9 +423,25 @@ async def test_library_items_sort_by_composer_in_catalogue_order(mass: MusicAssi
     by_composer_desc = await mass.music.works.library_items(
         search=token, sort_field=SortField.COMPOSER, sort_direction=SortDirection.DESC
     )
+    by_default = await mass.music.works.library_items(search=token)
 
     assert _ids(by_composer) == _ids([op_9, op_67, uncatalogued, k_525, composerless])
+    assert _ids(by_default) == _ids(by_composer)
     assert _ids(by_composer_desc) == _ids([k_525, op_9, op_67, uncatalogued, composerless])
+
+
+async def test_server_lists_works_newest_first(mass: MusicAssistant) -> None:
+    """The server can list works newest first, a sort only it uses."""
+    token = _token()
+    older = await _add_work(mass, f"B {token}", date_added=datetime(2020, 1, 1, tzinfo=UTC))
+    newer = await _add_work(mass, f"C {token}", date_added=datetime(2021, 1, 1, tzinfo=UTC))
+    oldest = await _add_work(mass, f"A {token}", date_added=datetime(2019, 1, 1, tzinfo=UTC))
+
+    newest_first = await mass.music.works.get_library_items_by_query(
+        search=token, sort_field=SortField.TIMESTAMP_ADDED, sort_direction=SortDirection.DESC
+    )
+
+    assert _ids(newest_first) == _ids([newer, older, oldest])
 
 
 async def test_library_items_sort_by_composition_year(mass: MusicAssistant) -> None:

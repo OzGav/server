@@ -129,13 +129,13 @@ async def _add_track(
     )
 
 
-async def _add_work(mass: MusicAssistant) -> Work:
+async def _add_work(mass: MusicAssistant, name: str | None = None) -> Work:
     """Add a work to the library."""
     return await mass.music.works.add_item_to_library(
         Work(
             item_id=uuid4().hex,
             provider="works_source",
-            name=f"Work {_token()}",
+            name=name or f"Work {_token()}",
             provider_mappings=set(),
         )
     )
