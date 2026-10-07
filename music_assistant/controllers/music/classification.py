@@ -4,10 +4,10 @@ Classical classification for the Music controller.
 Every library track, album and artist carries a stored is_classical flag, derived by the
 server from these rules:
 
-- a track is classical when it is tagged classical, is linked to a work, is mapped to the
-  curated classical genre or is on a classical album
+- a track is classical when it is tagged classical, is mapped to the curated classical genre
+  or is on a classical album
 - an album is classical when it is mapped to the curated classical genre or when more
-  than half of its tracks are classical by their own tag, work or genre
+  than half of its tracks are classical by their own tag or genre
 - an artist is classical when it holds any credit on a classical track
 
 The flags are kept current as the library changes.
@@ -59,9 +59,8 @@ def _has_classical_genre(item: str, media_type: MediaType) -> str:
 
 
 def _track_is_classical_by_own_signal(track: str) -> str:
-    """Return the condition that a track is classical by its own tag, work or genre."""
-    return f"""({track}.classical_tag = 1 OR {track}.work_id IS NOT NULL
-        OR {_has_classical_genre(track, MediaType.TRACK)})"""
+    """Return the condition that a track is classical by its own tag or genre."""
+    return f"""({track}.classical_tag = 1 OR {_has_classical_genre(track, MediaType.TRACK)})"""
 
 
 # album tracks only count by their own signals, as their album inheritance depends on this flag
