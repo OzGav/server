@@ -691,6 +691,20 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         clause = self._listing_filter_clause(query_params)
         return [clause] if clause else []
 
+    @final
+    def visible_library_clause(self, query_params: dict[str, Any]) -> str:
+        """
+        Return the SQL condition that keeps the library items the calling user sees in listings.
+
+        These are the items in the library of a music source the user may see, as listed by
+        `library_items`. For callers that build their own query on this media type's table.
+
+        :param query_params: Query params dict; the condition's bound params are added to it.
+        """
+        return self._provider_filter_clause(
+            query_params, self._ensure_provider_filter(None), in_library_only=True
+        )
+
     async def iter_library_items(
         self,
         favorite: bool | None = None,
