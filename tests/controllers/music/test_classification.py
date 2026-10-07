@@ -174,12 +174,12 @@ async def test_tagged_track_is_classical(mass: MusicAssistant) -> None:
     assert stored.is_classical
 
 
-async def test_track_with_work_is_classical(mass: MusicAssistant) -> None:
-    """A track linked to a work is classical."""
+async def test_track_with_work_is_not_classical_by_that_alone(mass: MusicAssistant) -> None:
+    """A track linked to a work is not classical without a classical tag or genre."""
     work = await _add_work(mass)
     track = await _add_track(mass, work=ItemMapping.from_item(work))
 
-    assert await _is_classical(mass, track)
+    assert not await _is_classical(mass, track)
 
 
 async def test_track_in_classical_genre_is_classical(mass: MusicAssistant) -> None:
@@ -361,22 +361,6 @@ async def test_flags_follow_genre_merge(mass: MusicAssistant) -> None:
     assert await _is_classical(mass, track)
 
 
-async def test_flags_follow_work_link_and_removal(mass: MusicAssistant) -> None:
-    """Linking a track to a work makes it classical, removing the work undoes that."""
-    work = await _add_work(mass)
-    track = await _add_track(mass)
-
-    await mass.music.tracks.update_item_in_library(
-        track.item_id, _track(list(track.artists), work=ItemMapping.from_item(work))
-    )
-    linked = await _is_classical(mass, track)
-    await mass.music.works.remove_item_from_library(work.item_id)
-
-    assert linked
-    assert not await _is_classical(mass, track)
-    assert not await _is_classical(mass, track.artists[0])  # type: ignore[arg-type]
-
-
 async def test_removing_a_track_reclassifies_its_album(mass: MusicAssistant) -> None:
     """A track leaving an album can drop the album, and its other tracks, below the majority."""
     album = await _add_album(mass)
@@ -479,7 +463,7 @@ class TestHasClassicalContent:
         await mass.music.tracks.remove_item_from_library(classical.item_id)
         without_track = await mass.music.has_classical_content()
         await _add_work(mass)
-        with_work = await mass.music.has_classical_content()
+        with_only_a_work = await mass.music.has_classical_content()
 
         assert not empty
         assert not non_classical
@@ -487,4 +471,4 @@ class TestHasClassicalContent:
         assert not any(row["is_classical"] for row in flags)
         assert with_track
         assert not without_track
-        assert with_work
+        assert not with_only_a_work
