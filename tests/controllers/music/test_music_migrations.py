@@ -11,12 +11,20 @@ from music_assistant_models.enums import ExternalID
 from music_assistant_models.errors import MusicAssistantError
 
 from music_assistant.constants import (
+    DB_TABLE_ALBUM_ARTISTS,
+    DB_TABLE_ALBUMS,
+    DB_TABLE_ARTISTS,
     DB_TABLE_AUDIO_ANALYSIS,
     DB_TABLE_EXTERNAL_ID_LOOKUP,
     DB_TABLE_FAVORITES,
     DB_TABLE_PLAYLOG,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_SETTINGS,
+    DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACKS,
+    DB_TABLE_WORK_ARRANGEMENTS,
+    DB_TABLE_WORK_ARTISTS,
+    DB_TABLE_WORKS,
 )
 from music_assistant.controllers.music import MusicController, migrations
 from music_assistant.controllers.music.favorites import PENDING_USER_ID
@@ -884,3 +892,208 @@ async def test_migration_drops_images_without_a_path(
         "user1": None,
         "user2": serialize_to_json(tunein),
     }
+
+
+CLASSICAL_SCHEMA_TABLES = (
+    DB_TABLE_ALBUM_ARTISTS,
+    DB_TABLE_ALBUMS,
+    DB_TABLE_ARTISTS,
+    DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACKS,
+    DB_TABLE_WORK_ARRANGEMENTS,
+    DB_TABLE_WORK_ARTISTS,
+    DB_TABLE_WORKS,
+)
+
+
+async def _create_pre_65_artist_junctions(database: DatabaseConnection) -> None:
+    """Create track_artists / album_artists as they exist on a pre-65 database."""
+    for table, owner_col, owner_table in (
+        (DB_TABLE_TRACK_ARTISTS, "track_id", DB_TABLE_TRACKS),
+        (DB_TABLE_ALBUM_ARTISTS, "album_id", DB_TABLE_ALBUMS),
+    ):
+        await database.execute(
+            f"""CREATE TABLE {table}(
+            [{owner_col}] INTEGER NOT NULL,
+            [artist_id] INTEGER NOT NULL,
+            FOREIGN KEY([{owner_col}]) REFERENCES [{owner_table}]([item_id]),
+            FOREIGN KEY([artist_id]) REFERENCES [{DB_TABLE_ARTISTS}]([item_id]),
+            UNIQUE({owner_col}, artist_id)
+            );"""
+        )
+        await database.execute(f"CREATE INDEX {table}_{owner_col}_idx on {table}({owner_col})")
+        await database.execute(f"CREATE INDEX {table}_artist_id_idx on {table}(artist_id)")
+
+
+async def _schema_snapshot(database: DatabaseConnection) -> dict[str, Any]:
+    """Return the columns and indexes of the tables the classical schema touches."""
+    snapshot: dict[str, Any] = {}
+    for table in CLASSICAL_SCHEMA_TABLES:
+        snapshot[table] = [
+            (row["name"], row["type"], row["notnull"], row["dflt_value"], row["pk"])
+            for row in await database.get_rows_from_query(f"PRAGMA table_info({table})", limit=0)
+        ]
+    snapshot["indexes"] = {
+        (row["tbl_name"], row["name"])
+        for row in await database.get_rows_from_query(
+            "SELECT tbl_name, name FROM sqlite_master WHERE type = 'index'", limit=0
+        )
+        if row["tbl_name"] in CLASSICAL_SCHEMA_TABLES
+    }
+    return snapshot
+
+
+async def test_migration_adds_the_classical_schema(database: DatabaseConnection) -> None:
+    """A pre-65 database gets the classical schema and keeps its artist credits as main artists."""
+    await _create_pre_65_artist_junctions(database)
+    await database.execute(
+        f"INSERT INTO {DB_TABLE_TRACK_ARTISTS} (track_id, artist_id) VALUES (1, 10), (1, 11)"
+    )
+    await database.execute(
+        f"INSERT INTO {DB_TABLE_ALBUM_ARTISTS} (album_id, artist_id) VALUES (2, 10)"
+    )
+    await database.commit()
+    mass = MagicMock()
+    mass.cache.clear = AsyncMock()
+
+    await migrate_database(mass, database, MagicMock(), prev_version=64, create_tables=AsyncMock())
+
+    assert {"period", "is_classical"} <= await _table_columns(database, DB_TABLE_ARTISTS)
+    assert "is_classical" in await _table_columns(database, DB_TABLE_ALBUMS)
+    assert {
+        "work_id",
+        "movement_number",
+        "movement_total",
+        "movement_name",
+        "is_classical",
+    } <= await _table_columns(database, DB_TABLE_TRACKS)
+    assert {
+        "composition_year",
+        "language",
+        "musical_key",
+        "parent_work_id",
+    } <= await _table_columns(database, DB_TABLE_WORKS)
+    assert await _table_columns(database, DB_TABLE_WORK_ARTISTS) == {
+        "work_id",
+        "artist_id",
+        "role",
+        "position",
+    }
+    assert await _table_columns(database, DB_TABLE_WORK_ARRANGEMENTS) == {
+        "work_id",
+        "source_work_id",
+    }
+    for table, owner_col, expected in (
+        (DB_TABLE_TRACK_ARTISTS, "track_id", [(1, 10), (1, 11)]),
+        (DB_TABLE_ALBUM_ARTISTS, "album_id", [(2, 10)]),
+    ):
+        rows = await database.get_rows_from_query(
+            f"SELECT * FROM {table} ORDER BY {owner_col}, artist_id", limit=0
+        )
+        assert [(row[owner_col], row["artist_id"]) for row in rows] == expected
+        assert {(row["role"], row["instrument"], row["position"]) for row in rows} == {
+            ("main_artist", None, 0)
+        }
+        assert await database.get_rows_from_query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = :name",
+            {"name": f"{table}_unique"},
+        )
+    # an artist may now hold several roles on the same track
+    await database.execute(
+        f"INSERT INTO {DB_TABLE_TRACK_ARTISTS} (track_id, artist_id, role) VALUES (1, 10, 'composer')"
+    )
+    await database.commit()
+
+    # a second pass over the migrated database changes nothing
+    schema_before = await _schema_snapshot(database)
+    await migrate_database(mass, database, MagicMock(), prev_version=64, create_tables=AsyncMock())
+    assert await _schema_snapshot(database) == schema_before
+    assert len(await database.get_rows(DB_TABLE_TRACK_ARTISTS)) == 3
+
+
+async def test_migration_adds_the_classical_schema_without_media_tables(
+    database: DatabaseConnection,
+) -> None:
+    """The classical schema step skips tables a database does not have."""
+    for table in (DB_TABLE_ARTISTS, DB_TABLE_ALBUMS, DB_TABLE_TRACKS):
+        await database.execute(f"DROP TABLE {table}")
+    await database.commit()
+    mass = MagicMock()
+    mass.cache.clear = AsyncMock()
+
+    await migrate_database(mass, database, MagicMock(), prev_version=64, create_tables=AsyncMock())
+
+    for table in (DB_TABLE_ARTISTS, DB_TABLE_ALBUMS, DB_TABLE_TRACKS, DB_TABLE_TRACK_ARTISTS):
+        assert not await _table_columns(database, table)
+    assert await _table_columns(database, DB_TABLE_WORK_ARTISTS)
+
+
+async def test_classical_schema_upgrade_matches_a_fresh_install(
+    mass_minimal: MusicAssistant,
+) -> None:
+    """An upgraded pre-65 database ends up with the same tables and indexes as a fresh install."""
+    music = MusicController(mass_minimal)
+    mass_minimal.music = music
+    await music._setup_database()
+    fresh_schema = await _schema_snapshot(music.database)
+    # revert the database to its v64 state, without the works tables, the classical
+    # columns and the credit roles on the artist junctions
+    for table in (DB_TABLE_WORK_ARTISTS, DB_TABLE_WORK_ARRANGEMENTS, DB_TABLE_WORKS):
+        await music.database.execute(f"DROP TABLE {table}")
+    await music.database.execute(f"DROP INDEX {DB_TABLE_TRACKS}_work_id_idx")
+    for table, column in (
+        (DB_TABLE_ARTISTS, "period"),
+        (DB_TABLE_ARTISTS, "is_classical"),
+        (DB_TABLE_ALBUMS, "is_classical"),
+        (DB_TABLE_ALBUMS, "classical_tag"),
+        (DB_TABLE_TRACKS, "work_id"),
+        (DB_TABLE_TRACKS, "movement_number"),
+        (DB_TABLE_TRACKS, "movement_total"),
+        (DB_TABLE_TRACKS, "movement_name"),
+        (DB_TABLE_TRACKS, "is_classical"),
+        (DB_TABLE_TRACKS, "classical_tag"),
+    ):
+        await music.database.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    for table in (DB_TABLE_TRACK_ARTISTS, DB_TABLE_ALBUM_ARTISTS):
+        await music.database.execute(f"DROP TABLE {table}")
+    await _create_pre_65_artist_junctions(music.database)
+    await music.database.insert_or_replace(
+        DB_TABLE_SETTINGS, {"key": "version", "value": "64", "type": "str"}
+    )
+    await music.database.commit()
+    await music.database.close()
+
+    # setting up the database again triggers the migration
+    mass_minimal.cache.clear = AsyncMock()  # type: ignore[method-assign]
+    await music._setup_database()
+
+    try:
+        assert await _schema_snapshot(music.database) == fresh_schema
+    finally:
+        # an open connection keeps the test from finishing
+        await music.database.close()
+
+
+async def test_works_are_full_text_searchable(mass_minimal: MusicAssistant) -> None:
+    """A fresh install indexes works for full-text search like the other media items."""
+    music = MusicController(mass_minimal)
+    mass_minimal.music = music
+    await music._setup_database()
+    try:
+        await music.database.insert(
+            DB_TABLE_WORKS,
+            {
+                "name": "Symphony No. 5",
+                "sort_name": "symphony no. 5",
+                "metadata": "{}",
+                "search_name": "symphony no 5",
+                "search_sort_name": "symphony no 5",
+            },
+        )
+        rows = await music.database.get_rows_from_query(
+            f"SELECT rowid FROM {DB_TABLE_WORKS}_fts WHERE {DB_TABLE_WORKS}_fts MATCH 'phony'"
+        )
+        assert len(rows) == 1
+    finally:
+        # an open connection keeps the test from finishing
+        await music.database.close()
