@@ -14,6 +14,9 @@ from music_assistant_models.media_items import (
     Artist,
     Audiobook,
     BrowseFolder,
+    ClassicalComposer,
+    ClassicalPerformer,
+    ClassicalWorkEntry,
     Genre,
     MediaItem,
     Playlist,
@@ -21,6 +24,7 @@ from music_assistant_models.media_items import (
     PodcastEpisode,
     Radio,
     Track,
+    Work,
 )
 
 from music_assistant.controllers.music.listing import (
@@ -34,7 +38,10 @@ from .helpers import create_album, create_track
 
 # the item type each listing holds; a playlist also holds other playable items and a browse
 # folder also holds media items, which sort on the same attributes
-LISTING_ITEM_TYPES: dict[ListingType, type[MediaItem | BrowseFolder]] = {
+LISTING_ITEM_TYPES: dict[
+    ListingType,
+    type[MediaItem | BrowseFolder | ClassicalComposer | ClassicalPerformer | ClassicalWorkEntry],
+] = {
     ListingType.LIBRARY_ARTISTS: Artist,
     ListingType.LIBRARY_ALBUMS: Album,
     ListingType.LIBRARY_TRACKS: Track,
@@ -43,6 +50,7 @@ LISTING_ITEM_TYPES: dict[ListingType, type[MediaItem | BrowseFolder]] = {
     ListingType.LIBRARY_AUDIOBOOKS: Audiobook,
     ListingType.LIBRARY_PODCASTS: Podcast,
     ListingType.LIBRARY_GENRES: Genre,
+    ListingType.LIBRARY_WORKS: Work,
     ListingType.ALBUM_TRACKS: Track,
     ListingType.ARTIST_ALBUMS: Album,
     ListingType.ARTIST_TRACKS: Track,
@@ -60,6 +68,10 @@ LISTING_ITEM_TYPES: dict[ListingType, type[MediaItem | BrowseFolder]] = {
     ListingType.GENRE_TRACKS: Track,
     ListingType.GENRE_ALBUMS: Album,
     ListingType.BROWSE: BrowseFolder,
+    ListingType.CLASSICAL_COMPOSERS: ClassicalComposer,
+    ListingType.CLASSICAL_PERFORMERS: ClassicalPerformer,
+    ListingType.CLASSICAL_WORKS: ClassicalWorkEntry,
+    ListingType.CLASSICAL_OTHER_TRACKS: Track,
 }
 # the item attribute each in-memory sort field reads
 SORT_FIELD_ATTRIBUTES = {
@@ -76,7 +88,16 @@ SORT_FIELD_ATTRIBUTES = {
     SortField.PROVIDER: "provider",
 }
 # the listings that sort in SQL, on the columns of the library rather than on the items
-SQL_LISTINGS = {*LIBRARY_LISTINGS.values(), ListingType.GENRE_TRACKS, ListingType.GENRE_ALBUMS}
+SQL_LISTINGS = {
+    *LIBRARY_LISTINGS.values(),
+    ListingType.LIBRARY_WORKS,
+    ListingType.GENRE_TRACKS,
+    ListingType.GENRE_ALBUMS,
+    ListingType.CLASSICAL_COMPOSERS,
+    ListingType.CLASSICAL_PERFORMERS,
+    ListingType.CLASSICAL_WORKS,
+    ListingType.CLASSICAL_OTHER_TRACKS,
+}
 
 
 def _track(  # noqa: PLR0913
