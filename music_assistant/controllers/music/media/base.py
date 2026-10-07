@@ -64,6 +64,7 @@ from music_assistant.constants import (
     DB_TABLE_MEDIA_PROGRESS,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
     MASS_LOGGER_NAME,
 )
 from music_assistant.controllers.music.constants import (
@@ -126,6 +127,7 @@ ItemCls = TypeVar("ItemCls", bound="MediaItemType")
 
 JSON_KEYS = (
     "artists",
+    "credits",
     "track_album",
     "metadata",
     "provider_mappings",
@@ -147,7 +149,19 @@ RELATION_TABLE_COLUMNS = {
     DB_TABLE_ALBUM_TRACKS: ("track_id", "album_id", "disc_number", "track_number"),
     DB_TABLE_AUDIOBOOK_ARTISTS: ("audiobook_id", "artist_id"),
     DB_TABLE_TRACK_ARTISTS: ("track_id", "artist_id"),
+    DB_TABLE_TRACK_CREDITS: ("track_id", "artist_id", "role", "instrument", "position"),
 }
+
+# The (table, owner column) holding the main artists of each media type that has them.
+MAIN_ARTIST_TABLES = {
+    MediaType.ALBUM: (DB_TABLE_ALBUM_ARTISTS, "album_id"),
+    MediaType.TRACK: (DB_TABLE_TRACK_ARTISTS, "track_id"),
+}
+
+# The json_object arguments of a slim artist mapping in a summary row.
+SUMMARY_ARTIST_FIELDS = (
+    "'item_id', artists.item_id, 'name', artists.name, 'sort_name', artists.sort_name"
+)
 
 # When set (task-local), per-item MEDIA_ITEM_ADDED/UPDATED events and the on_item_updated
 # provider write-back are suppressed, so bulk operations (provider sync, provider cleanup)
@@ -3573,6 +3587,79 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             await self._update_library_item_from_provider(db_id, update)
         return True
 
+    async def _set_main_artists(
+        self,
+        db_id: int,
+        artists: Iterable[Artist | ItemMapping],
+        overwrite: bool = False,
+        resolved_artists: dict[tuple[str, str], int] | None = None,
+    ) -> None:
+        """
+        Store the main artists of a track or album.
+
+        :param db_id: Library id of the item.
+        :param artists: The main artists, in credited order.
+        :param overwrite: Replace the stored main artists.
+        :param resolved_artists: Library ids of the artists resolved so far, by provider and item id.
+        """
+        table, owner_column = MAIN_ARTIST_TABLES[self.media_type]
+        resolved = {} if resolved_artists is None else resolved_artists
+        artist_ids = []
+        for artist in artists:
+            key = (artist.provider, artist.item_id)
+            if key not in resolved:
+                resolved[key] = await self._get_library_artist_id(artist)
+            artist_ids.append(resolved[key])
+        if overwrite:
+            await self.mass.music.database.delete(table, {owner_column: db_id})
+        # different (provider) artists may resolve to the same library artist
+        for artist_id in dict.fromkeys(artist_ids):
+            await self.mass.music.database.insert_or_replace(
+                table, {owner_column: db_id, "artist_id": artist_id}
+            )
+
+    async def _get_library_artist_id(self, artist: Artist | ItemMapping) -> int:
+        """
+        Return the library ID of the given artist, adding it to the library when needed.
+
+        An artist already in the library, found by its provider id or matched by its ids or
+        name, only gains the provider mappings and the types of external ids it lacks, and is
+        never overwritten.
+        """
+        artists = self.mass.music.artists
+        if artist.provider == "library":
+            return int(artist.item_id)
+        if db_artist := await artists.get_library_item_by_prov_id(artist.item_id, artist.provider):
+            await self._add_new_artist_ids(db_artist, artist)
+            return int(db_artist.item_id)
+        # Convert ItemMapping to Artist if needed
+        artist_to_add = (
+            artists.artist_from_item_mapping(artist) if isinstance(artist, ItemMapping) else artist
+        )
+        if library_id := await artists._get_library_item_by_match(artist_to_add):
+            await self._add_new_artist_ids(
+                await artists.get_library_item(library_id), artist_to_add
+            )
+            return library_id
+        db_artist = await artists.add_item_to_library(artist_to_add)
+        return int(db_artist.item_id)
+
+    async def _add_new_artist_ids(self, db_artist: Artist, artist: Artist | ItemMapping) -> None:
+        """Add the provider mappings and external id types a library artist lacks."""
+        stored_types = {id_type for id_type, _ in db_artist.external_ids}
+        new_ids = {
+            (id_type, value)
+            for id_type, value in normalize_external_ids(artist.external_ids)
+            if id_type not in stored_types
+        }
+        new_mappings = set(getattr(artist, "provider_mappings", ())) - db_artist.provider_mappings
+        if not new_ids and not new_mappings:
+            return
+        # the stored artist itself is the update, so nothing but the new ids changes
+        db_artist.external_ids.update(new_ids)
+        db_artist.provider_mappings.update(new_mappings)
+        await self.mass.music.artists.update_item_in_library(db_artist.item_id, db_artist)
+
     async def _copy_library_item_relations(self, target_id: int, source_id: int) -> None:
         """Copy the relations that reference the merged media item onto the target."""
         for table, item_column in self._library_item_relations():
@@ -3603,6 +3690,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                 (DB_TABLE_ALBUM_ARTISTS, "artist_id"),
                 (DB_TABLE_AUDIOBOOK_ARTISTS, "artist_id"),
                 (DB_TABLE_TRACK_ARTISTS, "artist_id"),
+                (DB_TABLE_TRACK_CREDITS, "artist_id"),
             )
         if self.media_type == MediaType.AUDIOBOOK:
             return ((DB_TABLE_AUDIOBOOK_ARTISTS, "audiobook_id"),)
@@ -3610,6 +3698,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             return (
                 (DB_TABLE_ALBUM_TRACKS, "track_id"),
                 (DB_TABLE_TRACK_ARTISTS, "track_id"),
+                (DB_TABLE_TRACK_CREDITS, "track_id"),
             )
         return ()
 

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Never, cast
 from aiohttp import ClientError
 from music_assistant_models.auth import Scope
 from music_assistant_models.enums import (
+    ArtistRole,
     ExternalID,
     ListingType,
     MediaType,
@@ -33,6 +34,7 @@ from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import (
     Album,
     Artist,
+    Credit,
     ItemMapping,
     ItemMappingSummary,
     ProviderMapping,
@@ -45,6 +47,7 @@ from music_assistant.constants import (
     DB_TABLE_ALBUM_TRACKS,
     DB_TABLE_ALBUMS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
     DB_TABLE_TRACKS,
 )
 from music_assistant.controllers.music.constants import SIMILAR_ITEMS_LIMIT
@@ -168,6 +171,7 @@ class TracksController(MediaControllerBase[Track]):
                     'media_type', 'artist',
                     'external_ids', json({self._external_ids_query(MediaType.ARTIST, "artists")})
                 )) FROM artists JOIN track_artists on track_artists.track_id = tracks.item_id  WHERE artists.item_id = track_artists.artist_id) AS artists,
+            {self._credits_query()} AS credits,
             (SELECT
                 json_object(
                 'item_id', albums.item_id,
@@ -637,6 +641,7 @@ class TracksController(MediaControllerBase[Track]):
         await self.mass.music.database.delete(DB_TABLE_ALBUM_TRACKS, {"track_id": db_id})
         # delete entry(s) from trackartists table
         await self.mass.music.database.delete(DB_TABLE_TRACK_ARTISTS, {"track_id": db_id})
+        await self.mass.music.database.delete(DB_TABLE_TRACK_CREDITS, {"track_id": db_id})
 
     async def set_identifiers(
         self,
@@ -1589,8 +1594,10 @@ class TracksController(MediaControllerBase[Track]):
         await self.set_external_ids(db_id, item.external_ids)
         # update/set provider_mappings table
         await self.set_provider_mappings(db_id, item.provider_mappings)
-        # set track artist(s)
-        await self._set_track_artists(db_id, item.artists)
+        # set track artist(s) and credits
+        resolved_artists: dict[tuple[str, str], int] = {}
+        await self._set_track_artists(db_id, item.artists, resolved_artists=resolved_artists)
+        await self._set_credits(db_id, item.credits, resolved_artists=resolved_artists)
         # handle track album
         if item.album:
             await self._set_track_album(
@@ -1645,9 +1652,15 @@ class TracksController(MediaControllerBase[Track]):
             cur_item.provider_mappings, update.provider_mappings, overwrite
         )
         await self.set_provider_mappings(db_id, provider_mappings, overwrite)
-        # set track artist(s)
+        # set track artist(s) and credits
         artists = update.artists if overwrite else cur_item.artists + update.artists
-        await self._set_track_artists(db_id, artists, overwrite=overwrite)
+        resolved_artists: dict[tuple[str, str], int] = {}
+        await self._set_track_artists(
+            db_id, artists, overwrite=overwrite, resolved_artists=resolved_artists
+        )
+        await self._set_credits(
+            db_id, update.credits, overwrite=overwrite, resolved_artists=resolved_artists
+        )
         # update/set track album
         if update.album and set_album:
             await self._set_track_album(
@@ -1742,6 +1755,7 @@ class TracksController(MediaControllerBase[Track]):
         db_id: int,
         artists: Iterable[Artist | ItemMapping],
         overwrite: bool = False,
+        resolved_artists: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """
         Store Track Artists.
@@ -1756,48 +1770,65 @@ class TracksController(MediaControllerBase[Track]):
                 # so keep the stored rows and make the attempt visible
                 self.logger.warning("Ignoring request to clear all artists of track id %s", db_id)
             return
-        if overwrite:
-            # on overwrite, clear the track_artists table first
-            await self.mass.music.database.delete(
-                DB_TABLE_TRACK_ARTISTS,
-                {
-                    "track_id": db_id,
-                },
-            )
-        for artist in all_artists:
-            await self._set_track_artist(db_id, artist=artist, overwrite=overwrite)
-
-    async def _set_track_artist(
-        self, db_id: int, artist: Artist | ItemMapping, overwrite: bool = False
-    ) -> ItemMapping:
-        """Store Track Artist info."""
-        db_artist: Artist | ItemMapping | None = None
-        if artist.provider == "library":
-            db_artist = artist
-        elif existing := await self.mass.music.artists.get_library_item_by_prov_id(
-            artist.item_id, artist.provider
-        ):
-            db_artist = existing
-
-        if not db_artist or overwrite:
-            # Convert ItemMapping to Artist if needed
-            artist_to_add = (
-                self.mass.music.artists.artist_from_item_mapping(artist)
-                if isinstance(artist, ItemMapping)
-                else artist
-            )
-            db_artist = await self.mass.music.artists.add_item_to_library(
-                artist_to_add, overwrite_existing=overwrite
-            )
-        # write (or update) record in track_artists table
-        await self.mass.music.database.insert_or_replace(
-            DB_TABLE_TRACK_ARTISTS,
-            {
-                "track_id": db_id,
-                "artist_id": int(db_artist.item_id),
-            },
+        await self._set_main_artists(
+            db_id, all_artists, overwrite=overwrite, resolved_artists=resolved_artists
         )
-        return ItemMapping.from_item(db_artist)
+
+    async def _set_credits(
+        self,
+        db_id: int,
+        item_credits: Iterable[Credit],
+        overwrite: bool = False,
+        resolved_artists: dict[tuple[str, str], int] | None = None,
+    ) -> None:
+        """
+        Store the credits of a track other than its main artists, replaced on overwrite.
+
+        :param db_id: Library id of the track.
+        :param item_credits: The track's credits; main artist credits are left out.
+        :param overwrite: Replace the stored credits, as a refresh from the source does.
+        :param resolved_artists: Library ids of the artists resolved so far, by provider and item id.
+        """
+        resolved = {} if resolved_artists is None else resolved_artists
+        rows = [
+            (credit, await self._get_credit_artist_id(credit.artist, resolved))
+            for credit in item_credits
+            if credit.role != ArtistRole.MAIN_ARTIST
+        ]
+        if not rows:
+            # a source without credits keeps the stored ones, like an empty artists list does
+            return
+        if overwrite:
+            await self.mass.music.database.execute_write(
+                f"DELETE FROM {DB_TABLE_TRACK_CREDITS} WHERE track_id = :db_id",
+                {"db_id": db_id},
+            )
+        params: dict[str, Any] = {"db_id": db_id}
+        for idx, (credit, artist_id) in enumerate(rows):
+            params |= {
+                f"artist_id{idx}": artist_id,
+                f"role{idx}": credit.role.value,
+                f"instrument{idx}": credit.instrument or "",
+                f"position{idx}": credit.position,
+            }
+        values = ", ".join(
+            f"(:db_id, :artist_id{idx}, :role{idx}, :instrument{idx}, :position{idx})"
+            for idx in range(len(rows))
+        )
+        await self.mass.music.database.execute_write(
+            f"INSERT OR IGNORE INTO {DB_TABLE_TRACK_CREDITS}"
+            f"(track_id, artist_id, role, instrument, position) VALUES {values}",
+            params,
+        )
+
+    async def _get_credit_artist_id(
+        self, artist: Artist | ItemMapping, resolved_artists: dict[tuple[str, str], int]
+    ) -> int:
+        """Return the library ID of a credited artist."""
+        key = (artist.provider, artist.item_id)
+        artist_id = resolved_artists.get(key) or await self._get_library_artist_id(artist)
+        resolved_artists[key] = artist_id
+        return artist_id
 
     def _get_sort_sql(self, field: SortField, direction: SortDirection | None) -> str:
         """Return the ORDER BY clause for a sort field, ARTIST_NAME through the artists join."""
@@ -1806,6 +1837,30 @@ class TracksController(MediaControllerBase[Track]):
                 return "artists.search_name DESC, tracks.search_name ASC"
             return "artists.search_name ASC, tracks.search_name ASC"
         return super()._get_sort_sql(field, direction)
+
+    def _credits_query(self) -> str:
+        """Return a subquery selecting the credits other than the main artists, in role order."""
+        role_order = " ".join(
+            f"WHEN '{role.value}' THEN {idx}" for idx, role in enumerate(ArtistRole)
+        )
+        # json_group_array following the order of an ordered subquery is undocumented
+        # sqlite behavior (see _adapt_query_for_collections)
+        return f"""(SELECT JSON_GROUP_ARRAY(json(credit)) FROM (
+            SELECT json_object(
+                'artist', json_object(
+                    'item_id', artists.item_id,
+                    'provider', 'library',
+                    'name', artists.name,
+                    'sort_name', artists.sort_name,
+                    'media_type', 'artist'
+                ),
+                'role', c.role,
+                'instrument', NULLIF(c.instrument, ''),
+                'position', c.position
+            ) AS credit
+            FROM {DB_TABLE_TRACK_CREDITS} c JOIN artists ON artists.item_id = c.artist_id
+            WHERE c.track_id = {DB_TABLE_TRACKS}.item_id
+            ORDER BY CASE c.role {role_order} ELSE {len(ArtistRole)} END, c.position, c.rowid))"""
 
     def _sync_details_query_parts(self) -> tuple[str, str, dict[str, Any]]:
         """Return extra (columns, joins, params) for the tracks sync-details query."""

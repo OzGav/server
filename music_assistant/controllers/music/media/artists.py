@@ -47,6 +47,7 @@ from music_assistant.constants import (
     DB_TABLE_AUDIOBOOK_ARTISTS,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
     VARIOUS_ARTISTS_MBID,
     VARIOUS_ARTISTS_NAME,
 )
@@ -1952,6 +1953,8 @@ class ArtistsController(MediaControllerBase[Artist]):
                 raise MusicAssistantError("Artist still has tracks linked")
             with contextlib.suppress(MediaNotFoundError):
                 await self.mass.music.tracks.remove_item_from_library(db_row["track_id"])
+        # other credits (e.g. as composer) are dropped, keeping the albums and tracks
+        await self.mass.music.database.delete(DB_TABLE_TRACK_CREDITS, {"artist_id": db_id})
 
     async def _remove_author_narrator_from_library(self, db_id: int, recursive: bool) -> None:
         # recursively also remove author/ narrator audiobooks
