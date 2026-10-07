@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast, final, ove
 import aiohttp
 from music_assistant_models.auth import Scope
 from music_assistant_models.enums import (
+    ArtistRole,
     ArtistType,
     EventType,
     ExternalID,
@@ -36,6 +37,7 @@ from music_assistant_models.media_items import (
     Artist,
     Audiobook,
     AudioFormat,
+    Credit,
     ItemMapping,
     ItemMappingSummary,
     MediaCollection,
@@ -106,6 +108,7 @@ ItemCls = TypeVar("ItemCls", bound="MediaItemType")
 
 JSON_KEYS = (
     "artists",
+    "credits",
     "track_album",
     "metadata",
     "provider_mappings",
@@ -123,11 +126,22 @@ JSON_KEYS = (
 # without relying on SELECT *: album_tracks carries a surrogate autoincrement id that
 # must not be copied along.
 RELATION_TABLE_COLUMNS = {
-    DB_TABLE_ALBUM_ARTISTS: ("album_id", "artist_id"),
+    DB_TABLE_ALBUM_ARTISTS: ("album_id", "artist_id", "role", "instrument", "position"),
     DB_TABLE_ALBUM_TRACKS: ("track_id", "album_id", "disc_number", "track_number"),
     DB_TABLE_AUDIOBOOK_ARTISTS: ("audiobook_id", "artist_id"),
-    DB_TABLE_TRACK_ARTISTS: ("track_id", "artist_id"),
+    DB_TABLE_TRACK_ARTISTS: ("track_id", "artist_id", "role", "instrument", "position"),
 }
+
+# The (table, owner column) holding the artist credits of each credited media type.
+ARTIST_CREDIT_TABLES = {
+    MediaType.ALBUM: (DB_TABLE_ALBUM_ARTISTS, "album_id"),
+    MediaType.TRACK: (DB_TABLE_TRACK_ARTISTS, "track_id"),
+}
+
+# The json_object arguments of a slim artist mapping in a summary row.
+SUMMARY_ARTIST_FIELDS = (
+    "'item_id', artists.item_id, 'name', artists.name, 'sort_name', artists.sort_name"
+)
 
 # When set (task-local), per-item MEDIA_ITEM_ADDED/UPDATED events and the on_item_updated
 # provider write-back are suppressed, so bulk operations (provider sync, provider cleanup)
@@ -2096,6 +2110,38 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             JOIN {m2m_table} ON artists.item_id = {m2m_table}.artist_id
             WHERE {m2m_table}.{m2m_key} = {self.db_table}.item_id)"""
 
+    def _main_artists_query(self, artist_fields: str) -> str:
+        """Return a subquery selecting the main artists as a JSON array, in credited order."""
+        table, owner_column = ARTIST_CREDIT_TABLES[self.media_type]
+        # json_group_array following the order of an ordered subquery is undocumented
+        # sqlite behavior (see _adapt_query_for_collections)
+        return f"""(SELECT JSON_GROUP_ARRAY(json(artist)) FROM (
+            SELECT json_object({artist_fields}) AS artist
+            FROM {table} JOIN artists ON artists.item_id = {table}.artist_id
+            WHERE {table}.{owner_column} = {self.db_table}.item_id
+            AND {table}.role = '{ArtistRole.MAIN_ARTIST.value}'
+            GROUP BY artists.item_id
+            ORDER BY MIN({table}.position), MIN({table}.rowid)))"""
+
+    def _credits_query(self, artist_fields: str) -> str:
+        """Return a subquery selecting all credits as a JSON array, ordered by role and position."""
+        table, owner_column = ARTIST_CREDIT_TABLES[self.media_type]
+        role_order = " ".join(
+            f"WHEN '{role.value}' THEN {idx}" for idx, role in enumerate(ArtistRole)
+        )
+        # relies on the same json_group_array ordering as _main_artists_query
+        return f"""(SELECT JSON_GROUP_ARRAY(json(credit)) FROM (
+            SELECT json_object(
+                'artist', json_object({artist_fields}),
+                'role', {table}.role,
+                'instrument', {table}.instrument,
+                'position', {table}.position
+            ) AS credit
+            FROM {table} JOIN artists ON artists.item_id = {table}.artist_id
+            WHERE {table}.{owner_column} = {self.db_table}.item_id
+            ORDER BY CASE {table}.role {role_order} ELSE {len(ArtistRole)} END,
+                {table}.position, {table}.rowid))"""
+
     def _summary_base_columns(self) -> str:
         """Return the SELECT columns shared by every summary query."""
         # the search/sort/statistics columns are selected so ORDER BY (see sort_keys)
@@ -3110,6 +3156,83 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
     async def _update_library_item_for_merge(self, item_id: int, update: ItemCls) -> None:
         """Merge model state into an existing library item."""
         await self._update_library_item(item_id, update)
+
+    async def _set_main_artists(
+        self, db_id: int, artists: Iterable[Artist | ItemMapping], overwrite: bool = False
+    ) -> None:
+        """Store the main artists of a track or album in the given order."""
+        table, owner_column = ARTIST_CREDIT_TABLES[self.media_type]
+        artist_ids = [await self._get_library_artist_id(x, overwrite) for x in artists]
+        if overwrite:
+            await self.mass.music.database.delete(
+                table, {owner_column: db_id, "role": ArtistRole.MAIN_ARTIST.value}
+            )
+        # different (provider) artists may resolve to the same library artist
+        for position, artist_id in enumerate(dict.fromkeys(artist_ids)):
+            await self.mass.music.database.insert_or_replace(
+                table,
+                {
+                    owner_column: db_id,
+                    "artist_id": artist_id,
+                    "role": ArtistRole.MAIN_ARTIST.value,
+                    "instrument": None,
+                    "position": position,
+                },
+            )
+
+    async def _set_credits(
+        self, db_id: int, item_credits: Iterable[Credit], overwrite: bool = False
+    ) -> None:
+        """Store the non main artist credits of a track or album, replaced on overwrite if given."""
+        table, owner_column = ARTIST_CREDIT_TABLES[self.media_type]
+        rows = [
+            {
+                "db_id": db_id,
+                "artist_id": await self._get_library_artist_id(credit.artist, overwrite),
+                "role": credit.role.value,
+                "instrument": credit.instrument,
+                "position": credit.position,
+            }
+            for credit in item_credits
+            if credit.role != ArtistRole.MAIN_ARTIST
+        ]
+        # a source without credits keeps the stored ones, like an empty artists list does
+        if overwrite and rows:
+            await self.mass.music.database.execute_write(
+                f"DELETE FROM {table} WHERE {owner_column} = :db_id AND role != :main_artist",
+                {"db_id": db_id, "main_artist": ArtistRole.MAIN_ARTIST.value},
+            )
+        for row in rows:
+            await self.mass.music.database.execute_write(
+                f"INSERT OR IGNORE INTO {table}"
+                f"({owner_column}, artist_id, role, instrument, position) "
+                "VALUES (:db_id, :artist_id, :role, :instrument, :position)",
+                row,
+            )
+
+    async def _get_library_artist_id(
+        self, artist: Artist | ItemMapping, overwrite: bool = False
+    ) -> int:
+        """Return the library ID of the given artist, adding it to the library when needed."""
+        db_artist: Artist | ItemMapping | None = None
+        if artist.provider == "library":
+            db_artist = artist
+        elif existing := await self.mass.music.artists.get_library_item_by_prov_id(
+            artist.item_id, artist.provider
+        ):
+            db_artist = existing
+
+        if not db_artist or overwrite:
+            # Convert ItemMapping to Artist if needed
+            artist_to_add = (
+                self.mass.music.artists.artist_from_item_mapping(artist)
+                if isinstance(artist, ItemMapping)
+                else artist
+            )
+            db_artist = await self.mass.music.artists.add_item_to_library(
+                artist_to_add, overwrite_existing=overwrite
+            )
+        return int(db_artist.item_id)
 
     async def _copy_library_item_relations(self, target_id: int, source_id: int) -> None:
         """Copy the relations that reference the merged media item onto the target."""

@@ -19,6 +19,7 @@ from music_assistant_models.background_task import TaskSchedule
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import (
     AlbumType,
+    ArtistRole,
     ConfigEntryType,
     EventType,
     ExternalID,
@@ -932,7 +933,9 @@ def _duplicate_album_sibling_guard() -> str:
     shares_artist = (
         f"EXISTS (SELECT 1 FROM {DB_TABLE_ALBUM_ARTISTS} own "
         f"JOIN {DB_TABLE_ALBUM_ARTISTS} other ON other.artist_id = own.artist_id "
-        f"WHERE own.album_id = {DB_TABLE_ALBUMS}.item_id AND other.album_id = dup.item_id)"
+        f"AND other.role = '{ArtistRole.MAIN_ARTIST.value}' "
+        f"WHERE own.album_id = {DB_TABLE_ALBUMS}.item_id AND other.album_id = dup.item_id "
+        f"AND own.role = '{ArtistRole.MAIN_ARTIST.value}')"
     )
     # a title that normalizes to nothing (e.g. Ed Sheeran's '+', '=' and '÷') matches every
     # other such title, so those fall back to their raw spelling like the album comparison does
@@ -1028,6 +1031,7 @@ def _artists_to_identify_query() -> str:
     has_identified_album = (
         f"EXISTS (SELECT 1 FROM {DB_TABLE_ALBUM_ARTISTS} "
         f"WHERE {DB_TABLE_ALBUM_ARTISTS}.artist_id = {DB_TABLE_ARTISTS}.item_id "
+        f"AND {DB_TABLE_ALBUM_ARTISTS}.role = '{ArtistRole.MAIN_ARTIST.value}' "
         f"AND {album_identified})"
     )
     return f"({marker} ISNULL AND NOT {identified} AND {has_identified_album})"

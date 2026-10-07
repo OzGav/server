@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.auth import Scope
 from music_assistant_models.background_task import BackgroundTask, TaskSchedule
-from music_assistant_models.enums import EventType, ImageType, MediaType, TaskStatus
+from music_assistant_models.enums import ArtistRole, EventType, ImageType, MediaType, TaskStatus
 from music_assistant_models.errors import InvalidDataError
 from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import (
@@ -1760,6 +1760,7 @@ class GenreController(MediaControllerBase[Genre]):
             f"FROM {gm} m "
             f"JOIN {DB_TABLE_TRACK_ARTISTS} ta "
             f"  ON m.media_id = ta.track_id AND m.media_type = 'track' "
+            f"  AND ta.role = '{ArtistRole.MAIN_ARTIST.value}' "
             f"JOIN {pm} p ON p.item_id = ta.track_id AND p.media_type = 'track' "
             f"  AND p.provider_instance IN ({ids_sql}) "
             f"JOIN {DB_TABLE_ARTISTS} art ON art.item_id = ta.artist_id "

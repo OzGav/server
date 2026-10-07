@@ -6,12 +6,13 @@ from typing import NamedTuple
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from music_assistant_models.enums import AlbumType, ExternalID, TaskStatus
+from music_assistant_models.enums import AlbumType, ArtistRole, ExternalID, TaskStatus
 from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
 from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import (
     Album,
     Artist,
+    Credit,
     MediaItemMetadata,
     ProviderMapping,
     Track,
@@ -369,6 +370,33 @@ async def test_keeps_tracks_with_different_artists_apart(mass: MusicAssistant) -
 
     await mass.music._reconcile_duplicate_tracks()
 
+    assert await mass.music.tracks.get_library_item(track_1.item_id)
+    assert await mass.music.tracks.get_library_item(track_2.item_id)
+
+
+async def test_keeps_tracks_sharing_only_another_credit_apart(mass: MusicAssistant) -> None:
+    """A shared artist only makes a candidate pair when it is a main artist of both tracks."""
+    track_1, track_2 = await _build_duplicate_pair(mass)
+    shared_artist = track_1.artists[0]
+    other_artist = await mass.music.artists.add_item_to_library(
+        Artist(
+            item_id="0",
+            provider="library",
+            name="Different Artist",
+            provider_mappings={_mapping("qobuz_instance", "qobuz-other-artist")},
+        )
+    )
+    update = await mass.music.tracks.get_library_item(track_2.item_id)
+    update.artists = UniqueList([other_artist])
+    update.credits = [Credit(artist=shared_artist, role=ArtistRole.COMPOSER)]
+    await mass.music.tracks.update_item_in_library(track_2.item_id, update, overwrite=True)
+
+    with patch.object(
+        mass.music, "_merge_duplicate_track_pair", wraps=mass.music._merge_duplicate_track_pair
+    ) as merge_pair:
+        await mass.music._reconcile_duplicate_tracks()
+
+    merge_pair.assert_not_called()
     assert await mass.music.tracks.get_library_item(track_1.item_id)
     assert await mass.music.tracks.get_library_item(track_2.item_id)
 

@@ -19,6 +19,7 @@ from music_assistant_models.config_entries import (
     ConfigValueType,
 )
 from music_assistant_models.enums import (
+    ArtistRole,
     ConfigEntryType,
     EventType,
     MediaType,
@@ -242,7 +243,8 @@ WHERE t1.search_name IN (SELECT search_name FROM candidate_titles)
     SELECT 1 FROM {DB_TABLE_TRACK_ARTISTS} ta1
     JOIN {DB_TABLE_TRACK_ARTISTS} ta2
       ON ta2.artist_id = ta1.artist_id AND ta2.track_id = t2.item_id
-    WHERE ta1.track_id = t1.item_id)
+     AND ta2.role = '{ArtistRole.MAIN_ARTIST.value}'
+    WHERE ta1.track_id = t1.item_id AND ta1.role = '{ArtistRole.MAIN_ARTIST.value}')
   AND EXISTS (
     SELECT 1 FROM {DB_TABLE_ALBUM_TRACKS} at1
     JOIN {DB_TABLE_ALBUMS} al1 ON al1.item_id = at1.album_id

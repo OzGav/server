@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 from music_assistant_models.auth import Scope
 from music_assistant_models.enums import (
     AlbumType,
+    ArtistRole,
     ArtistType,
     ExternalID,
     ImageType,
@@ -164,7 +165,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         if album_artists_only:
             query_parts.append(
                 f"item_id in (select {DB_TABLE_ALBUM_ARTISTS}.artist_id "
-                f"FROM {DB_TABLE_ALBUM_ARTISTS})"
+                f"FROM {DB_TABLE_ALBUM_ARTISTS} WHERE role = '{ArtistRole.MAIN_ARTIST.value}')"
             )
         if provider_filter := self._ensure_provider_filter(None):
             query_parts.append(
@@ -219,7 +220,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         if album_artists_only and artist_type in (None, ArtistType.SINGER):
             extra_query_parts.append(
                 f"artists.item_id in (select {DB_TABLE_ALBUM_ARTISTS}.artist_id "
-                f"from {DB_TABLE_ALBUM_ARTISTS})"
+                f"from {DB_TABLE_ALBUM_ARTISTS} where role = '{ArtistRole.MAIN_ARTIST.value}')"
             )
         return await self.get_library_items_by_query(
             favorite=favorite,
@@ -859,7 +860,10 @@ class ArtistsController(MediaControllerBase[Artist]):
         if library_item.artist_type != ArtistType.SINGER:
             self.logger.debug("Tracks only available for artists of type ARTIST")
             return []
-        subquery = f"SELECT track_id FROM {DB_TABLE_TRACK_ARTISTS} WHERE artist_id = :artist_id"
+        subquery = (
+            f"SELECT track_id FROM {DB_TABLE_TRACK_ARTISTS} "
+            f"WHERE artist_id = :artist_id AND role = '{ArtistRole.MAIN_ARTIST.value}'"
+        )
         query = f"tracks.item_id in ({subquery})"
         return await self.mass.music.tracks.get_library_items_by_query(
             extra_query_parts=[query],
@@ -898,7 +902,10 @@ class ArtistsController(MediaControllerBase[Artist]):
         if library_item.artist_type != ArtistType.SINGER:
             self.logger.debug("Albums only available for artists of type ARTIST")
             return []
-        subquery = f"SELECT album_id FROM {DB_TABLE_ALBUM_ARTISTS} WHERE artist_id = :artist_id"
+        subquery = (
+            f"SELECT album_id FROM {DB_TABLE_ALBUM_ARTISTS} "
+            f"WHERE artist_id = :artist_id AND role = '{ArtistRole.MAIN_ARTIST.value}'"
+        )
         query = f"albums.item_id in ({subquery})"
         return await self.mass.music.albums.get_library_items_by_query(
             extra_query_parts=[query],
@@ -939,10 +946,14 @@ class ArtistsController(MediaControllerBase[Artist]):
             f"JOIN {DB_TABLE_TRACK_ARTISTS} "
             f"ON {DB_TABLE_TRACK_ARTISTS}.track_id = {DB_TABLE_ALBUM_TRACKS}.track_id "
             f"WHERE {DB_TABLE_TRACK_ARTISTS}.artist_id = :artist_id "
+            f"AND {DB_TABLE_TRACK_ARTISTS}.role = '{ArtistRole.MAIN_ARTIST.value}' "
             f"AND EXISTS(SELECT 1 FROM {DB_TABLE_PROVIDER_MAPPINGS} "
             f"WHERE {' AND '.join(track_mapping_conditions)})"
         )
-        own_albums = f"SELECT album_id FROM {DB_TABLE_ALBUM_ARTISTS} WHERE artist_id = :artist_id"
+        own_albums = (
+            f"SELECT album_id FROM {DB_TABLE_ALBUM_ARTISTS} "
+            f"WHERE artist_id = :artist_id AND role = '{ArtistRole.MAIN_ARTIST.value}'"
+        )
         return await self.mass.music.albums.get_library_items_by_query(
             extra_query_parts=[
                 f"albums.item_id IN ({track_albums})",
@@ -1270,7 +1281,6 @@ class ArtistsController(MediaControllerBase[Artist]):
         if item.mbid == VARIOUS_ARTISTS_MBID:
             item.name = VARIOUS_ARTISTS_NAME
         # no existing item matched: insert item
-        period = getattr(item, "period", None)
         db_id = await self.mass.music.database.insert(
             self.db_table,
             {
@@ -1281,8 +1291,8 @@ class ArtistsController(MediaControllerBase[Artist]):
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
                 "artist_type": item.artist_type,
-                "period": period.value if period else None,
-                "is_classical": bool(getattr(item, "is_classical", False)),
+                "period": item.period,
+                "is_classical": item.is_classical,
             },
         )
         # update/set external id lookup table
@@ -1316,13 +1326,9 @@ class ArtistsController(MediaControllerBase[Artist]):
 
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
-        cur_period = getattr(cur_item, "period", None)
-        update_period = getattr(update, "period", None)
-        period = update_period if overwrite else (cur_period or update_period)
-        is_classical = bool(
-            getattr(update, "is_classical", False)
-            if overwrite
-            else getattr(cur_item, "is_classical", False) or getattr(update, "is_classical", False)
+        period = update.period if overwrite else cur_item.period or update.period
+        is_classical = (
+            update.is_classical if overwrite else cur_item.is_classical or update.is_classical
         )
         await self.mass.music.database.update(
             self.db_table,
@@ -1337,7 +1343,7 @@ class ArtistsController(MediaControllerBase[Artist]):
                 if update.date_added
                 else UNSET,
                 "artist_type": update.artist_type,
-                "period": period.value if period else None,
+                "period": period,
                 "is_classical": is_classical,
             },
         )
@@ -1364,9 +1370,10 @@ class ArtistsController(MediaControllerBase[Artist]):
             raise InvalidDataError(msg)
 
     async def _remove_music_artist_from_library(self, db_id: int, recursive: bool) -> None:
-        # recursively also remove artist albums
+        # recursively also remove the albums and tracks the artist is a main artist of
         for db_row in await self.mass.music.database.get_rows_from_query(
-            f"SELECT album_id FROM {DB_TABLE_ALBUM_ARTISTS} WHERE artist_id = :artist_id",
+            f"SELECT album_id FROM {DB_TABLE_ALBUM_ARTISTS} "
+            f"WHERE artist_id = :artist_id AND role = '{ArtistRole.MAIN_ARTIST.value}'",
             {"artist_id": db_id},
             limit=5000,
         ):
@@ -1374,9 +1381,9 @@ class ArtistsController(MediaControllerBase[Artist]):
                 raise MusicAssistantError("Artist still has albums linked")
             with contextlib.suppress(MediaNotFoundError):
                 await self.mass.music.albums.remove_item_from_library(db_row["album_id"])
-        # recursively also remove artist tracks
         for db_row in await self.mass.music.database.get_rows_from_query(
-            f"SELECT track_id FROM {DB_TABLE_TRACK_ARTISTS} WHERE artist_id = :artist_id",
+            f"SELECT track_id FROM {DB_TABLE_TRACK_ARTISTS} "
+            f"WHERE artist_id = :artist_id AND role = '{ArtistRole.MAIN_ARTIST.value}'",
             {"artist_id": db_id},
             limit=5000,
         ):
@@ -1384,6 +1391,9 @@ class ArtistsController(MediaControllerBase[Artist]):
                 raise MusicAssistantError("Artist still has tracks linked")
             with contextlib.suppress(MediaNotFoundError):
                 await self.mass.music.tracks.remove_item_from_library(db_row["track_id"])
+        # other credits (e.g. as composer) are dropped, keeping the albums and tracks
+        await self.mass.music.database.delete(DB_TABLE_ALBUM_ARTISTS, {"artist_id": db_id})
+        await self.mass.music.database.delete(DB_TABLE_TRACK_ARTISTS, {"artist_id": db_id})
 
     async def _remove_author_narrator_from_library(self, db_id: int, recursive: bool) -> None:
         # recursively also remove author/ narrator audiobooks

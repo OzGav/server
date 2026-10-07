@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 import aiohttp
 from music_assistant_models.auth import Scope
-from music_assistant_models.enums import AlbumType, ExternalID, MediaType, ProviderFeature
+from music_assistant_models.enums import (
+    AlbumType,
+    ArtistRole,
+    ExternalID,
+    MediaType,
+    ProviderFeature,
+)
 from music_assistant_models.errors import (
     InvalidDataError,
     MediaNotFoundError,
@@ -68,7 +74,12 @@ from music_assistant.providers.musicbrainz.provider import (
     release_matches_album,
 )
 
-from .base import EXTERNAL_ID_LOOKUP_ERRORS, MAX_EXTERNAL_ID_MATCH_LOOKUPS, MediaControllerBase
+from .base import (
+    EXTERNAL_ID_LOOKUP_ERRORS,
+    MAX_EXTERNAL_ID_MATCH_LOOKUPS,
+    SUMMARY_ARTIST_FIELDS,
+    MediaControllerBase,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -129,27 +140,27 @@ class AlbumsController(MediaControllerBase[Album]):
     @property
     def base_query(self) -> tuple[str, dict[str, Any]]:
         """Return the base SELECT query for albums and its bound query params."""
+        artist_fields = """
+                'item_id', artists.item_id,
+                'provider', 'library',
+                'name', artists.name,
+                'sort_name', artists.sort_name,
+                'media_type', 'artist'"""
         query = f"""
         SELECT
             albums.*,
             {self._external_ids_query()} AS external_ids,
             {self._favorite_query()} AS favorite,
             {self._provider_mappings_query()} AS provider_mappings,
-            (SELECT JSON_GROUP_ARRAY(
-                json_object(
-                'item_id', artists.item_id,
-                'provider', 'library',
-                    'name', artists.name,
-                    'sort_name', artists.sort_name,
-                    'media_type', 'artist'
-                )) FROM artists JOIN album_artists on album_artists.album_id = albums.item_id  WHERE artists.item_id = album_artists.artist_id) AS artists
+            {self._main_artists_query(artist_fields)} AS artists,
+            {self._credits_query(artist_fields)} AS credits
             FROM albums"""
         return query, {}
 
     @property
     def summary_query(self) -> tuple[str, dict[str, Any]]:
         """Return the slim SELECT query used for album summary listings."""
-        artists_query = self._artist_mappings_summary_query(DB_TABLE_ALBUM_ARTISTS, "album_id")
+        artists_query = self._main_artists_query(SUMMARY_ARTIST_FIELDS)
         query = f"""
         SELECT
             {self._summary_base_columns()},
@@ -240,6 +251,7 @@ class AlbumsController(MediaControllerBase[Album]):
             # join artist table to allow sorting on artist name
             extra_join_parts.append(
                 "JOIN album_artists ON album_artists.album_id = albums.item_id "
+                f"AND album_artists.role = '{ArtistRole.MAIN_ARTIST.value}' "
                 "JOIN artists ON artists.item_id = album_artists.artist_id "
             )
             artist_table_joined = True
@@ -258,6 +270,7 @@ class AlbumsController(MediaControllerBase[Album]):
             # use join with artists table to filter on artist name
             extra_join_parts.append(
                 "JOIN album_artists ON album_artists.album_id = albums.item_id "
+                f"AND album_artists.role = '{ArtistRole.MAIN_ARTIST.value}' "
                 "JOIN artists ON artists.item_id = album_artists.artist_id " + artist_clause
                 if not artist_table_joined
                 else artist_clause
@@ -291,6 +304,7 @@ class AlbumsController(MediaControllerBase[Album]):
             )
             extra_join_parts.append(
                 "JOIN album_artists ON album_artists.album_id = albums.item_id "
+                f"AND album_artists.role = '{ArtistRole.MAIN_ARTIST.value}' "
                 "JOIN artists ON artists.item_id = album_artists.artist_id " + artist_clause
                 if not artist_table_joined
                 else artist_clause
@@ -794,15 +808,16 @@ class AlbumsController(MediaControllerBase[Album]):
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
-                "is_classical": bool(getattr(item, "is_classical", False)),
+                "is_classical": item.is_classical,
             },
         )
         # update/set external id lookup table
         await self.set_external_ids(db_id, item.external_ids)
         # update/set provider_mappings table
         await self.set_provider_mappings(db_id, item.provider_mappings)
-        # set track artist(s)
+        # set album artist(s) and credits
         await self._set_album_artists(db_id, item.artists)
+        await self._set_credits(db_id, item.credits)
         self.logger.debug("added %s to database (id: %s)", item.name, db_id)
         return db_id
 
@@ -820,10 +835,8 @@ class AlbumsController(MediaControllerBase[Album]):
         cur_item.external_ids.update(update.external_ids)
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
-        is_classical = bool(
-            getattr(update, "is_classical", False)
-            if overwrite
-            else getattr(cur_item, "is_classical", False) or getattr(update, "is_classical", False)
+        is_classical = (
+            update.is_classical if overwrite else cur_item.is_classical or update.is_classical
         )
         await self.mass.music.database.update(
             self.db_table,
@@ -856,9 +869,10 @@ class AlbumsController(MediaControllerBase[Album]):
             cur_item.provider_mappings, update.provider_mappings, overwrite
         )
         await self.set_provider_mappings(db_id, provider_mappings, overwrite)
-        # set album artist(s)
+        # set album artist(s) and credits
         artists = update.artists if overwrite else cur_item.artists + update.artists
         await self._set_album_artists(db_id, artists, overwrite=overwrite)
+        await self._set_credits(db_id, update.credits, overwrite=overwrite)
         self.logger.debug("updated %s in database: (id %s)", update.name, db_id)
 
     async def _get_provider_album_tracks(
@@ -1336,48 +1350,7 @@ class AlbumsController(MediaControllerBase[Album]):
                 # so keep the stored rows and make the attempt visible
                 self.logger.warning("Ignoring request to clear all artists of album id %s", db_id)
             return
-        if overwrite:
-            # on overwrite, clear the album_artists table first
-            await self.mass.music.database.delete(
-                DB_TABLE_ALBUM_ARTISTS,
-                {
-                    "album_id": db_id,
-                },
-            )
-        for artist in all_artists:
-            await self._set_album_artist(db_id, artist=artist, overwrite=overwrite)
-
-    async def _set_album_artist(
-        self, db_id: int, artist: Artist | ItemMapping, overwrite: bool = False
-    ) -> ItemMapping:
-        """Store Album Artist info."""
-        db_artist: Artist | ItemMapping | None = None
-        if artist.provider == "library":
-            db_artist = artist
-        elif existing := await self.mass.music.artists.get_library_item_by_prov_id(
-            artist.item_id, artist.provider
-        ):
-            db_artist = existing
-
-        if not db_artist or overwrite:
-            # Convert ItemMapping to Artist if needed
-            artist_to_add = (
-                self.mass.music.artists.artist_from_item_mapping(artist)
-                if isinstance(artist, ItemMapping)
-                else artist
-            )
-            db_artist = await self.mass.music.artists.add_item_to_library(
-                artist_to_add, overwrite_existing=overwrite
-            )
-        # write (or update) record in album_artists table
-        await self.mass.music.database.insert_or_replace(
-            DB_TABLE_ALBUM_ARTISTS,
-            {
-                "album_id": db_id,
-                "artist_id": int(db_artist.item_id),
-            },
-        )
-        return ItemMapping.from_item(db_artist)
+        await self._set_main_artists(db_id, all_artists, overwrite=overwrite)
 
     async def _set_album_track(self, db_id: int, db_track_id: int, track: Track) -> None:
         """Store Album Track info."""
