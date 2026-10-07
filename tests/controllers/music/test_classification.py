@@ -482,7 +482,7 @@ class TestHasClassicalContent:
         await mass.music.tracks.remove_item_from_library(classical.item_id)
         without_track = await mass.music.has_classical_content()
         await _add_work(mass)
-        with_work = await mass.music.has_classical_content()
+        with_only_a_work = await mass.music.has_classical_content()
 
         assert not empty
         assert not non_classical
@@ -490,4 +490,4 @@ class TestHasClassicalContent:
         assert not any(row["is_classical"] for row in flags)
         assert with_track
         assert not without_track
-        assert with_work
+        assert not with_only_a_work
