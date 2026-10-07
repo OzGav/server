@@ -193,6 +193,38 @@ def test_sort_options_command_serves_every_library_listing(mass: MusicAssistant)
         assert [option.field for option in options] == list(MEDIA_TYPE_SORT_FIELDS[media_type])
 
 
+def test_sort_options_command_serves_the_works_and_classical_listings(
+    mass: MusicAssistant,
+) -> None:
+    """
+    The works and each classical browse listing offer their own fields, the default first.
+
+    Works sort on the composer by default, else on the title or the year composed.
+    """
+    expected = {
+        ListingType.LIBRARY_WORKS: [SortField.COMPOSER, SortField.NAME, SortField.YEAR],
+        ListingType.CLASSICAL_COMPOSERS: [
+            SortField.SORT_NAME,
+            SortField.NAME,
+            SortField.WORK_COUNT,
+        ],
+        ListingType.CLASSICAL_PERFORMERS: [SortField.NAME, SortField.RECORDING_COUNT],
+        ListingType.CLASSICAL_WORKS: [
+            SortField.COMPOSER,
+            SortField.NAME,
+            SortField.YEAR,
+            SortField.RECORDING_COUNT,
+        ],
+        ListingType.CLASSICAL_OTHER_TRACKS: [
+            SortField.NAME,
+            SortField.YEAR,
+            SortField.TIMESTAMP_ADDED,
+        ],
+    }
+    for listing, fields in expected.items():
+        assert [option.field for option in mass.music.sort_options(listing)] == fields
+
+
 def test_library_sort_options_hold_the_listing_specific_fields() -> None:
     """Albums, tracks and audiobooks add their own fields; the random options carry no direction."""
     fields = {
