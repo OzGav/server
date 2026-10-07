@@ -122,6 +122,7 @@ from music_assistant.controllers.music.media.playlists import PlaylistController
 from music_assistant.controllers.music.media.podcasts import PodcastsController
 from music_assistant.controllers.music.media.radio import RadioController
 from music_assistant.controllers.music.media.tracks import TracksController
+from music_assistant.controllers.music.media.works import WorksController
 from music_assistant.controllers.music.recency import RecencyEngine
 from music_assistant.controllers.music.recommendations.controller import (
     RecommendationsController,
@@ -405,6 +406,7 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         self.audiobooks = AudiobooksController(self.mass)
         self.podcasts = PodcastsController(self.mass)
         self.genres = GenreController(self.mass)
+        self.works = WorksController(self.mass)
         self.recommendations = RecommendationsController(self.mass)
         self.recency = RecencyEngine(self.mass)
         self.favorites = FavoritesStore(self.mass)
@@ -1815,8 +1817,8 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         media_type = media_item.media_type
         ctrl = self.get_controller(media_type)
 
-        # genres are library-only items with no provider mappings, nothing to refresh
-        if media_type == MediaType.GENRE:
+        # genres and works are library-only items with no provider mappings, nothing to refresh
+        if media_type in (MediaType.GENRE, MediaType.WORK):
             return media_item
 
         library_id = media_item.item_id if media_item.provider == "library" else None
@@ -2369,6 +2371,7 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         | AudiobooksController
         | PodcastsController
         | GenreController
+        | WorksController
     ):
         """Return controller for MediaType."""
         if media_type == MediaType.ARTIST:
@@ -2389,6 +2392,8 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
             return self.podcasts
         if media_type == MediaType.GENRE:
             return self.genres
+        if media_type == MediaType.WORK:
+            return self.works
         raise NotImplementedError(
             f"No media controller available for media type: {media_type.value}"
         )
@@ -2404,6 +2409,7 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         | AudiobooksController
         | PodcastsController
         | GenreController
+        | WorksController
     ):
         """Return controller for MediaType."""
         media_type = get_collection_item_media_type_from_item_id(item_id)
