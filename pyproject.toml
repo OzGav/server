@@ -26,7 +26,7 @@ dependencies = [
   "ifaddr==0.2.0",
   "getmac==0.9.5",
   "mashumaro==3.22",
-  "music-assistant-models==1.1.216",
+  "music-assistant-models",
   "music-assistant-frontend==2.17.332",
   "mutagen==1.48.1",
   "orjson==3.11.6",
@@ -289,6 +289,8 @@ no-binary-package = ["urllib3-future"]
 [tool.uv.sources]
 torch = {index = "pytorch-cpu"}
 torchaudio = {index = "pytorch-cpu"}
+# TEMP(classical): use the unreleased classical models until they are published
+music-assistant-models = {git = "file:///home/ma/models", branch = "classical-stage1"}
 
 [build-system]
 build-backend = "setuptools.build_meta"
