@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 from music_assistant_models.auth import Scope
 from music_assistant_models.background_task import BackgroundTask, TaskSchedule
 from music_assistant_models.enums import (
+    ArtistRole,
     EventType,
     ImageType,
     MediaType,
@@ -1271,14 +1272,16 @@ class GenreController(MediaControllerBase[Genre]):
             if controller.media_type == MediaType.TRACK:
                 extra_join_parts.extend(
                     (
-                        "JOIN track_artists ON track_artists.track_id = tracks.item_id",
+                        "JOIN track_artists ON track_artists.track_id = tracks.item_id "
+                        f"AND track_artists.role = '{ArtistRole.MAIN_ARTIST.value}'",
                         "JOIN artists ON artists.item_id = track_artists.artist_id",
                     )
                 )
             elif controller.media_type == MediaType.ALBUM:
                 extra_join_parts.extend(
                     (
-                        "JOIN album_artists ON album_artists.album_id = albums.item_id",
+                        "JOIN album_artists ON album_artists.album_id = albums.item_id "
+                        f"AND album_artists.role = '{ArtistRole.MAIN_ARTIST.value}'",
                         "JOIN artists ON artists.item_id = album_artists.artist_id",
                     )
                 )
@@ -1843,6 +1846,7 @@ class GenreController(MediaControllerBase[Genre]):
             f"FROM {gm} m "
             f"JOIN {DB_TABLE_TRACK_ARTISTS} ta "
             f"  ON m.media_id = ta.track_id AND m.media_type = 'track' "
+            f"  AND ta.role = '{ArtistRole.MAIN_ARTIST.value}' "
             f"JOIN {pm} p ON p.item_id = ta.track_id AND p.media_type = 'track' "
             f"  AND p.provider_instance IN ({ids_sql}) "
             f"JOIN {DB_TABLE_ARTISTS} art ON art.item_id = ta.artist_id "
