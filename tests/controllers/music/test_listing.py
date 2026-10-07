@@ -90,7 +90,6 @@ SORT_FIELD_ATTRIBUTES = {
 # the listings that sort in SQL, on the columns of the library rather than on the items
 SQL_LISTINGS = {
     *LIBRARY_LISTINGS.values(),
-    ListingType.LIBRARY_WORKS,
     ListingType.GENRE_TRACKS,
     ListingType.GENRE_ALBUMS,
     ListingType.CLASSICAL_COMPOSERS,
