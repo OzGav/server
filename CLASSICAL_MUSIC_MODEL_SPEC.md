@@ -169,11 +169,36 @@ class Recording(DataClassDictMixin):
     tracks: list[Track] = field(default_factory=list)    # movements, in movement order
     credits: list[Credit] = field(default_factory=list)  # performing credits (no composer)
     year: int | None = None         # recording year (album year until Stage 6 enrichment, see #16)
-    album: ItemMapping | None = None  # source album
+    albums: list[ItemMapping] = field(default_factory=list)  # every album it appears on
     duration: int = 0               # seconds, sum of movements
 ```
 
-The movement tracks are full `Track` objects, so play, favourite and context-menu actions on a recording reuse the normal track handling.
+The movement tracks are full `Track` objects, so play, favourite and context-menu actions on a recording reuse the normal track handling. `albums` lists every album the recording appears on, the album its tracks come from first (Decisions log #76).
+
+### Classical list rows
+
+The classical list commands return small row types that carry the counts and roles a list needs next to the item (Decisions log #77).
+
+```python
+@dataclass(kw_only=True)
+class ClassicalComposer(DataClassDictMixin):
+    artist: ArtistSummary
+    work_count: int = 0
+    recording_count: int = 0
+
+@dataclass(kw_only=True)
+class ClassicalPerformer(DataClassDictMixin):
+    artist: ArtistSummary
+    main_role: ArtistRole           # the performing role with the most credits (#47)
+    roles: list[ArtistRole] = field(default_factory=list)  # all performing roles
+    work_count: int = 0
+    recording_count: int = 0
+
+@dataclass(kw_only=True)
+class ClassicalWorkEntry(DataClassDictMixin):
+    work: WorkSummary
+    recording_count: int = 0        # scoped to the performer when the list is filtered by one (#32)
+```
 
 ### `MediaType.WORK`
 
@@ -516,6 +541,27 @@ Work(
 - **`ArtistRole` enum** may gain new values in future versions. Consumers should fall through to `PERFORMER` for unknown roles.
 - **`WorkType` and `Period`** enums may gain new values. Consumers should fall through to `OTHER` (WorkType) or ignore (Period) for unknowns.
 
+## Classical API (Stage 3d)
+
+The contract the frontend's Classical view is built against (Decisions log #79). Every command only considers classical tracks (`Track.is_classical`). Every list takes `search`, `limit`, `offset` and `order_by` (#48); each sort also has a `_desc` variant.
+
+| Command | Returns | Filters | Sorts (`order_by`) |
+|---|---|---|---|
+| `music/classical/composers` | `ClassicalComposer` rows | none | `sort_name` (default), `name`, `work_count` |
+| `music/classical/performers` | `ClassicalPerformer` rows | `role`: performers holding that role among their roles (#47) | `name` (default), `recording_count` |
+| `music/classical/works` | `ClassicalWorkEntry` rows | `composer_id`; `performer_id` (recording counts scoped to that performer, #32); `year_from` / `year_to` on composition year (#43) | `composer` (default, then catalogue number), `name`, `composition_year`, `recording_count` (#60) |
+| `music/classical/recordings` | `Recording` list in the fixed order of #18 | `work_id` (required); `performer_id` | none |
+| `music/classical/other_tracks` | `Track` list of classical tracks without a work (#33) | `artist_id` (required); `as_composer`: composer credits when true, other credits when false | `name` (default), `year`, `timestamp_added` |
+| `music/has_classical_content` | `bool` (Stage 3c) | none | none |
+
+Who appears where:
+
+- **Composers** are artists with a composer credit on a classical track. `work_count` counts their classical works, `recording_count` the recordings of those works.
+- **Performers** are artists with a performing role (conductor, orchestra, ensemble, choir, soloist, performer) on a classical track. Lyricists and arrangers are not performers (#29).
+- **Works** are works with at least one classical track (#67). `recording_count` counts recordings as defined in #76.
+
+Detail headers use the existing commands (`music/artists/get`, `music/works/get`). A composer's page lists `music/classical/works?composer_id=…`, a performer's page `music/classical/works?performer_id=…`. Favouriting a whole recording is done by the frontend favouriting each of its movement tracks with the existing favourite commands (#78).
+
 ## Frontend integration approach
 
 ### Coexistence with standard browse views
@@ -619,7 +665,7 @@ Records of the substantive design questions that came up during drafting and the
 15. **Navigation: contextual filter on Work detail.** *Resolved.* All "list of works" views navigate to the same Work detail page. When arrival happens from a performer-filtered context, the Work detail page applies an implicit recording filter to that performer with a "Show all" escape hatch. From Composer detail / Works tab / Search / OTHER VERSIONS, no filter is applied.
 15a. **Explicit filter input on Work detail (refines #15).** The contextual filter described in #15 is reached via an **explicit filter affordance** at the top of the recordings list. A free-text input field (placeholder *"Filter recordings…"*) is available on every Work detail page. On performer-context arrival the input is replaced by the existing "Showing N recordings by [name]" status banner with SHOW ALL. On manual typing, filter applies dynamically. On Enter, input transforms into the same banner. Clicking the banner returns to editable input with the term pre-filled. Filter matches against any visible metadata on recording rows — all performer names, album name, recording year. Side benefit: addresses the scale problem for heavily-recorded works (Beethoven 5 has hundreds of MB recordings; Bach BWV 1041, Vivaldi *Four Seasons*, Pachelbel Canon are similar).
 16. **Recording year provenance on Work detail.** *Resolved:* sourced from MusicBrainz Recording's first-release-date when MB enrichment is available. Displays original-recording dates correctly for reissues — a 1962 Karajan recording released in a 2010 box set displays as 1962, not 2010. Falls back to album release date when MB data isn't available.
-17. **Grouping recordings on Work detail.** *Resolved:* recordings are grouped by MusicBrainz Recording ID when MB enrichment is present, else by the heuristic `(Work + conductor + ensemble + recording_year)`. Each recording collapses its movements into a nested ordered list beneath the header row. The source album is **not** the grouping key — a single recording can be re-released on multiple albums; the expanded view shows the source album as a separate link (`→ Album Title (year)`) so the user can navigate to the album context, but the grouping is per-performance, not per-release. Two recordings by the same conductor and ensemble from different years appear as separate rows (e.g. Karajan/BPO 1962 and Karajan/BPO 1977 are distinct performances of Beethoven's 5th).
+17. **Grouping recordings on Work detail.** *Superseded by #76.* *Originally resolved:* recordings are grouped by MusicBrainz Recording ID when MB enrichment is present, else by the heuristic `(Work + conductor + ensemble + recording_year)`. Each recording collapses its movements into a nested ordered list beneath the header row. The source album is **not** the grouping key — a single recording can be re-released on multiple albums; the expanded view shows the source album as a separate link (`→ Album Title (year)`) so the user can navigate to the album context, but the grouping is per-performance, not per-release. Two recordings by the same conductor and ensemble from different years appear as separate rows (e.g. Karajan/BPO 1962 and Karajan/BPO 1977 are distinct performances of Beethoven's 5th).
 18. **Sort order on Work detail recordings.** *Resolved:* recordings are sorted by a fixed multi-key comparator with **no user-facing sort control**. Alternative sorts on a single Work's recordings are not useful enough to justify a control, so the page renders in one canonical order:
 
     1. `year` ascending (chronological interpretive history — 1962 Karajan before 1977 Karajan before 1979 Bernstein reads as an arc of interpretations over time).
@@ -728,6 +774,10 @@ Records of the substantive design questions that came up during drafting and the
 73. **Movement titles split whatever the movement tags say.** *Resolved (amends #70):* a work title with the "Parent: I. Movement" shape is split also when the track has movement tags, so all movements share one work. The movement name, number and total from the tags win; values parsed from the title only fill fields the tags leave empty. With movement tags and several work values, the track links to the most general value. A MusicBrainz work id is attached to the linked work only when work titles and ids pair up one to one; every other work id stays on the track for Stage 6.
 74. **Stage 4 scope notes.** *Resolved:* credit artists are resolved lightly (MusicBrainz id, sort name, name) unless they are also the track or album artist, which keeps a scan fast; a composer's `artist.nfo` is therefore only read when the composer is also a track or album artist. A composer's period comes from `artist.nfo`, else `album.nfo`, else the track's own genres; agreeing on the most frequent period across all of a composer's tracks is left to Stage 6, which derives periods from composer dates.
 75. **MusicBrainz placeholder artists give no credit.** *Resolved:* Picard writes MusicBrainz's special purpose artists as names, such as "[traditional]" as composer or "[anonymous]" as lyricist. A credit whose name is in square brackets is skipped, so these never become library artists (they would otherwise show up in the Composers tab). The track simply has no credit for that role, which is what the placeholder means. Seen on a real Picard-tagged library.
+76. **What a Recording is.** *Resolved (corrects #17):* a MusicBrainz recording is a single track (one movement), so it cannot group a performance's movements. The server builds a Recording in two steps. Movements of a work group into one performance by their conductors, orchestras / ensembles / choirs and year. The same movement found on several albums (the same MusicBrainz recording id, else the same performers, movement and year) collapses to one track, so a reissue does not show as a second recording. A Recording lists every album it appears on (`albums`), as a small source details section in the frontend; the album holding most of its movements comes first (earliest on a tie), and the recording's tracks come from that album where possible. The year is the album year until Stage 6 (#16).
+77. **List rows carry counts in small types.** *Resolved:* the classical lists return `ClassicalComposer`, `ClassicalPerformer` and `ClassicalWorkEntry` rows (see Classical list rows) instead of adding count fields to `Artist` and `Work`.
+78. **Favouriting a recording is done by the frontend.** *Resolved (refines #23):* the recording's heart favourites all its movements by calling the existing favourite command per movement track; the heart shows as on when every movement is a favourite. No server command is added.
+79. **The Stage 3d API contract.** *Resolved:* the commands, filters, sorts and row types in the Classical API section are the contract the frontend is built against.
 
 ## Correction to earlier entries
 
