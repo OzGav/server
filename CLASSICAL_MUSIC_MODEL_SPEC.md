@@ -39,9 +39,9 @@ The mapping from each user need above to the implementing stage(s) appears in th
 
 | # | Stage | Repo | Dep. | Notes |
 |---|---|---|---|---|
-| 1 | **Model changes** | `music-assistant-models` | — | New `Work` MediaItem, `ArtistRole` enum, `Credit` type, `Period` enum, additive fields on `Track`/`Album`/`Artist`. Fully non-breaking. *(See `CLASSICAL_MUSIC_STAGE_1_MODELS.md`.)* |
-| 2 | **Database schema & migrations** | `music-assistant/server` | 1 | New `works` table, `work_arrangements` junction, role/instrument/position columns on `track_artists` and `album_artists`, `is_classical` columns, `period` column. |
-| 3 | **Server controllers & API** | `music-assistant/server` | 2 | `WorksController` mirrors per-MediaType controllers; role-typed queries on tracks/albums; classical-scoped views. |
+| 1 | **Model changes** | `music-assistant-models` | — | New `Work` MediaItem and `WorkSummary`, `Recording` type, `ArtistRole` enum, `Credit` type, `Period` enum, additive fields on `Track`/`Album`/`Artist`. Fully non-breaking. *(See `CLASSICAL_MUSIC_STAGE_1_MODELS.md`.)* |
+| 2 | **Database schema & migrations** | `music-assistant/server` | 1 | New `works` table (incl. `composition_year`, `language`, `musical_key`, `parent_work_id`), `work_artists` link table (composers, work-level arrangers), `work_arrangements` junction, role/instrument/position columns on `track_artists` and `album_artists`, `work_id` / `movement_*` columns on `tracks`, `is_classical` columns, `period` column. See Decisions log #49. |
+| 3 | **Server controllers & API** | `music-assistant/server` | 2 | Split into four stacked parts (Decisions log #44): **3a** role-typed credits on tracks/albums; **3b** `WorksController`; **3c** `is_classical` classification; **3d** classical browse API for the frontend. |
 | 4 | **Local file tag parsing** | `music-assistant/server` | 3 | Picard tag mapping + Roon / Classical Extras fallbacks. Populates credits, work, movement fields. Also covers CUE sheet parsing (see PR #3751) — classical fields surface from `REM` lines in the cue file and/or the underlying audio file's own tags. |
 | 5 | **Streaming provider mapping** | `music-assistant/server` | 3 | Per-provider extraction of composer / conductor / performer credits and MB Work IDs where available. |
 | 6 | **MusicBrainz enrichment** | `music-assistant/server` | 3 | Recording-Work links, composer/conductor/orchestra relationships, Work metadata, composer birth/death dates for Period inference. |
@@ -53,6 +53,8 @@ The mapping from each user need above to the implementing stage(s) appears in th
 ## Backwards compatibility
 
 All additions have safe defaults (`None`, empty list, empty set). No existing field changes type or is removed. Old serialised data deserialises without error. Old code reading `Track.artists`, `Album.artists`, `Track.metadata.performers` sees no change in shape or content.
+
+`Track.metadata.grouping` and `Track.metadata.performers` are not deprecated (Decisions log #50).
 
 ### Synchronisation rule for `artists` vs `credits[role=MAIN_ARTIST]`
 
@@ -149,6 +151,29 @@ Notes on Work fields:
 - `composition_year` is the year the Work was composed. For an arrangement Work, this is the year the arrangement was made. Populated from MB Work begin-date's year portion at enrichment time.
 - `language` for vocal works (opera / lieder / song cycles). Null for instrumental works.
 - `musical_key` is the tonal key. Often embedded in a work's title, stored as a separate filterable field for cross-work browsing.
+- Storage (Stage 2): `composers` live in a `work_artists` link table (work, artist, role, position) rather than a JSON column, and `parent_work` is stored as a `parent_work_id` column referencing `works`. The model keeps exposing both as mappings; see Decisions log #49.
+
+### `WorkSummary`
+
+Lightweight version of `Work` for list views, following the summary pattern every other MediaItem type has. Carries what a works list needs: composers, catalog numbers, work type and composition year.
+
+### `Recording` (dataclass)
+
+One performance of a Work, assembled by the server on request. Not a MediaItem and not stored: recordings are groupings of tracks (Decisions log #20, #46).
+
+```python
+@dataclass(kw_only=True)
+class Recording(DataClassDictMixin):
+    key: str                        # stable id of this grouping
+    work: ItemMapping
+    tracks: list[Track] = field(default_factory=list)    # movements, in movement order
+    credits: list[Credit] = field(default_factory=list)  # performing credits (no composer)
+    year: int | None = None         # recording year (album year until Stage 6 enrichment, see #16)
+    album: ItemMapping | None = None  # source album
+    duration: int = 0               # seconds, sum of movements
+```
+
+The movement tracks are full `Track` objects, so play, favourite and context-menu actions on a recording reuse the normal track handling.
 
 ### `MediaType.WORK`
 
@@ -167,7 +192,7 @@ class Period(StrEnum):
     CONTEMPORARY = "contemporary"   # c. 1975 – present
 ```
 
-Seven buckets matching Apple Music Classical / Roon / IMSLP / Wikipedia consensus. Date ranges are documentation only; inference rules live in Classification policy below.
+Seven buckets matching Apple Music Classical / Roon / IMSLP / Wikipedia consensus. Date ranges are documentation only; inference rules live in Classification policy below. An unknown `Period` value deserialises to `None` on `Artist.period` instead of raising (Decisions log #51).
 
 ## Modified types
 
@@ -675,18 +700,29 @@ Records of the substantive design questions that came up during drafting and the
     - Work detail: `recording.year` (performance year, per #16).
     - Show all on the filter banner and navigating to another work both clear the range.
 
+44. **Stage 3 split into four stacked parts.** *Resolved:* **3a** credits foundation: read and write role-typed credits on tracks and albums, keep `artists` equal to the `MAIN_ARTIST` credits ordered by `position`, and make existing code role-aware (artist lists, merges, artist removal, search and sort joins, duplicate detection). **3b** `WorksController`: library-only like genres, `Track.work` / `movement_*` read and write, cleanup, favourites. **3c** `is_classical` classification per the Classification policy, recomputed when its inputs change, plus the "has classical content" probe. **3d** classical browse API: composers and performers lists with counts, composer works, work recordings, performer works with scoped counts, other tracks, favouriting a recording. Each part is its own branch stacked on the previous one.
+45. **API returns real objects.** *Resolved:* the classical browse commands return the standard server objects (`Artist`, `Work` / `WorkSummary`, `Track` with credits and movement fields) plus the `Recording` type and counts. The frontend adapts its mock shapes to these rather than the server mirroring the mockup's flat summary types.
+46. **Recordings are grouped server-side.** *Resolved (refines #17):* the server groups a Work's tracks into `Recording`s, by MusicBrainz Recording ID when known, else by Work + conductor + ensemble + recording year. Every client gets the same grouping, and playing or favouriting a whole recording uses it.
+47. **Performer roles on the Performers tab.** *Resolved:* each performer carries one *main* role for display (the performing role with the most credits) and the list of all their performing roles. The role chips filter on the full list, so someone credited as both conductor and soloist shows under both chips while their card shows one role.
+48. **Paging.** *Resolved:* the classical list commands accept the usual `limit` / `offset` / `search` / `sort` parameters like every other library listing. The frontend may keep loading everything for now.
+49. **Work storage.** *Resolved:* `Work.composers` is stored in a `work_artists` link table (work, artist, role, position) instead of a JSON column, so "works by composer X" can use an index and artist merges and removals keep it correct; the role column also holds work-level arrangers. `Work.parent_work` is stored as a `parent_work_id` column referencing `works`, so names never go stale and "children of a work" is indexable. `composition_year`, `language` and `musical_key` get their own columns.
+50. **`metadata.grouping` and `metadata.performers` are not deprecated.** *Resolved:* `grouping` is a general-purpose tag used outside classical, so `Track.work` does not replace it. `performers` becomes redundant once credits are populated; the intended end state is that the server derives it from credits so older clients keep working. That and any deprecation are decided after Stage 5, when providers fill credits.
+51. **Unknown `Period` values.** *Resolved:* `ArtistRole` and `WorkType` fall back to `PERFORMER` / `OTHER`, but `Period` has no neutral member, so an unknown period deserialises to `None` on `Artist.period` instead of raising.
+
 ## Correction to earlier entries
 
 - **Decision #22 URL scheme.** The composer detail route is `/classical/composers/:id` (plural), matching the tab path segment. Same pluralisation for `/classical/works/:id` and `/classical/performers/:id`. Route `meta.hideTabs` is a misnomer — it does not hide the tab bar, only drops content padding so a detail page's InfoHeader banner can run full-bleed.
 - **Sort defaults on Works tab.** Default sort is by composer, and within a composer by catalog number (canonical Op. / BWV / K. order), with empty catalogs sorting last. Options: Composer / Title / Year composed / Recording count.
 - **Sort defaults on Composers tab.** Default is `sort_name` (surname-first when the SORT tag is present, else display name). Options: Sort name / Name / Work count.
 - **Sort defaults on Performers tab.** Default is `name`; performers have no `sort_name` field. Options: Name / Recording count only.
+- **Work fields in the code.** This spec always listed `composition_year`, `language` and `musical_key` on `Work`, but the Stage 1 models and Stage 2 table were built without them, along with a `WorkSummary`. Both stages were amended (unreleased, so no extra migration step). From now on each stage starts by comparing this spec against the code of the stages it builds on.
 
 ## Open questions
 
 1. **`Track.section` (Roon `SECTION` equivalent).** Roon supports a three-level hierarchy `WORK → SECTION → PART` for operas (e.g. "Le nozze di Figaro" → "Act 1" → "Cinque... dieci..."). Our model handles two levels. For Roon-style opera tagging, an additive `Track.section: str | None` field would capture the intermediate level cheaply. Defer until a concrete consumer needs it.
 2. **`Track.performance_id` (Roon `WORKID` equivalent).** Would disambiguate multiple recordings of the same Work on a single album when the heuristic (Work + conductor + ensemble grouping) can't tell them apart. **No verified real-world example identified**; deferred until a user reports an album where the heuristic fails.
 3. **Movements view on Work detail (group-by toggle).** A *Group by* toggle at the top of the recordings list — Recording (default) vs. Movement — would let users transpose the data to compare the same movement across recordings ("how does Furtwängler's Adagio compare to Karajan's?"). Frontend-only addition. Deferred to post-Stage 10 polish unless demand surfaces.
+4. **Where a Work tag is kept without a Work.** The Classification policy keeps a `MUSICBRAINZ_WORKID` / `WORK` tag "on the track row" when there is no classical-context signal, but no storage is defined yet (multi-value WORKIDs, #27, rule out simply reusing the single `MB_WORK` external id). To be decided in Stage 4 planning; Stage 2 is unreleased, so columns can still be added there.
 
 ## References
 

@@ -64,7 +64,7 @@ To keep it manageable the work is split into 10 stages, each independently deplo
 |---|---|---|
 | 1 | Model package additions (Work, Credit, ArtistRole, WorkType, Period) | `music-assistant-models` |
 | 2 | Database schema & migrations | `music-assistant/server` |
-| 3 | Server controllers & API (WorksController, role-typed queries) | `music-assistant/server` |
+| 3 | Server controllers & API, in four parts: 3a credits, 3b works, 3c classical classification, 3d browse API | `music-assistant/server` |
 | 4 | Local file tag parsing | `music-assistant/server` |
 | 5 | Streaming provider mapping (per-provider) | `music-assistant/server` |
 | 6 | MusicBrainz enrichment | `music-assistant/server` |

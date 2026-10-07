@@ -12,6 +12,8 @@ Adds first-class classical-music metadata to the shared models package:
 - An `ArtistRole` enum and `Credit` type so artists on a track or album can carry their role (composer, conductor, orchestra, soloist with instrument, …) instead of being a flat list.
 - A `Period` enum (Medieval / Renaissance / Baroque / Classical / Romantic / Modern / Contemporary) and additive `Artist.period` field for filtering composers by period — populated in Stage 4 (tag fallback) and Stage 6 (MB enrichment).
 - Additive fields on `Track` and `Album` for work/movement linkage and the role-typed credits list.
+- A `WorkSummary` for list views and a `Recording` type for one performance of a Work.
+- A server-computed `is_classical` flag on `Track`, `Album` and `Artist`.
 
 Strictly **non-breaking**. No existing field changes type or is removed. Old consumers continue working without code changes.
 
@@ -28,7 +30,7 @@ Standard tags (the MusicBrainz Picard mapping) and MusicBrainz itself already mo
 
 This PR is model-only:
 
-- New types (`ArtistRole`, `Credit`, `Work`, `WorkType`, `Period`, `MediaType.WORK`, `ExternalID.MB_WORK`).
+- New types (`ArtistRole`, `Credit`, `Work`, `WorkSummary`, `Recording`, `WorkType`, `Period`, `MediaType.WORK`, `ExternalID.MB_WORK`).
 - Additive fields on `Track` and `Album` (and one on `Artist`).
 - Serialisation support (mashumaro round-trip via `DataClassDictMixin`), dispatcher wiring, exports.
 
@@ -182,7 +184,7 @@ class Period(StrEnum):
     CONTEMPORARY = "contemporary"   # c. 1975 – present
 ```
 
-Seven buckets matching Apple Music Classical / Roon / IMSLP / Wikipedia consensus. Date ranges are documentation only; inference rules (MB enrichment from composer dates, GENRE-tag fallback) live in the master spec's Classification policy. Population is deferred to Stage 4 (tag fallback) and Stage 6 (MB enrichment) — this PR just establishes the enum so the model is ready.
+Seven buckets matching Apple Music Classical / Roon / IMSLP / Wikipedia consensus. Date ranges are documentation only; inference rules (MB enrichment from composer dates, GENRE-tag fallback) live in the master spec's Classification policy. Population is deferred to Stage 4 (tag fallback) and Stage 6 (MB enrichment) — this PR just establishes the enum so the model is ready. `Period` has no neutral fallback member, so an unknown value deserialises to `None` on `Artist.period` instead of raising.
 
 ## Modified types
 
@@ -261,6 +263,34 @@ class Artist(MediaItem):
 
 Set on composer Artists only (Artists with `COMPOSER` role on at least one track credit); null for performers. Population paths and inference rules live in the master spec's Classification policy section. This PR just establishes the field on the model.
 
+### `is_classical` on `Track`, `Album` and `Artist`
+
+```python
+    is_classical: bool = False
+```
+
+A derived, read-only flag computed server-side per the master spec's Classification policy (Decisions log #30). Clients use it to decide whether to show classical-specific UI.
+
+### `WorkSummary`
+
+Lightweight version of `Work` for list views, following the summary pattern of the other MediaItem types: composers, catalog numbers, work type and composition year.
+
+### `Recording`
+
+One performance of a Work, assembled by the server on request rather than stored (master spec Decisions log #20, #46). Not a MediaItem.
+
+```python
+@dataclass(kw_only=True)
+class Recording(DataClassDictMixin):
+    key: str                        # stable id of this grouping
+    work: ItemMapping
+    tracks: list[Track] = field(default_factory=list)    # movements, in movement order
+    credits: list[Credit] = field(default_factory=list)  # performing credits (no composer)
+    year: int | None = None         # recording year
+    album: ItemMapping | None = None  # source album
+    duration: int = 0               # seconds, sum of movements
+```
+
 ## Supporting changes
 
 A few small additions are required across the model package to make the new types fully usable. These are mechanical and uncontroversial but worth listing so reviewers can map every new type onto a working end-to-end flow.
@@ -312,7 +342,7 @@ MediaItemType = Artist | Album | Track | Work | Radio | Playlist | Audiobook | P
 
 ### Public exports
 
-`Credit` and `Work` are added to the `__all__` list and imports in `media_items/__init__.py` so consumers can do `from music_assistant_models.media_items import Credit, Work`.
+`Credit`, `Work`, `WorkSummary` and `Recording` are exported from `media_items` like the other model types, so consumers can do `from music_assistant_models.media_items import Credit, Work`.
 
 ## Deferred to later stages
 
@@ -404,3 +434,5 @@ Standard mashumaro round-trip tests for each new type:
 - `Track` and `Album` with populated `credits` round-trip losslessly.
 - `Track.composers` / `.conductors` / `.performers_with_instruments` return correctly ordered results.
 - `media_from_dict()` correctly dispatches `{"media_type": "work", ...}` to `Work`.
+- `is_classical` and `Artist.period` round-trip; an unknown `Period` value deserialises to `None`.
+- `WorkSummary` and `Recording` round-trip.
