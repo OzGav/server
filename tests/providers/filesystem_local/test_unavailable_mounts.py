@@ -15,6 +15,7 @@ from music_assistant.controllers.storage.backends import mountinfo
 from music_assistant.mass import MusicAssistant
 from music_assistant.providers.filesystem_local import LocalFileSystemProvider
 from music_assistant.providers.filesystem_local.constants import (
+    CONF_CLASSICAL_REPARSE_DONE,
     CONF_ENTRY_LIBRARY_SYNC_PLAYLISTS,
     CONF_ENTRY_LIBRARY_SYNC_TRACKS,
 )
@@ -73,6 +74,12 @@ def _source(mass: MusicAssistant, media: Path) -> LocalFileSystemProvider:
     }
     provider.config.get_value = MagicMock(  # type: ignore[method-assign]
         side_effect=lambda key, default=None: sync_options.get(key, default)
+    )
+    # the source already read the classical tags of its files once
+    mass.config.get_raw_provider_config_value = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda _instance_id, key, default=None: (
+            True if key == CONF_CLASSICAL_REPARSE_DONE else default
+        )
     )
     checksum = str(int((media / LOCAL_FILE).stat().st_mtime))
     mass.music = MagicMock()
