@@ -37,6 +37,7 @@ from music_assistant_models.media_items import (
     Credit,
     ItemMapping,
     ItemMappingSummary,
+    MediaItemMetadata,
     ProviderMapping,
     Track,
     TrackSummary,
@@ -71,7 +72,7 @@ from music_assistant.helpers.compare import (
 )
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.external_ids import is_valid_isrc, normalize_external_id
-from music_assistant.helpers.json import json_loads, serialize_to_json
+from music_assistant.helpers.json import json_dumps, json_loads
 from music_assistant.helpers.lyrics import extract_lrc_lyrics, normalize_lrc_lyrics
 from music_assistant.helpers.provider_access import visible_items
 from music_assistant.models.music_provider import MusicProvider
@@ -651,13 +652,14 @@ class TracksController(MediaControllerBase[Track]):
     async def remove_item_from_library(self, item_id: str | int, recursive: bool = True) -> None:
         """Delete record from the database."""
         db_id = int(item_id)  # ensure integer
-        # remove the item before its relations so failed analysis cleanup leaves it intact
-        await super().remove_item_from_library(db_id)
-        # delete entry(s) from albumtracks table
-        await self.mass.music.database.delete(DB_TABLE_ALBUM_TRACKS, {"track_id": db_id})
-        # delete entry(s) from trackartists table
-        await self.mass.music.database.delete(DB_TABLE_TRACK_ARTISTS, {"track_id": db_id})
-        await self.mass.music.database.delete(DB_TABLE_TRACK_CREDITS, {"track_id": db_id})
+        async with self.mass.music.classification.track_removal(db_id):
+            # remove the item before its relations so failed analysis cleanup leaves it intact
+            await super().remove_item_from_library(db_id)
+            # delete entry(s) from albumtracks table
+            await self.mass.music.database.delete(DB_TABLE_ALBUM_TRACKS, {"track_id": db_id})
+            # delete entry(s) from trackartists table
+            await self.mass.music.database.delete(DB_TABLE_TRACK_ARTISTS, {"track_id": db_id})
+            await self.mass.music.database.delete(DB_TABLE_TRACK_CREDITS, {"track_id": db_id})
 
     async def set_identifiers(
         self,
@@ -1600,10 +1602,11 @@ class TracksController(MediaControllerBase[Track]):
                 "sort_name": item.sort_name,
                 "version": item.version,
                 "duration": item.duration,
-                "metadata": serialize_to_json(item.metadata),
+                "metadata": self._stored_metadata_json(item.metadata),
                 "search_name": create_safe_string(item.name, True, True),
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
+                "classical_tag": bool(item.metadata.classical_tag),
                 "work_id": await self.mass.music.works.get_library_work_id(item.work)
                 if item.work
                 else None,
@@ -1628,6 +1631,7 @@ class TracksController(MediaControllerBase[Track]):
                 disc_number=getattr(item, "disc_number", 0),
                 track_number=getattr(item, "track_number", 0),
             )
+        await self.mass.music.classification.update(track_ids=[db_id])
         self.logger.debug("added %s to database (id: %s)", item.name, db_id)
         return db_id
 
@@ -1645,6 +1649,12 @@ class TracksController(MediaControllerBase[Track]):
         metadata = update.metadata if overwrite else cur_item.metadata.update(update.metadata)
         metadata.lrc_lyrics = normalize_lrc_lyrics(
             metadata.lrc_lyrics or extract_lrc_lyrics(metadata.lyrics)
+        )
+        update_instances = {x.provider_instance for x in update.provider_mappings}
+        from_streaming = any(
+            (prov := self.mass.get_provider(x, True, provider_type=MusicProvider))
+            and prov.is_streaming_provider
+            for x in update_instances
         )
         cur_item.external_ids.update(update.external_ids)
         name = update.name if overwrite else cur_item.name
@@ -1664,12 +1674,19 @@ class TracksController(MediaControllerBase[Track]):
                 "sort_name": sort_name,
                 "version": update.version if overwrite else cur_item.version or update.version,
                 "duration": update.duration if overwrite else cur_item.duration or update.duration,
-                "metadata": serialize_to_json(metadata),
+                "metadata": self._stored_metadata_json(metadata),
                 "search_name": create_safe_string(name, True, True),
                 "search_sort_name": create_safe_string(sort_name or "", True, True),
                 "timestamp_added": int(update.date_added.timestamp())
                 if update.date_added
                 else UNSET,
+                # a re-read file gives its tag as it is now, a streaming source never sets
+                # one so it keeps the stored tag
+                "classical_tag": bool(
+                    update.metadata.classical_tag
+                    if overwrite and not from_streaming
+                    else cur_item.metadata.classical_tag or update.metadata.classical_tag
+                ),
                 "work_id": work_id,
                 "movement_number": preferred.movement_number or fallback.movement_number,
                 "movement_total": preferred.movement_total or fallback.movement_total,
@@ -1703,7 +1720,22 @@ class TracksController(MediaControllerBase[Track]):
                 track_number=update.track_number or cur_item.track_number,
                 overwrite=overwrite,
             )
+        # artists that lost their credit on an overwrite are recomputed as well
+        await self.mass.music.classification.update(
+            track_ids=[db_id],
+            artist_ids={
+                *(int(x.item_id) for x in cur_item.artists),
+                *(int(x.artist.item_id) for x in cur_item.credits),
+            },
+        )
         self.logger.debug("updated %s in database: (id %s)", update.name, db_id)
+
+    @staticmethod
+    def _stored_metadata_json(metadata: MediaItemMetadata) -> str:
+        """Return the metadata json to store, without the classical tag kept in its own column."""
+        stored = metadata.to_dict()
+        del stored["classical_tag"]
+        return json_dumps(stored)
 
     async def _update_library_item_for_merge(self, item_id: int, update: Track) -> None:
         """Merge track model state without replacing existing album relations."""

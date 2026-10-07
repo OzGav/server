@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from music_assistant_models.enums import ExternalID
@@ -32,6 +32,7 @@ from music_assistant.constants import (
     DEFAULT_GENRE_MAPPING,
 )
 from music_assistant.controllers.music import MusicController, migrations
+from music_assistant.controllers.music.constants import DB_SCHEMA_VERSION
 from music_assistant.controllers.music.favorites import PENDING_USER_ID
 from music_assistant.controllers.music.migrations import migrate_database
 from music_assistant.helpers.database import DatabaseConnection
@@ -1682,3 +1683,27 @@ async def test_works_are_full_text_searchable(mass_minimal: MusicAssistant) -> N
     finally:
         # an open connection keeps the test from finishing
         await music.database.close()
+
+
+@pytest.mark.parametrize(("prev_version", "classified"), [(0, False), (71, True), (None, False)])
+async def test_setup_classifies_a_library_from_before_classical_support(
+    mass_minimal: MusicAssistant, prev_version: int | None, classified: bool
+) -> None:
+    """A library upgraded from before classical support gets its classical flags at startup."""
+    controller = MusicController(mass_minimal)
+    mass_minimal.music = controller
+    await controller._setup_database()
+    version = DB_SCHEMA_VERSION if prev_version is None else prev_version
+    if version:
+        await controller.database.insert_or_replace(
+            DB_TABLE_SETTINGS, {"key": "version", "value": str(version), "type": "str"}
+        )
+    else:
+        await controller.database.delete(DB_TABLE_SETTINGS, {"key": "version"})
+    await controller.database.close()
+
+    with patch("music_assistant.controllers.music.database.migrate_database", AsyncMock()):
+        await controller._setup_database()
+    await controller.database.close()
+
+    assert controller._classify_library == classified
