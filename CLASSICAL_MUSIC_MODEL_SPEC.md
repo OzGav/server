@@ -183,12 +183,14 @@ The classical list commands return small row types that carry the counts and rol
 @dataclass(kw_only=True)
 class ClassicalComposer(DataClassDictMixin):
     artist: ArtistSummary
+    fanart: MediaItemImage | None = None  # wide artwork for the row (#84)
     work_count: int = 0
     recording_count: int = 0
 
 @dataclass(kw_only=True)
 class ClassicalPerformer(DataClassDictMixin):
     artist: ArtistSummary
+    fanart: MediaItemImage | None = None  # wide artwork for the row (#84)
     main_role: ArtistRole           # the performing role with the most credits (#47)
     roles: list[ArtistRole] = field(default_factory=list)  # all performing roles
     work_count: int = 0
@@ -782,6 +784,7 @@ Records of the substantive design questions that came up during drafting and the
 81. **All of a performer's recordings in one call.** *Resolved:* `music/classical/recordings` accepts `performer_id` without `work_id` and returns every recording that performer performs on, per work in the order of the works listing and within a work in the #18 order. A performer page then needs one request instead of one per work. One of `work_id` and `performer_id` is required.
 82. **Arrangement links carry their composers.** *Resolved, built in Stage 6:* on the full Work (`music/works/get`), `arrangement_of` lists the original works and a new `arrangements` field lists the works arranged from this one (decision #19's reverse direction), each as a slim work that includes its composers, so the page can show "Arrangement of Mussorgsky — Pictures at an Exhibition" and the reverse list from one call, following the #80 visibility rules. The links themselves come from MusicBrainz's "arrangement of" relationship in Stage 6; tags cannot supply them.
 83. **Recordings without a conductor or orchestra lead with their performers.** *Resolved (refines #40):* when a recording has no conductor and no orchestra, its soloists, ensembles, choirs and other performers take the bold first line, each with their instrument when known ("Maurice André (trumpet), Jane Parker-Smith (organ) (1994)"), and the second line is left out. Solo, chamber and choral recordings otherwise show only a year on the first line and look as if nobody performs them.
+84. **Composer and performer rows carry the artist's fanart.** *Resolved:* `ClassicalComposer` and `ClassicalPerformer` gain `fanart: MediaItemImage | None`, the artist's first fanart picked with the same hidden-source rules as the summary thumb (#80), so the wide list cards can show fanart instead of a cropped square thumb. `ArtistSummary` keeps its single thumb, so other lists stay light.
 
 ## Correction to earlier entries
 
