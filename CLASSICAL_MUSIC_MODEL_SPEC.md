@@ -549,8 +549,8 @@ The contract the frontend's Classical view is built against (Decisions log #79).
 
 | Command | Returns | Filters | Sorts (`order_by`) |
 |---|---|---|---|
-| `music/classical/composers` | `ClassicalComposer` rows | none | `sort_name` (default), `name`, `work_count` |
-| `music/classical/performers` | `ClassicalPerformer` rows | `role`: performers holding that role among their roles (#47) | `name` (default), `recording_count` |
+| `music/classical/composers` | `ClassicalComposer` rows | `artist_id`: only that artist's row, or none (#85) | `sort_name` (default), `name`, `work_count` |
+| `music/classical/performers` | `ClassicalPerformer` rows | `role`: performers holding that role among their roles (#47); `artist_id`: only that artist's row, or none (#85) | `name` (default), `recording_count` |
 | `music/classical/works` | `ClassicalWorkEntry` rows | `composer_id`; `performer_id` (recording counts scoped to that performer, #32); `year_from` / `year_to` on composition year (#43) | `composer` (default, then catalogue number), `name`, `composition_year`, `recording_count` (#60) |
 | `music/classical/recordings` | `Recording` list in the fixed order of #18 | `work_id`; `performer_id`; at least one of them (#81) | none |
 | `music/classical/other_tracks` | `Track` list of classical tracks without a work (#33) | `artist_id` (required); `as_composer`: composer credits when true, other credits when false | `name` (default), `year`, `timestamp_added` |
@@ -785,6 +785,7 @@ Records of the substantive design questions that came up during drafting and the
 82. **Arrangement links carry their composers.** *Resolved, built in Stage 6:* on the full Work (`music/works/get`), `arrangement_of` lists the original works and a new `arrangements` field lists the works arranged from this one (decision #19's reverse direction), each as a slim work that includes its composers, so the page can show "Arrangement of Mussorgsky — Pictures at an Exhibition" and the reverse list from one call, following the #80 visibility rules. The links themselves come from MusicBrainz's "arrangement of" relationship in Stage 6; tags cannot supply them.
 83. **Recordings without a conductor or orchestra lead with their performers.** *Resolved (refines #40):* when a recording has no conductor and no orchestra, its soloists, ensembles, choirs and other performers take the bold first line, each with their instrument when known ("Maurice André (trumpet), Jane Parker-Smith (organ) (1994)"), and the second line is left out. Solo, chamber and choral recordings otherwise show only a year on the first line and look as if nobody performs them.
 84. **Composer and performer rows carry the artist's fanart.** *Resolved:* `ClassicalComposer` and `ClassicalPerformer` gain `fanart: MediaItemImage | None`, the artist's first fanart picked with the same hidden-source rules as the summary thumb (#80), so the wide list cards can show fanart instead of a cropped square thumb. `ArtistSummary` keeps its single thumb, so other lists stay light.
+85. **Asking whether an artist is a classical composer or performer.** *Resolved:* `music/classical/composers` and `music/classical/performers` take an optional `artist_id` (a library artist id) and return only that artist's row, or an empty list, under the same rules as the lists (#29, #80). The normal artist page uses it to offer "Show composer" and "Show performer" links into the Classical view, and only calls it for library artists.
 
 ## Correction to earlier entries
 
