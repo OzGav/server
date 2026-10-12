@@ -65,7 +65,7 @@ The text in parens is what MA uses to classify the credit:
 WORK: Symphony No. 5 in C minor, Op. 67
 ```
 
-**Just the composition title**, NOT including the movement. The movement goes in `MOVEMENTNAME` (below). Don't write `WORK: "Symphony No. 5: I. Allegro con brio"` — that conflates work and movement into one string.
+**Just the composition title** is preferred, with the movement in `MOVEMENTNAME` (below). A work tag that includes a numbered movement, such as `WORK: Symphony No. 5 in C minor, Op. 67: I. Allegro con brio` (the form Picard often writes), also works: MA splits it into the work and the movement. Unnumbered additions are not split, so `WORK: Messiah: Hallelujah` becomes a work of its own.
 
 For opera arias / song-cycle entries, use the parent work title: `WORK: La bohème` or `WORK: Winterreise`.
 
@@ -161,7 +161,7 @@ MA's parser takes the last entry as the primary Track.work (the more specific on
 A short list of things to watch for:
 
 1. **Don't put the composer in the ARTIST field** unless they're literally performing on the track. The ARTIST field is for the headline performer (the conductor, soloist, ensemble, or whichever credit is the album's billed credit). The composer goes in `COMPOSER`. Putting Beethoven in ARTIST muddles the data.
-2. **WORK is composition only.** Don't append movement info — that goes in MOVEMENTNAME.
+2. **Keep movement info out of WORK where you can.** MA splits a numbered movement off the work title ("Work: I. Movement"), but anything else appended stays part of the work name. MOVEMENTNAME is the cleaner place for it.
 3. **Movement metadata is essential for multi-movement playback.** Skipping MOVEMENT / MOVEMENTTOTAL means MA can't sequence movements gaplessly. Many tag editors don't write these by default — check after saving.
 4. **Be consistent with name spelling** across your library. Without MBIDs, name matching is all MA has. Use canonical full names (look up on MusicBrainz if unsure).
 5. **One album-artist convention per release.** Don't mix "Various Artists" on one classical compilation and the composer's name on another similar compilation — pick a convention.
