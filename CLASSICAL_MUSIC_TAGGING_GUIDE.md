@@ -93,6 +93,21 @@ These three tags together enable proper multi-movement playback: gapless within 
 
 For single-movement works (Pachelbel Canon, Albinoni Adagio, *Spiegel im Spiegel*, individual opera arias), leave the movement fields blank.
 
+### No work tag? Title the track "Work: I. Movement"
+
+If you don't use the `WORK` tag, MA can still group movements into a work from the track title, when the title is written like this:
+
+```
+TITLE: Symphony No. 5 in C minor, Op. 67: I. Allegro con brio
+TITLE: Symphony No. 5 in C minor, Op. 67: II. Andante con moto
+```
+
+The work is the part before the last ": ", and the part after it must start with a movement number followed by a full stop: a Roman numeral (`I.`), a number (`1.`) or `No. 4.`. Tracks whose titles share the same work part become one work.
+
+- Titles without a numbered movement are left alone. "Adagio for Strings" or "Messiah: Hallelujah" give no work, and the track shows under Other tracks on the composer's or performer's page.
+- The composer is never read from the title. Set the `COMPOSER` tag, or the work has no composer until MusicBrainz details fill it in.
+- When the track has a `WORK` tag, the title is not used, and movement tags always win over what the title says.
+
 ## MusicBrainz IDs — strongly recommended, even when tagging manually
 
 MBIDs are unique identifiers MusicBrainz assigns to artists, works, and recordings. They're the **canonical resolution mechanism** in MA — when a tag carries both a name AND an MBID, the MBID determines the canonical entity. This solves several real problems:
