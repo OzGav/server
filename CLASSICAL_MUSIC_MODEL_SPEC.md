@@ -148,7 +148,7 @@ Notes on Work fields:
 - `catalog_numbers` is a plain `list[str]` because the same work can have multiple catalog references.
 - `parent_work` is optional and self-referential. Default rule is parent Work only with `movement_*` fields on Track; movement-Works are created only when the source supplies a distinct MBID for them.
 - `arrangement_of` captures transcriptions and orchestrations (Mussorgsky's *Pictures at an Exhibition* ↔ Ravel's orchestration). List form handles medleys.
-- `composition_year` is the year the Work was composed. For an arrangement Work, this is the year the arrangement was made. Populated from MB Work begin-date's year portion at enrichment time.
+- `composition_year` is the year the Work was composed. For an arrangement Work, this is the year the arrangement was made. Populated at enrichment time from the year the composer relationship on the MusicBrainz Work ends (completion), else the year it begins (#92); MusicBrainz Works carry no dates of their own.
 - `language` for vocal works (opera / lieder / song cycles). Null for instrumental works.
 - `musical_key` is the tonal key. Often embedded in a work's title, stored as a separate filterable field for cross-work browsing.
 - Storage (Stage 2): `composers` live in a `work_artists` link table (work, artist, role, position) rather than a JSON column, and `parent_work` is stored as a `parent_work_id` column referencing `works`. The model keeps exposing both as mappings; see Decisions log #49.
@@ -282,7 +282,7 @@ Set on composer Artists only (Artists with COMPOSER role on at least one track c
 | `Work.work_type` | MB Work type field | Inferred from title keywords ("Symphony", "Concerto") as fallback | Maps to `WorkType` enum; unknowns → `OTHER` |
 | `Work.parent_work` | MB Work "part of" relationship | — | Only set for movement-Works with own MBID |
 | `Work.arrangement_of` | MB Work "arrangement of" relationship | — | Source Work(s) |
-| `Work.composition_year` | MB Work begin-date | — | Year portion only |
+| `Work.composition_year` | MB Work composer relationship end year, else begin year (#92) | — | Year portion only |
 | `Work.language` | MB Work language attribute | — | Vocal works only |
 | `Work.musical_key` | MB Work key attribute | — | |
 | `Artist.period` | GENRE-tag period name **(primary)** | MB Work composer floruit inference | See Populating `Artist.period` below |
@@ -374,11 +374,11 @@ The classical-context signals below still define what is classical (see When a t
 
 - A classical genre on the track, album, `artist.nfo`, or `album.nfo` (Classical, Baroque, Romantic, Symphony, Concerto, Opera, Sonata, Choral, Chamber music, …).
 - `is_classical=1` tag set on the track or album.
-- (Stage 6 enrichment only) MB Work `type` is a classical type — Symphony / Sonata / Concerto / Opera / Oratorio / Cantata / Mass / Song cycle / Quartet / Overture / Suite / Ballet. MB's "Song" type (used for pop / rock / jazz vocal numbers) **does not** count.
+- (Stage 6 enrichment only) The track's work, or the top-level work it is part of, has a classical type: any `WorkType` except `OTHER` (#90, #91). MusicBrainz sets the type on the top-level work only (movement works have no type, Lieder movements are "Song"), so the type is read from the top of the work's "parts" chain. "Song", no type and every other MusicBrainz type map to `OTHER`, which neither makes a track classical nor stops it being classical.
 
 The reason for the gating: Picard with "Use track relationships" enabled writes `MUSICBRAINZ_WORKID` for rock, pop, and jazz tracks too — MB models rock songs as Works the same way it models symphonies. Without classical-context gating, every Beatles / Led Zeppelin / Coltrane track tagged through current Picard defaults would create a Work entity and trigger classical classification, polluting both the Works browse tab and the Classical view's track index. See Decisions log #34.
 
-**Stage 6 re-evaluation pass.** When MB enrichment fetches a Work and its `type` field confirms a classical type, the Stage 4 hold is released: the Work entity is created and the classification cascade fires. This catches the thin-tagged classical compilation case — a `MUSICBRAINZ_WORKID` with no GENRE tag will eventually surface as classical once enrichment confirms it's a Symphony / Sonata / etc.
+**Stage 6 re-evaluation pass.** Works already exist for every work tag (#67). When MB enrichment sets a classical type on a Work, the classification is recomputed for that work's tracks, and through them their albums and artists. This catches the thin-tagged classical compilation case: a `MUSICBRAINZ_WORKID` with no GENRE tag surfaces as classical once enrichment confirms it's a Symphony / Sonata / etc.
 
 ### When a track appears in the Classical view
 
@@ -407,7 +407,7 @@ An album is classified as classical if a majority of its tracks satisfy any of t
 
    **Tag-as-override deliberate inversion.** This sits *above* MB enrichment, not below, because period for boundary composers is genuinely subjective (Beethoven could reasonably be Classical or Romantic depending on which works the user listens to most). Giving genre priority makes period **user-overridable today without waiting for a manual-override UI**. Inversion is limited to this one field; the MBID-canonical rule still applies everywhere else.
 
-2. **MusicBrainz enrichment (Stage 6) — secondary, automatic.** When the GENRE-tag path is silent and the Artist has an MBID with birth/death dates, the period is inferred from the composer's **floruit** (productive peak), approximated as the midpoint of `(birth_year + 25, death_year − 5)`:
+2. **MusicBrainz enrichment (Stage 6) — secondary, automatic.** When the GENRE-tag path is silent and the Artist is a person with a composer credit and an MBID with a birth date, the period is inferred from the composer's **floruit** (productive peak), approximated as the midpoint of `(birth_year + 25, death_year − 5)`. A living composer's working life runs to the current year, so the end is the current year. Without a birth year there is no period (#93). Each bucket includes its start year:
 
    | Floruit midpoint | Period |
    |---|---|
@@ -417,7 +417,7 @@ An album is classified as classical if a majority of its tracks satisfy any of t
    | 1750 – 1820 | `CLASSICAL` |
    | 1820 – 1900 | `ROMANTIC` |
    | 1900 – 1975 | `MODERN` |
-   | after 1975, or still living | `CONTEMPORARY` |
+   | 1975 and after | `CONTEMPORARY` |
 
    Worked examples:
 
@@ -432,7 +432,7 @@ An album is classified as classical if a majority of its tracks satisfy any of t
    | Brahms | 1833 – 1897 | 1875 | `ROMANTIC` |
    | Mahler | 1860 – 1911 | 1888 | `ROMANTIC` |
    | Schoenberg | 1874 – 1951 | 1923 | `MODERN` |
-   | Pärt | 1935 – | 1985 (living, current year proxy) | `CONTEMPORARY` |
+   | Pärt | 1935 – | 1993 (living, end is the current year, 2026) | `CONTEMPORARY` |
 
    Floruit-based rather than death-date based: a composer who lived long into the next stylistic period without producing significant new work there should still be bucketed by their primary output. Death-date would misplace Handel (d. 1759) into Classical despite being canonical Baroque.
 
@@ -789,6 +789,15 @@ Records of the substantive design questions that came up during drafting and the
 86. **A track without performer credits is performed by its track artists.** *Resolved:* in the Classical view, a classical track that holds no performing credit (#29) counts its main artists, except those that are also its composers, as performers with the general role `PERFORMER`. This applies everywhere performers are used: the Performers list and its counts, the `performer_id` filters, Recording grouping and `Recording.credits`. Nothing is stored, so it applies to every source without a rescan. Many files and most streaming tracks only name the performer as the track artist (a quarter of the classical tracks in the test library). A performer's main role (#47) is only the general `PERFORMER` role when they hold no more specific one, so a tenor with three soloist credits and many track-artist-only tracks stays a soloist. Stage 6 can replace the general role with the exact one from MusicBrainz recording relationships.
 87. **A track without a work tag can take its work from a numbered movement title.** *Resolved (extends #70 / #73):* a track with no `WORK` tag (or its fallbacks) gets its work and movement from its track title, with the #70 rule unchanged: only a title whose part after the last ": " is a numbered movement is split ("Symphony No. 5 in C minor, Op. 67: I. Allegro con brio", "Work: 1. Movement", "Work: No. 4. Movement"). Any other title, such as "Adagio for Strings" or "Messiah: Hallelujah", gives no work and the track stays under Other tracks; an unnumbered split cannot tell "Messiah: Hallelujah" from "Beethoven: Für Elise". No composer is taken from the title or the track artist, as that would be a guess about how the user tags; the work's composer comes from a composer tag, else waits for Stage 6. The expected title format is documented for users. Like the work tag (#67), this applies to every track, classical or not: whether a track is classical is only settled later in the library and can change without a rescan, so the Classical view decides what it shows. Existing libraries read their files once more to pick this up. Stage 5 reuses the same parser for streaming track titles. Asked for by a tester whose files carry only title, artist, album and genre.
 88. **The album artist is not a track performer.** *Resolved (confirms #86):* a track's performers come only from its own credits and, per #86, its track artists, as everywhere else in MA, where a track's artists come only from its artist tag and the album artist only belongs to the album. A track whose performer is only named as the album artist has no performer in the Classical view. Seen on a tester's library where an organist was the album artist on about 35 tracks but the track artist on 14.
+89. **Stage 6 in three parts, MusicBrainz ids only.** *Resolved:* Stage 6 is built and verified as 6a (reading works from MusicBrainz, parent works, composers, composer periods, work type, composition year, language, catalogue numbers, the work type classical signal), 6b (merging works, duplicate works, arrangements in both directions with #82) and 6c (performer roles, recording years). Only items that already carry MusicBrainz ids are enriched; works and artists without one are not searched for by title or name, which keeps it reliable and in line with #87. Work descriptions and Wikipedia text for works are out of scope.
+90. **The classical work type signal reads the top-level work.** *Resolved (corrects the Classical-context signal section):* MusicBrainz sets a work type only on the top-level work. Movement works have no type, and Lieder movements are typed "Song". The signal therefore follows the work's "parts" chain to the top and counts any `WorkType` except `OTHER`. "Song", no type and other MusicBrainz types map to `OTHER` and are neutral. Setting a classical type recomputes the classification of the work's tracks, albums and artists. The old "Stage 4 hold" is gone since #67.
+91. **More work types.** *Resolved:* `WorkType` gains `ARIA`, `MOTET`, `MADRIGAL`, `PARTITA`, `SYMPHONIC_POEM`, `ETUDE`, `OPERETTA`, `ZARZUELA` and `INCIDENTAL_MUSIC`, which are classical in practice. They count for #90 and show their real type on the work. Models change only; the `work_type` column already stores the value.
+92. **Composition year from the composer relationship.** *Resolved (corrects the `composition_year` notes):* MusicBrainz Works have no dates; the composer relationship carries the composition period (Beethoven's Fifth, 1804 to 1808). The composition year is its end year, the usual catalogue convention, else its begin year.
+93. **Composer periods from life dates.** *Resolved (refines Populating `Artist.period`):* only persons holding a composer credit get a period from MusicBrainz, and only when no genre gave one. A living composer's working life ends at the current year. Without a birth year there is no period. Each period bucket includes its start year.
+94. **Catalogue numbers.** *Resolved:* catalogue numbers (Op., BWV, K., D., Hob. and the like) are read from the work title for every work, without a network call, and from MusicBrainz's catalogue attributes for works with an id, so the composer then catalogue sort (#60) has data.
+95. **Composer ids from MusicBrainz works.** *Resolved:* when a work has exactly one composer without an MBID and MusicBrainz lists exactly one composer for it, that composer gets the MBID, which merges spellings that share it ("Mahler" into "Gustav Mahler"). With several composers nothing is guessed. A work without a composer gets MusicBrainz's composer added.
+96. **Merged artists keep the oldest name.** *Resolved:* when artists merge on a shared MBID the oldest library artist and its spelling stay, as today. Using MusicBrainz's name (the main alias for MA's language, protected against later file reads) was considered and deferred, because it changes artist names across all of MA; a TODO in the merge code records it.
+97. **How Stage 6 writes.** *Resolved:* MusicBrainz only fills empty fields; tags always win and nothing is renamed. A movement work's id is used only to find the parent work and attach the parent's id (and movement number) to the work the track links to, so tracks stay linked to the parent (#70, amends #2 and #27). Work language: MusicBrainz's "zxx" (no lyrics) gives none, and of several languages the first is used. Enrichment runs as a step of MA's hourly MusicBrainz link task at low priority and follows its on / off setting.
 
 ## Correction to earlier entries
 
@@ -797,6 +806,7 @@ Records of the substantive design questions that came up during drafting and the
 - **Sort defaults on Composers tab.** Default is `sort_name` (surname-first when the SORT tag is present, else display name). Options: Sort name / Name / Work count.
 - **Sort defaults on Performers tab.** Default is `name`; performers have no `sort_name` field. Options: Name / Recording count only.
 - **Work fields in the code.** This spec always listed `composition_year`, `language` and `musical_key` on `Work`, but the Stage 1 models and Stage 2 table were built without them, along with a `WorkSummary`. Both stages were amended (unreleased, so no extra migration step). From now on each stage starts by comparing this spec against the code of the stages it builds on.
+- **Movement works (#2, #27).** Under #70 / #73 tracks link to the parent work and keep a movement work's MusicBrainz id on the track. Movement works are not created as Works of their own; Stage 6 uses those ids to find the parent (#97). `parent_work` stays in use for sections that are not split, such as opera scenes, and for multi-level works.
 
 ## Open questions
 

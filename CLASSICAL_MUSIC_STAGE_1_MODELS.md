@@ -160,7 +160,7 @@ Notes:
 - `WorkType` covers the most common 12 types plus `OTHER`. MusicBrainz has ~25 types; we cover the ones that matter for browsing/grouping. Adding new variants later is non-breaking.
 - `parent_work` is optional and self-referential. Movements *can* be modelled as separate Works with a parent link, but the **default is parent Work only with `movement_*` fields on Track** (see `Track` below). Movement-Works only created when the source supplies a distinct MBID for them.
 - `arrangement_of` captures transcriptions, orchestrations, and reductions where one Work is derived from another (Mussorgsky's *Pictures at an Exhibition* piano original ↔ Ravel's orchestration). MB models these as distinct Works connected by an "arrangement of" relationship. The list form handles medleys.
-- `composition_year` is the year the Work was composed (or, for an arrangement Work, the year the arrangement was made). Populated at enrichment time from MB Work begin-date's year portion. Int rather than string keeps range filtering simple.
+- `composition_year` is the year the Work was composed (or, for an arrangement Work, the year the arrangement was made). Populated at enrichment time from the year the composer relationship on the MusicBrainz Work ends (completion), else the year it begins. Int rather than string keeps range filtering simple.
 - `language` for vocal works (opera / lieder / song cycles). Null for instrumental works.
 - `musical_key` is the tonal key (`"C minor"`, `"B flat major"`). Often embedded in a work's title but stored as a separate filterable field for cross-work browsing.
 - `MediaType.WORK` is a new variant of the existing `MediaType` enum.
