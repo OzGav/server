@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from music_assistant_models.enums import AlbumType, LinkType, MediaType, ProviderFeature, WorkType
+from music_assistant_models.enums import (
+    AlbumType,
+    ArtistRole,
+    LinkType,
+    MediaType,
+    ProviderFeature,
+    WorkType,
+)
 
 LUCENE_SPECIAL = r'([+\-&|!(){}\[\]\^"~*?:\\\/])'
 
@@ -136,3 +143,30 @@ KEY_ATTRIBUTE_TYPE = "Key"
 
 # The work relation types linking an original work (forward) to an arrangement of it (backward).
 ARRANGEMENT_RELATION_TYPES = frozenset({"arrangement", "orchestration"})
+
+# The recording relation types crediting an artist with a performing role of their own.
+PERFORMING_RELATION_ROLES: dict[str, ArtistRole] = {
+    "conductor": ArtistRole.CONDUCTOR,
+    "performing orchestra": ArtistRole.ORCHESTRA,
+    "chorus master": ArtistRole.PERFORMER,
+    "concertmaster": ArtistRole.PERFORMER,
+}
+
+# The role a "performer" relation credits an artist with by the artist's type, else PERFORMER.
+PERFORMER_ROLE_BY_ARTIST_TYPE: dict[str, ArtistRole] = {
+    "Orchestra": ArtistRole.ORCHESTRA,
+    "Choir": ArtistRole.CHOIR,
+    "Group": ArtistRole.ENSEMBLE,
+}
+
+# The artist types MusicBrainz gives a group of musicians rather than a single person.
+GROUP_ARTIST_TYPES = frozenset({"Group", "Orchestra", "Choir"})
+
+# The vocal relation attribute of a choir's singing.
+CHOIR_VOCALS_ATTRIBUTE = "choir vocals"
+
+# Relation attributes telling how an artist took part rather than what they played or sang.
+PARTICIPATION_ATTRIBUTES = frozenset({"solo", "guest", "additional"})
+
+# The recording relation types other than performing ones that date a recording session.
+SESSION_RELATION_TYPES = frozenset({"performance", "recorded at"})

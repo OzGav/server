@@ -426,6 +426,25 @@ class MusicbrainzProvider(MetadataProvider):
         msg = "Invalid MusicBrainz recording ID provided"
         raise InvalidDataError(msg)
 
+    async def get_recording_relations(self, recording_id: str) -> MusicBrainzRecording:
+        """
+        Get a Recording with the artists, works and places related to it.
+
+        :param recording_id: MusicBrainz recording id.
+        :raises InvalidDataError: When MusicBrainz does not know the recording.
+        """
+        if result := await self._api_client.get_data(
+            f"recording/{recording_id}?inc=artist-rels+work-rels+place-rels"
+        ):
+            if "id" not in result:
+                result["id"] = recording_id
+            try:
+                return MusicBrainzRecording.from_raw(result)
+            except MissingField as err:
+                raise InvalidDataError from err
+        msg = "Invalid MusicBrainz recording ID provided"
+        raise InvalidDataError(msg)
+
     async def get_recordings_by_isrc(self, isrc: str) -> list[MusicBrainzRecording]:
         """
         Get the recordings MusicBrainz has on file for an ISRC.
@@ -476,9 +495,11 @@ class MusicbrainzProvider(MetadataProvider):
 
     async def get_release_details(self, album_id: str) -> MusicBrainzRelease:
         """Get Release/Album details by providing a MusicBrainz Album id."""
+        # the recordings' performers, works and places serve the classical enrichment
         endpoint = (
             f"release/{album_id}?inc=artist-credits+aliases+labels+release-groups"
-            "+recordings+isrcs+url-rels+genres"
+            "+recordings+isrcs+url-rels+genres+artist-rels+recording-level-rels+work-rels"
+            "+place-rels"
         )
         if result := await self._api_client.get_data(endpoint):
             if "id" not in result:

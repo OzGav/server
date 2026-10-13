@@ -1497,6 +1497,60 @@ def test_conductor_tells_performances_apart_over_soloists() -> None:
     assert performance.performer_ids == {10, 20, 21}
 
 
+def test_recording_years_tell_performances_on_one_album_apart() -> None:
+    """Two recordings by the same performers on one album are told apart by their years."""
+    tracks = [
+        _work_track(1, performers={10}, year=2002, recording_year=1955),
+        _work_track(2, performers={10}, year=2002, recording_year=1981),
+    ]
+
+    performances = _group_performances(1, tracks)
+
+    assert sorted(x.year for x in performances if x.year) == [1955, 1981]
+
+
+def test_recording_year_dates_a_performance_over_its_album() -> None:
+    """A performance takes the year it was recorded, its album's year only without one."""
+    tracks = [
+        _work_track(1, performers={10}, year=1990, recording_year=1962),
+        _work_track(2, performers={10}, year=1990, recording_year=1962, movement=2),
+        _work_track(3, performers={11}, year=1990),
+    ]
+
+    performances = _group_performances(1, tracks)
+
+    assert sorted((x.year, [t for t, _ in x.tracks]) for x in performances) == [
+        (1962, [1, 2]),
+        (1990, [3]),
+    ]
+
+
+async def test_recordings_read_the_recording_year_of_their_tracks(library: _Library) -> None:
+    """A recording is dated by the recording year stored on its tracks."""
+    karajan_tracks = [x for x in library.tracks.values() if x.name.startswith("Karajan")]
+    database = library.mass.music.database
+    for track in karajan_tracks:
+        await database.execute_write(
+            "UPDATE tracks SET metadata = json_set(metadata, '$.recording_year', 1961) "
+            "WHERE item_id = :item_id",
+            {"item_id": int(track.item_id)},
+        )
+    try:
+        recordings = await library.mass.music.classical.recordings(library.work_id("Fifth"))
+    finally:
+        for track in karajan_tracks:
+            await database.execute_write(
+                "UPDATE tracks SET metadata = json_remove(metadata, '$.recording_year') "
+                "WHERE item_id = :item_id",
+                {"item_id": int(track.item_id)},
+            )
+
+    assert [(x.year, _track_names(x)[0]) for x in recordings] == [
+        (1961, "Karajan I"),
+        (1979, "Bernstein I"),
+    ]
+
+
 def test_recording_order_settles_ties_on_ensemble() -> None:
     """Recordings of one year and conductor come by ensemble name, ignoring case."""
     work = ItemMapping(media_type=MediaType.WORK, item_id="1", provider="library", name="Work")
@@ -1528,6 +1582,7 @@ def _work_track(
     year: int | None,
     leaders: set[int] | None = None,
     movement: int = 1,
+    recording_year: int | None = None,
 ) -> _WorkTrack:
     """Create a work track on its own album."""
     return _WorkTrack(
@@ -1535,6 +1590,7 @@ def _work_track(
         movement_number=movement,
         movement=movement,
         mb_recording=None,
+        recording_year=recording_year,
         performers=performers,
         leaders=leaders or set(),
         appearances=[_Appearance(album_id=track_id, year=year, disc_number=1, track_number=1)],
