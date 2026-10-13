@@ -20,6 +20,7 @@ from music_assistant_models.enums import (
     ImageType,
     ListingType,
     MediaType,
+    Period,
     SortDirection,
     SortField,
     WorkType,
@@ -427,13 +428,16 @@ class ClassicalController:
             ids = await self._ids(DB_TABLE_WORKS, conditions, params, None, sort_key, limit, offset)
             performances = await self._listed_work_performances(ids)
         part_names = await self._part_names(ids)
+        works = await self._items(self.mass.music.works, ids)
+        periods = await self._composer_periods(works)
         return [
             ClassicalWorkEntry(
                 work=_with_title_work_type(cast("WorkSummary", work)),
                 recording_count=_recording_count(performances[int(work.item_id)], performer),
                 part_names=part_names[int(work.item_id)],
+                period=periods.get(int(work.item_id)),
             )
-            for work in await self._items(self.mass.music.works, ids)
+            for work in works
         ]
 
     async def work(self, item_id: str) -> Work:
@@ -781,6 +785,24 @@ class ClassicalController:
         ):
             names[int(row["parent_work_id"])].append(row["name"])
         return names
+
+    async def _composer_periods(self, works: Sequence[Work]) -> dict[int, Period]:
+        """Return the period of the first composer of the given works, for those with one."""
+        composer_ids = {int(x.item_id): int(x.composers[0].item_id) for x in works if x.composers}
+        if not composer_ids:
+            return {}
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT item_id, period FROM {DB_TABLE_ARTISTS} "
+            "WHERE item_id IN :artist_ids AND period IS NOT NULL",
+            {"artist_ids": list(set(composer_ids.values()))},
+            limit=0,
+        )
+        periods = {int(row["item_id"]): Period(row["period"]) for row in rows}
+        return {
+            work_id: periods[artist_id]
+            for work_id, artist_id in composer_ids.items()
+            if artist_id in periods
+        }
 
     async def _listed_work_performances(
         self, listed_ids: Iterable[int] | None

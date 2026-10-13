@@ -15,6 +15,7 @@ from music_assistant_models.enums import (
     ExternalID,
     ImageType,
     MediaType,
+    Period,
     ProviderFeature,
     ProviderType,
     SortDirection,
@@ -141,6 +142,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         SELECT
             {self._summary_base_columns()},
             artists.artist_type,
+            artists.period,
             {self._provider_mappings_query()} AS provider_mappings
             FROM artists"""
         return query, {}
@@ -1547,6 +1549,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         """Parse a raw summary db row into an ArtistSummary object."""
         item = cast("ArtistSummary", super()._parse_summary_row(db_row, hidden_sources))
         item.artist_type = ArtistType(db_row["artist_type"])
+        item.period = Period(period) if (period := db_row["period"]) else None
         return item
 
 
