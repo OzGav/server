@@ -1859,6 +1859,7 @@ class ArtistsController(MediaControllerBase[Artist]):
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
                 "artist_type": item.artist_type,
+                "period": item.period,
             },
         )
         # update/set external id lookup table
@@ -1898,6 +1899,10 @@ class ArtistsController(MediaControllerBase[Artist]):
 
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
+        # a source without a period keeps the stored one, as only composers carry one
+        period = (
+            (update.period or cur_item.period) if overwrite else cur_item.period or update.period
+        )
         await self.mass.music.database.update(
             self.db_table,
             {"item_id": db_id},
@@ -1911,6 +1916,7 @@ class ArtistsController(MediaControllerBase[Artist]):
                 if update.date_added
                 else UNSET,
                 "artist_type": update.artist_type,
+                "period": period,
             },
         )
         self.logger.debug("updated %s in database: %s", update.name, db_id)

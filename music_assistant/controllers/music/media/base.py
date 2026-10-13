@@ -2776,6 +2776,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         db_row_dict = dict(db_row)
         db_row_dict["provider"] = "library"
         db_row_dict["favorite"] = parse_optional_bool(db_row_dict["favorite"])
+        if "is_classical" in db_row_dict:
+            db_row_dict["is_classical"] = bool(db_row_dict["is_classical"])
         db_row_dict["item_id"] = str(db_row_dict["item_id"])
         db_row_dict["date_added"] = datetime.fromtimestamp(
             db_row_dict["timestamp_added"], tz=UTC
@@ -2787,6 +2789,13 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             if not (raw_value := db_row_dict[key]):
                 continue
             db_row_dict[key] = json_loads(raw_value)
+
+        # a track keeps its classical tag in a column of its own
+        if "classical_tag" in db_row_dict:
+            db_row_dict["metadata"] = {
+                **(db_row_dict.get("metadata") or {}),
+                "classical_tag": bool(db_row_dict.pop("classical_tag")),
+            }
 
         # parse "fully_played" as bool if present in the row
         if "fully_played" in db_row_dict:
