@@ -16,6 +16,7 @@ from music_assistant_models.enums import (
     ExternalID,
     ImageType,
     MediaType,
+    Period,
     ProviderSharing,
     SortDirection,
     SortField,
@@ -116,6 +117,7 @@ async def test_composers(library: _Library) -> None:
         ("Ludwig van Beethoven", 3, 7),
         ("Antonio Vivaldi", 2, 2),
     ]
+    assert [x.artist.period for x in rows] == [Period.CLASSICAL, None]
 
 
 @pytest.mark.parametrize(
@@ -388,6 +390,7 @@ async def test_works(library: _Library) -> None:
     assert rows[0].work.catalog_numbers == ["Op. 55"]
     assert [x.name for x in rows[0].work.composers] == ["Ludwig van Beethoven"]
     assert all(x.part_names == [] for x in rows)
+    assert [x.period for x in rows] == [Period.CLASSICAL] * 3 + [None] * 2
 
 
 async def test_works_show_the_type_their_title_names(library: _Library) -> None:
@@ -1720,6 +1723,7 @@ async def _seed_library(mass: MusicAssistant) -> _Library:
                 metadata=MediaItemMetadata(
                     images=UniqueList(_image(*x) for x in ARTIST_IMAGES.get(key, ())) or None
                 ),
+                period=Period.CLASSICAL if key == "beethoven" else None,
             )
         )
     a = lib.artists
