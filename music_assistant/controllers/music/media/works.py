@@ -32,6 +32,7 @@ from music_assistant.constants import (
     DB_TABLE_WORK_ARTISTS,
     DB_TABLE_WORKS,
 )
+from music_assistant.controllers.music.helpers import search_name_match_clause
 from music_assistant.controllers.music.sorting import get_listing_default_direction
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import json_loads, serialize_to_json
@@ -90,6 +91,23 @@ def work_sort_sql(
     return f"{name_sort} {order}"
 
 
+def work_search_sql(search_term: str, query_params: dict[str, Any]) -> str:
+    """
+    Return the condition matching the works whose title or a part's title holds a search term.
+
+    A part itself never matches, it is found through the work it is a part of.
+
+    :param search_term: The normalized search term.
+    :param query_params: Query params dict; the term's bound param is added to it.
+    """
+    # the unaliased works table of the subquery is the one the match refers to
+    match = search_name_match_clause(DB_TABLE_WORKS, search_term, "search", query_params)
+    return (
+        f"{DB_TABLE_WORKS}.item_id IN (SELECT COALESCE(parent_work_id, item_id) "
+        f"FROM {DB_TABLE_WORKS} WHERE {match})"
+    )
+
+
 class WorksController(MediaControllerBase[Work]):
     """Controller managing MediaItems of type Work."""
 
@@ -127,7 +145,8 @@ class WorksController(MediaControllerBase[Work]):
             {self._composers_query(artist_fields)} AS composers,
             {self._parent_work_query(work_fields)} AS parent_work,
             {self._arrangement_of_query(related_work_fields)} AS arrangement_of,
-            {self._arrangements_query(related_work_fields)} AS arrangements
+            {self._arrangements_query(related_work_fields)} AS arrangements,
+            {self._parts_query(related_work_fields)} AS parts
             FROM {DB_TABLE_WORKS}"""
         return query, {}
 
@@ -189,18 +208,19 @@ class WorksController(MediaControllerBase[Work]):
         """
         Return the total number of works in the library.
 
-        Never restricted by the current user's provider filter.
+        Counts the works a works listing shows, never restricted by the current user's
+        provider filter.
 
         :param favorite_only: Only count the works the current user likes.
         """
         # works are library-only items without provider mappings, so the user's
         # provider filter does not apply here
+        query_params: dict[str, Any] = {}
+        clauses = self.listing_filter(query_params)
         if favorite_only:
-            query_params: dict[str, Any] = {}
-            clause = self._favorite_filter_clause(query_params, True)
-            sql_query = f"SELECT item_id FROM {self.db_table} WHERE {clause}"
-            return await self.mass.music.database.get_count_from_query(sql_query, query_params)
-        return await self.mass.music.database.get_count(self.db_table)
+            clauses.append(self._favorite_filter_clause(query_params, True))
+        sql_query = f"SELECT item_id FROM {self.db_table} WHERE {' AND '.join(clauses)}"
+        return await self.mass.music.database.get_count_from_query(sql_query, query_params)
 
     async def library_items(  # noqa: PLR0913
         self,
@@ -221,6 +241,9 @@ class WorksController(MediaControllerBase[Work]):
         """
         Get the works in the library.
 
+        The parts of a work are listed through the work they are a part of, which a search
+        matching a part also finds.
+
         :param favorite: Only include the current user's likes (True) or dislikes (False).
         :param search: Filter by search query.
         :param limit: Maximum number of items to return.
@@ -238,6 +261,7 @@ class WorksController(MediaControllerBase[Work]):
         field, direction = self.resolve_sort(sort_field, sort_direction, order_by)
         if played_only:
             return []
+        query_params: dict[str, Any] = {}
         return await self.get_library_items_by_query(
             favorite=favorite,
             search=search,
@@ -245,6 +269,8 @@ class WorksController(MediaControllerBase[Work]):
             offset=offset,
             sort_field=field,
             sort_direction=direction,
+            extra_query_parts=self.listing_filter(query_params),
+            extra_query_params=query_params,
             genre_ids=genre,
             summary=summary,
         )
@@ -360,7 +386,21 @@ class WorksController(MediaControllerBase[Work]):
             {"work_id": work_id, "source_work_id": source_work_id},
         )
 
-    async def update_from_musicbrainz(self, work: Work, replace: bool = False) -> None:
+    async def remove_arrangement_links(self, work_id: int) -> None:
+        """
+        Unlink a library work from the works it arranges and from its arrangements.
+
+        :param work_id: Library id of the work.
+        """
+        await self.mass.music.database.execute_write(
+            f"DELETE FROM {DB_TABLE_WORK_ARRANGEMENTS} "
+            "WHERE work_id = :work_id OR source_work_id = :work_id",
+            {"work_id": work_id},
+        )
+
+    async def update_from_musicbrainz(
+        self, work: Work, replace: bool = False, parent: bool = False
+    ) -> None:
         """
         Store a library work filled in from MusicBrainz.
 
@@ -369,6 +409,7 @@ class WorksController(MediaControllerBase[Work]):
 
         :param work: The library work, filled in from MusicBrainz.
         :param replace: Replace the stored type, year, language and key by the work's as well.
+        :param parent: Replace the stored parent work by the work's as well, also when it has none.
         """
         db_id = int(work.item_id)
         stored_type = (await self.get_library_item(db_id)).work_type if replace else None
@@ -381,22 +422,43 @@ class WorksController(MediaControllerBase[Work]):
                 "language": work.language,
                 "musical_key": work.musical_key,
             }
+        if parent:
+            values["parent_work_id"] = int(work.parent_work.item_id) if work.parent_work else None
         await self.mass.music.database.update(self.db_table, {"item_id": db_id}, values)
         await self.update_item_in_library(db_id, work)
         if replace and work.work_type != stored_type:
             await self.mass.music.classification.update_item(self.media_type, db_id)
 
-    async def remove_arrangement_links(self, work_id: int) -> None:
+    async def set_parent_work(self, work_id: int, parent_id: int) -> None:
         """
-        Unlink a library work from the works it arranges and from its arrangements.
+        Move a library work under another library work, as one of its parts.
+
+        :param work_id: Library id of the work.
+        :param parent_id: Library id of its new parent work.
+        """
+        await self.mass.music.database.update(
+            self.db_table, {"item_id": work_id}, {"parent_work_id": parent_id}
+        )
+        library_item = await self.get_library_item(work_id)
+        self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+
+    async def remove_if_empty(self, work_id: str) -> None:
+        """
+        Remove a library work that has no tracks, parts or arrangements, and so its parents.
 
         :param work_id: Library id of the work.
         """
-        await self.mass.music.database.execute_write(
-            f"DELETE FROM {DB_TABLE_WORK_ARRANGEMENTS} "
-            "WHERE work_id = :work_id OR source_work_id = :work_id",
-            {"work_id": work_id},
-        )
+        work = await self.get_library_item(work_id)
+        if (
+            work.parts
+            or work.arrangements
+            or work.arrangement_of
+            or await self.mass.music.database.get_row(DB_TABLE_TRACKS, {"work_id": int(work_id)})
+        ):
+            return
+        await self.remove_item_from_library(work_id)
+        if work.parent_work:
+            await self.remove_if_empty(work.parent_work.item_id)
 
     async def get_library_work_id(self, work: Work | ItemMapping) -> int | None:
         """
@@ -628,6 +690,30 @@ class WorksController(MediaControllerBase[Work]):
             JOIN {DB_TABLE_WORKS} w ON w.item_id = wa.work_id
             WHERE wa.source_work_id = {DB_TABLE_WORKS}.item_id
             ORDER BY wa.rowid))"""
+
+    def _parts_query(self, work_fields: str) -> str:
+        """Return a subquery selecting the works that are a part of this one as a JSON array."""
+        return f"""(SELECT JSON_GROUP_ARRAY(json(work)) FROM (
+            SELECT json_object({work_fields}) AS work
+            FROM {DB_TABLE_WORKS} w WHERE w.parent_work_id = {DB_TABLE_WORKS}.item_id
+            ORDER BY w.name_sort, w.item_id))"""
+
+    def _listing_filter_clause(self, query_params: dict[str, Any]) -> str | None:
+        """Return the condition that lists the parts of a work through that work."""
+        visible = self.mass.music.tracks.visible_library_clause(query_params)
+        # a work with parts is listed while it or one of its parts has a track the user sees
+        return f"""({DB_TABLE_WORKS}.parent_work_id IS NULL
+            AND (NOT EXISTS (SELECT 1 FROM {DB_TABLE_WORKS} p
+                WHERE p.parent_work_id = {DB_TABLE_WORKS}.item_id)
+            OR EXISTS (SELECT 1 FROM {DB_TABLE_TRACKS}
+                WHERE {DB_TABLE_TRACKS}.work_id = {DB_TABLE_WORKS}.item_id AND {visible})
+            OR EXISTS (SELECT 1 FROM {DB_TABLE_WORKS} p
+                JOIN {DB_TABLE_TRACKS} ON {DB_TABLE_TRACKS}.work_id = p.item_id
+                WHERE p.parent_work_id = {DB_TABLE_WORKS}.item_id AND {visible})))"""
+
+    def _search_filter_clause(self, search: str, query_params: dict[str, Any]) -> str:
+        """Return the search condition, which a work also meets through a matching part."""
+        return work_search_sql(search, query_params)
 
     def _get_sort_sql(self, field: SortField, direction: SortDirection | None) -> str:
         """Return the ORDER BY clause for a works sort field."""

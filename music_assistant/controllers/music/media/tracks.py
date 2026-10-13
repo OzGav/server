@@ -42,6 +42,7 @@ from music_assistant_models.media_items import (
     Track,
     TrackSummary,
     UniqueList,
+    Work,
 )
 
 from music_assistant.constants import (
@@ -1668,6 +1669,8 @@ class TracksController(MediaControllerBase[Track]):
         """Update Track record in the database, merging data."""
         db_id = int(item_id)  # ensure integer
         cur_item = await self.get_library_item(db_id)
+        if overwrite:
+            await self._keep_held_placement(update, cur_item)
         metadata = update.metadata if overwrite else cur_item.metadata.update(update.metadata)
         metadata.lrc_lyrics = normalize_lrc_lyrics(
             metadata.lrc_lyrics or extract_lrc_lyrics(metadata.lyrics)
@@ -1932,6 +1935,51 @@ class TracksController(MediaControllerBase[Track]):
             artist_id = await self.mass.music.artists.merge_library_artists_by_mbid(artist_id, mbid)
         resolved_artists[key] = artist_id
         return artist_id
+
+    async def _keep_held_placement(self, update: Track, cur_item: Track) -> None:
+        """
+        Keep a track's work and movement when an update names a part its place already holds.
+
+        Its place holds its work's movement at its number and its stored MusicBrainz work ids,
+        such as a number moved up onto its act. The track keeps the update's work id. An update
+        naming the track's own work is left as it is, so its movement follows the update.
+
+        :param update: The track as its source gives it, changed in place to keep the place.
+        :param cur_item: The library track.
+        """
+        if not cur_item.work or not isinstance(update.work, Work):
+            return
+        work_ids = [
+            value for id_type, value in update.external_ids if id_type == ExternalID.MB_WORK
+        ]
+        if not (work_id := update.work.mbid or (work_ids[0] if len(work_ids) == 1 else None)):
+            return
+        work = await self.mass.music.works.get_library_item(cur_item.work.item_id)
+        if work_id.casefold() == (work.mbid or "").casefold():
+            return
+        held = {
+            x.casefold()
+            for x in (
+                *(
+                    m.mbid
+                    for m in work.metadata.movements or []
+                    if m.number == cur_item.movement_number
+                ),
+                *(
+                    value
+                    for id_type, value in cur_item.external_ids
+                    if id_type == ExternalID.MB_WORK
+                ),
+            )
+            if x
+        }
+        if work_id.casefold() not in held:
+            return
+        update.work = None
+        update.movement_number = cur_item.movement_number
+        update.movement_total = cur_item.movement_total
+        update.movement_name = cur_item.movement_name
+        update.external_ids.add((ExternalID.MB_WORK, work_id))
 
     def _get_sort_sql(self, field: SortField, direction: SortDirection | None) -> str:
         """Return the ORDER BY clause for a sort field, ARTIST_NAME through the artists join."""

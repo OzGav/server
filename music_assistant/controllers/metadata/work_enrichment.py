@@ -9,13 +9,20 @@ library's own artists, and are credited on its tracks without a composer too.
 
 Library works that turn out to be the same MusicBrainz work are merged into the one holding
 the most tracks. A work gets linked to the library works MusicBrainz names as its
-originals or arrangements.
+originals or arrangements, and a part of a larger work, such as an aria or a movement, to
+the work right above it, such as the act of an opera; a typed work below no typed level,
+such as a concerto of a set, only when the library holds that work. A level the library
+lacks is added without tracks, named in the user's language, together with the levels above
+it up to the topmost typed one, or up to the top when none is typed.
+A work looked up for the first time, and a level added, takes in the library works
+MusicBrainz lists as its parts, such as the pieces of a set, and a part whose parent is
+further up its MusicBrainz hierarchy moves under the level right above it.
 
 A work looked up for the first time takes its MusicBrainz name, in the user's language, and
 lists the catalog numbers its name gives first.
 A work refreshed by hand is looked up again as on its first lookup, taking MusicBrainz's
-current name, version, type, year, language, key and catalog numbers; a work MusicBrainz
-merged into another takes the other's id.
+current name, version, type, year, language, key, catalog numbers, parent, parts and
+arrangements; a work MusicBrainz merged into another takes the other's id.
 """
 
 from __future__ import annotations
@@ -25,11 +32,16 @@ import re
 from time import time
 from typing import TYPE_CHECKING
 
-from music_assistant_models.enums import ExternalID
+from music_assistant_models.enums import ExternalID, MediaType
 from music_assistant_models.errors import InvalidDataError, MediaNotFoundError
 from music_assistant_models.helpers import create_safe_string
-from music_assistant_models.media_items import Artist, UniqueList, Work
+from music_assistant_models.media_items import Artist, ItemMapping, UniqueList, Work
+from music_assistant_models.media_items.metadata import MediaItemMetadata
 
+from music_assistant.constants import (
+    DB_TABLE_EXTERNAL_ID_LOOKUP,
+    DB_TABLE_WORKS,
+)
 from music_assistant.helpers.compare import is_named_by
 from music_assistant.helpers.work_titles import parse_catalog_numbers
 from music_assistant.providers.musicbrainz.api_client import fresh_reads
@@ -140,10 +152,16 @@ class WorkEnrichmentMixin:
         if not work.composers:
             new_composers = await self._get_library_composers(_composer_relations(hierarchy))
             work.composers = UniqueList(new_composers)
-        await works.update_from_musicbrainz(work, replace=reload)
+        moved_from = await self._set_parent_work(musicbrainz, work, hierarchy, reload)
+        # a library update keeps the parent a work has, so a move is stored with the work
+        await works.update_from_musicbrainz(work, replace=reload, parent=moved_from is not None)
         if first_lookup:
             await self._take_musicbrainz_name(work, hierarchy[0], reload)
         await self._link_arrangements(int(work.item_id), hierarchy[0], replace=reload)
+        if moved_from:
+            await self.mass.music.works.remove_if_empty(moved_from.item_id)
+        if first_lookup:
+            await self._adopt_parts(musicbrainz, int(work.item_id), hierarchy)
         if new_composers:
             await self.mass.music.tracks.credit_work_composers(int(work.item_id))
         else:
@@ -157,6 +175,43 @@ class WorkEnrichmentMixin:
         await works.mark_musicbrainz_lookup(int(work.item_id), looked_up)
         return work
 
+    async def _set_parent_work(
+        self,
+        musicbrainz: MusicbrainzProvider,
+        work: Work,
+        hierarchy: Sequence[MusicBrainzWork],
+        reload: bool,
+    ) -> Work | None:
+        """
+        Give a work the library work of the MusicBrainz level above it as its parent.
+
+        A parent from a track title, or a level further up the work's own hierarchy, gives way
+        to MusicBrainz's. On a reload MusicBrainz's level always wins, and a work MusicBrainz no
+        longer has as a part of another loses its parent.
+
+        :param musicbrainz: The MusicBrainz provider.
+        :param work: The library work, given its new parent.
+        :param hierarchy: The work's MusicBrainz work followed by the works above it.
+        :param reload: The work is looked up again.
+        :return: The parent the work moved away from, if any.
+        """
+        old_parent = (
+            await self.mass.music.works.get_library_item(work.parent_work.item_id)
+            if work.parent_work
+            else None
+        )
+        levels = await self._parent_levels(hierarchy)
+        if levels and (
+            not old_parent or reload or _gives_way_to_musicbrainz(old_parent, hierarchy)
+        ):
+            parent = await self._get_or_add_parent_work(musicbrainz, levels, work)
+            work.parent_work = ItemMapping.from_item(parent)
+            return old_parent if old_parent and old_parent.item_id != parent.item_id else None
+        if reload and old_parent:
+            work.parent_work = None
+            return old_parent
+        return None
+
     async def _musicbrainz_work_hierarchy(
         self, musicbrainz: MusicbrainzProvider, work: Work
     ) -> list[MusicBrainzWork]:
@@ -165,6 +220,84 @@ class WorkEnrichmentMixin:
             return []
         return await self._with_parent_works(musicbrainz, mb_work)
 
+    async def _parent_levels(self, hierarchy: Sequence[MusicBrainzWork]) -> list[MusicBrainzWork]:
+        """
+        Return the levels above a work that are to be library works, the level right above first.
+
+        The levels reach up to the topmost level with a type, or to the top when none has one.
+        The level right above the topmost typed level, such as the set of a concerto, is only
+        included when the library holds it.
+
+        :param hierarchy: The work's MusicBrainz work followed by the works above it.
+        """
+        typed = [index for index, mb_work in enumerate(hierarchy) if mb_work.type]
+        end = typed[-1] + 1 if typed else len(hierarchy)
+        if end < len(hierarchy) and await self.mass.music.works.get_library_item_by_external_id(
+            hierarchy[end].id, ExternalID.MB_WORK
+        ):
+            end += 1
+        return list(hierarchy[1:end])
+
+    async def _adopt_parts(
+        self,
+        musicbrainz: MusicbrainzProvider,
+        work_id: int,
+        hierarchy: Sequence[MusicBrainzWork],
+        child_id: int | None = None,
+    ) -> None:
+        """
+        Move the library works MusicBrainz has as parts of a work under it.
+
+        Considered are the parts of the work's parent and of the library work holding the
+        level above it, such as the arias next to an act in its opera, and the library works
+        of the parts MusicBrainz lists for it anywhere, such as the pieces of a set. The tracks
+        of a part moving under it become its movements, and a former parent left empty leaves
+        the library.
+
+        :param musicbrainz: The MusicBrainz provider.
+        :param work_id: Library id of the work.
+        :param hierarchy: The work's MusicBrainz work followed by the works above it.
+        :param child_id: Library id of a work that is left where it is, such as the work being
+            linked below the work.
+        """
+        works = self.mass.music.works
+        work = await works.get_library_item(work_id)
+        parent_ids = {int(work.parent_work.item_id)} if work.parent_work else set()
+        if len(hierarchy) > 1 and (
+            holder := await works.get_library_item_by_external_id(
+                hierarchy[1].id, ExternalID.MB_WORK
+            )
+        ):
+            parent_ids.add(int(holder.item_id))
+        part_ids = _part_ids(hierarchy[0])
+        if not (parent_ids or part_ids):
+            return
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT item_id FROM {DB_TABLE_WORKS} w WHERE item_id NOT IN :skip_ids "
+            "AND (parent_work_id IN :parent_ids "
+            f"OR EXISTS (SELECT 1 FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} e "
+            "WHERE e.media_type = :media_type AND e.item_id = w.item_id "
+            "AND e.external_id_type = :id_type AND e.external_id IN :part_ids))",
+            {
+                "parent_ids": sorted(parent_ids),
+                "skip_ids": [x for x in (work_id, child_id) if x is not None],
+                "media_type": MediaType.WORK.value,
+                "id_type": ExternalID.MB_WORK.value,
+                "part_ids": sorted(part_ids),
+            },
+            limit=0,
+        )
+        for row in rows:
+            sibling = await works.get_library_item(row["item_id"])
+            if not sibling.mbid or not (
+                mb_sibling := await musicbrainz.get_work_details(sibling.mbid)
+            ):
+                continue
+            if any(x.work and x.work.id == hierarchy[0].id for x in mb_sibling.parent_relations):
+                await works.set_parent_work(int(sibling.item_id), work_id)
+                if sibling.parent_work and int(sibling.parent_work.item_id) != work_id:
+                    await self.mass.music.works.remove_if_empty(sibling.parent_work.item_id)
+
     async def _with_parent_works(
         self, musicbrainz: MusicbrainzProvider, mb_work: MusicBrainzWork
     ) -> list[MusicBrainzWork]:
@@ -172,13 +305,31 @@ class WorkEnrichmentMixin:
         hierarchy = [mb_work]
         while (
             len(hierarchy) <= MAX_MUSICBRAINZ_WORK_DEPTH
-            and (parent := hierarchy[-1].parent_relation)
+            and (parent := await self._parent_to_follow(hierarchy[-1]))
             and parent.work
         ):
             if not (parent_work := await musicbrainz.get_work_details(parent.work.id)):
                 break
             hierarchy.append(parent_work)
         return hierarchy
+
+    async def _parent_to_follow(self, mb_work: MusicBrainzWork) -> MusicBrainzRelation | None:
+        """
+        Return the relation to the work a MusicBrainz work is a part of, if any.
+
+        Of a part of several works, such as of a work and of an edition of it, the one the
+        library holds comes first, then the one MusicBrainz tells apart without a comment.
+        """
+        relations = mb_work.parent_relations
+        if len(relations) < 2:
+            return mb_work.parent_relation
+        works = self.mass.music.works
+        for relation in relations:
+            if relation.work and await works.get_library_item_by_external_id(
+                relation.work.id, ExternalID.MB_WORK
+            ):
+                return relation
+        return next((x for x in relations if x.work and not x.work.disambiguation), relations[0])
 
     async def _merge_duplicate_works(self, work: Work, mbid: str) -> Work | None:
         """Merge the library works that are a given MusicBrainz work, return the survivor if any."""
@@ -189,6 +340,48 @@ class WorkEnrichmentMixin:
         return await works.get_library_item(
             await works.merge_library_works_by_mbid(int(work.item_id), mbid)
         )
+
+    async def _get_or_add_parent_work(
+        self, musicbrainz: MusicbrainzProvider, levels: Sequence[MusicBrainzWork], child: Work
+    ) -> Work:
+        """
+        Return the library work of a child's parent MusicBrainz work, adding it if needed.
+
+        A parent the library lacks is added, named in the user's language, under the levels
+        above it, which are added as well up to the first one the library holds. An added level
+        takes in the library works MusicBrainz lists as its parts, other than the child.
+
+        :param musicbrainz: The MusicBrainz provider.
+        :param levels: The parent MusicBrainz work followed by the levels above it that are to
+            be library works.
+        :param child: The library work it is the parent of.
+        """
+        mb_work = levels[0]
+        works = self.mass.music.works
+        if holder := await works.get_library_item_by_external_id(mb_work.id, ExternalID.MB_WORK):
+            return holder
+        grandparent = (
+            await self._get_or_add_parent_work(musicbrainz, levels[1:], child)
+            if len(levels) > 1
+            else None
+        )
+        parent = Work(
+            item_id=mb_work.id,
+            provider="musicbrainz",
+            name=musicbrainz_work_name(mb_work, self.preferred_language),
+            provider_mappings=set(),
+            # filled in right here, so the link run need not look it up again
+            metadata=MediaItemMetadata(last_musicbrainz_lookup=int(time())),
+            composers=UniqueList(
+                await self._get_library_composers(mb_work.composer_relations) or child.composers
+            ),
+            parent_work=ItemMapping.from_item(grandparent) if grandparent else None,
+        )
+        _fill_work_from_musicbrainz(parent, levels)
+        added = await works.create_library_item(parent)
+        await self._link_arrangements(int(added.item_id), mb_work)
+        await self._adopt_parts(musicbrainz, int(added.item_id), levels, int(child.item_id))
+        return added
 
     async def _link_arrangements(
         self, work_id: int, mb_work: MusicBrainzWork, replace: bool = False
@@ -324,6 +517,12 @@ def _fill_work_from_musicbrainz(
         )
 
 
+def _gives_way_to_musicbrainz(parent: Work, hierarchy: Sequence[MusicBrainzWork]) -> bool:
+    """Return whether a work's parent is to make way for the parent MusicBrainz names."""
+    # a level further up the work's own hierarchy gives way to the levels below it
+    return parent.mbid in {x.id for x in hierarchy[2:]}
+
+
 def _catalog_numbers(mb_work: MusicBrainzWork, name: str) -> list[str]:
     """Return the catalog numbers of a MusicBrainz work, those the given name of it gives first."""
     named = {create_safe_string(x, True, True) for x in parse_catalog_numbers(name)}
@@ -352,6 +551,15 @@ def _named_catalog_numbers(name: str, above: Sequence[MusicBrainzWork]) -> list[
         # the start of a range, as in "HWV 348-350", numbers no single work
         and not re.search(rf"{re.escape(x)}\s*[-\u2010\u2013]\s*\d", name)
     ]
+
+
+def _part_ids(mb_work: MusicBrainzWork) -> set[str]:
+    """Return the MusicBrainz ids of the works MusicBrainz lists as parts of a work."""
+    return {
+        x.work.id
+        for x in mb_work.relations
+        if x.type == "parts" and x.direction == "forward" and x.work
+    }
 
 
 def _composer_relations(hierarchy: Sequence[MusicBrainzWork]) -> list[MusicBrainzRelation]:
