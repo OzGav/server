@@ -3729,22 +3729,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         artist_id = await self._get_library_artist_id(artist, overwrite)
         if not (mbid := artist.mbid):
             return artist_id
-        artists_ctrl = self.mass.music.artists
-        same_mbid = await artists_ctrl.get_library_items_by_external_id(
-            mbid, ExternalID.MB_ARTIST, limit=None
-        )
-        # the oldest library artist keeps its name and absorbs the other spellings
-        target_id, *source_ids = sorted({artist_id, *(int(x.item_id) for x in same_mbid)})
-        for source_id in source_ids:
-            try:
-                await artists_ctrl.merge_library_items(target_id, source_id)
-            except MediaNotFoundError:
-                continue  # already merged by a concurrent add
-            except InvalidDataError as err:
-                self.logger.debug("Not merging artists with MusicBrainz ID %s: %s", mbid, err)
-                if source_id == artist_id:
-                    return artist_id
-        return target_id
+        return await self.mass.music.artists.merge_library_artists_by_mbid(artist_id, mbid)
 
     async def _copy_library_item_relations(self, target_id: int, source_id: int) -> None:
         """Copy the relations that reference the merged media item onto the target."""

@@ -6,7 +6,14 @@ from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
-from music_assistant_models.enums import AlbumType, ArtistRole, MediaType
+from music_assistant_models.enums import (
+    AlbumType,
+    ArtistEntityType,
+    ArtistRole,
+    MediaType,
+    Period,
+    WorkType,
+)
 from music_assistant_models.media_items import (
     Album,
     Artist,
@@ -18,13 +25,16 @@ from music_assistant_models.media_items import (
     UniqueList,
     Work,
 )
+from music_assistant_models.media_items.metadata import LifeSpan, MediaItemMetadata
 
 from music_assistant.constants import (
     DB_TABLE_ALBUMS,
     DB_TABLE_ARTISTS,
     DB_TABLE_GENRES,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORKS,
 )
+from music_assistant.controllers.metadata.enrichment import MetadataEnrichmentMixin
 from music_assistant.mass import MusicAssistant
 
 PROVIDER_INSTANCE = "classification_instance"
@@ -127,7 +137,9 @@ async def _add_track(
     )
 
 
-async def _add_work(mass: MusicAssistant, name: str | None = None) -> Work:
+async def _add_work(
+    mass: MusicAssistant, work_type: WorkType | None = None, name: str | None = None
+) -> Work:
     """Add a work to the library."""
     return await mass.music.works.add_item_to_library(
         Work(
@@ -135,6 +147,7 @@ async def _add_work(mass: MusicAssistant, name: str | None = None) -> Work:
             provider="works_source",
             name=name or f"Work {_token()}",
             provider_mappings=set(),
+            work_type=work_type,
         )
     )
 
@@ -188,6 +201,81 @@ async def test_track_with_work_named_by_type_is_not_classical(mass: MusicAssista
     track = await _add_track(mass, work=ItemMapping.from_item(work))
 
     assert not await _is_classical(mass, track)
+
+
+@pytest.mark.parametrize(
+    ("work_type", "expected"), [(WorkType.SYMPHONY, True), (WorkType.OTHER, False)]
+)
+async def test_track_of_a_typed_work_is_classical(
+    mass: MusicAssistant, work_type: WorkType, expected: bool
+) -> None:
+    """A track linked to a work of a classical type is classical, one of type other is not."""
+    work = await _add_work(mass, work_type)
+    track = await _add_track(mass, work=ItemMapping.from_item(work))
+
+    assert await _is_classical(mass, track) is expected
+
+
+async def test_album_majority_counts_tracks_of_typed_works(mass: MusicAssistant) -> None:
+    """Tracks classical by the type of their work count toward their album's majority."""
+    work = ItemMapping.from_item(await _add_work(mass, WorkType.CONCERTO))
+    album = await _add_album(mass)
+    await _add_track(mass, album, 1, work=work)
+    await _add_track(mass, album, 2, work=work)
+    plain = await _add_track(mass, album, 3)
+
+    assert await _is_classical(mass, album)
+    assert await _is_classical(mass, plain)
+
+
+async def test_work_type_change_reclassifies_its_tracks(mass: MusicAssistant) -> None:
+    """Giving a work a classical type through an update makes its tracks and artists classical."""
+    work = await _add_work(mass)
+    track = await _add_track(mass, work=ItemMapping.from_item(work))
+    assert not await _is_classical(mass, track)
+
+    await mass.music.works.update_item_in_library(
+        work.item_id,
+        Work(
+            item_id=work.item_id,
+            provider="library",
+            name=work.name,
+            provider_mappings=set(),
+            work_type=WorkType.SYMPHONY,
+        ),
+    )
+
+    assert await _is_classical(mass, track)
+    assert await _is_classical(mass, track.artists[0])  # type: ignore[arg-type]
+
+
+async def test_removing_a_typed_work_reclassifies_its_tracks(mass: MusicAssistant) -> None:
+    """Tracks classical only by the type of their work stop being classical with it."""
+    work = await _add_work(mass, WorkType.SYMPHONY)
+    track = await _add_track(mass, work=ItemMapping.from_item(work))
+    assert await _is_classical(mass, track)
+
+    await mass.music.works.remove_item_from_library(work.item_id)
+
+    assert not await _is_classical(mass, track)
+
+
+async def test_update_item_of_a_work_reclassifies_its_tracks(mass: MusicAssistant) -> None:
+    """A changed work recomputes the classical flags of the tracks linked to it."""
+    work = await _add_work(mass)
+    track = await _add_track(mass, work=ItemMapping.from_item(work))
+    other_work = await _add_work(mass)
+    other = await _add_track(mass, work=ItemMapping.from_item(other_work))
+    # a type written straight to the database, past the classification of a work update
+    await mass.music.database.execute_write(
+        f"UPDATE {DB_TABLE_WORKS} SET work_type = :work_type WHERE item_id IN (:work, :other)",
+        {"work_type": WorkType.MASS.value, "work": work.item_id, "other": other_work.item_id},
+    )
+
+    await mass.music.classification.update_item(MediaType.WORK, int(work.item_id))
+
+    assert await _is_classical(mass, track)
+    assert not await _is_classical(mass, other)
 
 
 async def test_track_in_classical_genre_is_classical(mass: MusicAssistant) -> None:
@@ -439,6 +527,122 @@ async def test_update_all_restores_every_flag(mass: MusicAssistant) -> None:
     assert await _is_classical(mass, track.artists[0])  # type: ignore[arg-type]
     assert not await _is_classical(mass, plain)
     assert not await _is_classical(mass, plain.artists[0])  # type: ignore[arg-type]
+
+
+def _use_composer_periods(mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the classification give composers their period through the metadata enrichment."""
+    enrichment = MetadataEnrichmentMixin()
+    enrichment.mass = mass
+    monkeypatch.setattr(mass.metadata, "set_composer_periods", enrichment.set_composer_periods)
+
+
+def _brahms_life() -> MediaItemMetadata:
+    """Return the stored metadata of a person with the life dates of Brahms."""
+    return MediaItemMetadata(
+        artist_entity_type=ArtistEntityType.PERSON,
+        life_span=LifeSpan(begin="1833-05-07", end="1897-04-03", ended=True),
+    )
+
+
+async def _period(mass: MusicAssistant, artist: Artist) -> Period | None:
+    """Return the period of a library artist as the library returns it."""
+    return (await mass.music.artists.get_library_item(artist.item_id)).period
+
+
+async def test_composer_gets_the_period_of_their_life_dates_once_classical(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A composer with stored life dates gets their period as soon as they are classical."""
+    _use_composer_periods(mass, monkeypatch)
+    composer = await _add_artist(mass, "Composer", metadata=_brahms_life())
+    composer_credit = [Credit(artist=composer, role=ArtistRole.COMPOSER)]
+    await _add_track(mass, credits=composer_credit)
+    assert await _period(mass, composer) is None
+
+    await _add_track(mass, credits=composer_credit, classical_tag=True)
+
+    assert await _period(mass, composer) == Period.ROMANTIC
+
+
+async def test_composer_keeps_the_period_of_the_tags(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A period the composer already has, such as one from the genre tags, is kept."""
+    _use_composer_periods(mass, monkeypatch)
+    composer = await _add_artist(mass, "Composer", metadata=_brahms_life(), period=Period.BAROQUE)
+
+    await _add_track(
+        mass, credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)], classical_tag=True
+    )
+
+    assert await _period(mass, composer) == Period.BAROQUE
+
+
+async def test_performer_gets_no_period(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A classical artist with life dates but no composer credit gets no period."""
+    _use_composer_periods(mass, monkeypatch)
+    conductor = await _add_artist(mass, "Conductor", metadata=_brahms_life())
+
+    await _add_track(
+        mass, credits=[Credit(artist=conductor, role=ArtistRole.CONDUCTOR)], classical_tag=True
+    )
+
+    assert await _is_classical(mass, conductor)
+    assert await _period(mass, conductor) is None
+
+
+async def test_update_all_gives_existing_composers_their_period(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The full recompute gives composers classified earlier the period of their life dates."""
+    composer = await _add_artist(mass, "Composer", metadata=_brahms_life())
+    await _add_track(
+        mass, credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)], classical_tag=True
+    )
+    assert await _period(mass, composer) is None
+    _use_composer_periods(mass, monkeypatch)
+
+    await mass.music.classification.update_all()
+
+    assert await _period(mass, composer) == Period.ROMANTIC
+
+
+async def _offer_sort_name(mass: MusicAssistant, artist: Artist, sort_name: str) -> str | None:
+    """Offer the library a sort name for an artist and return the sort name it stores."""
+    library_artist = await mass.music.artists.get_library_item(artist.item_id)
+    library_artist.sort_name = sort_name
+    await mass.music.artists.update_item_in_library(artist.item_id, library_artist)
+    return (await mass.music.artists.get_library_item(artist.item_id)).sort_name
+
+
+async def test_classical_artist_takes_a_real_sort_name(mass: MusicAssistant) -> None:
+    """A classical artist's sort name made from its name gives way to one such as MusicBrainz's."""
+    composer = await _add_artist(mass, "Aaron Copland")
+    await _add_track(
+        mass, credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)], classical_tag=True
+    )
+
+    assert await _offer_sort_name(mass, composer, "Copland, Aaron") == "Copland, Aaron"
+
+
+async def test_classical_artist_keeps_its_own_sort_name(mass: MusicAssistant) -> None:
+    """A classical artist's sort name from the tags is kept."""
+    composer = await _add_artist(mass, "Aaron Copland", sort_name="Copland, A.")
+    await _add_track(
+        mass, credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)], classical_tag=True
+    )
+
+    assert await _offer_sort_name(mass, composer, "Copland, Aaron") == "Copland, A."
+
+
+async def test_other_artist_keeps_the_sort_name_made_from_its_name(mass: MusicAssistant) -> None:
+    """An artist that is not classical keeps the sort name made from its name."""
+    artist = await _add_artist(mass, "Aaron Copland")
+    await _add_track(mass, artists=[artist])
+
+    assert await _offer_sort_name(mass, artist, "Copland, Aaron") == artist.sort_name
 
 
 class TestHasClassicalContent:

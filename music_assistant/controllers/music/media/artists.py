@@ -27,7 +27,7 @@ from music_assistant_models.errors import (
     MusicAssistantError,
     ProviderUnavailableError,
 )
-from music_assistant_models.helpers import create_safe_string
+from music_assistant_models.helpers import create_safe_string, create_sort_name
 from music_assistant_models.media_items import (
     Album,
     Artist,
@@ -1900,6 +1900,14 @@ class ArtistsController(MediaControllerBase[Artist]):
 
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
+        # a classical artist's sort name made from its name gives way to a real one
+        if (
+            cur_item.is_classical
+            and update.sort_name
+            and cur_item.sort_name == create_sort_name(cur_item.name)
+            and update.sort_name != create_sort_name(update.name)
+        ):
+            sort_name = update.sort_name
         # a source without a period keeps the stored one, as only composers carry one
         period = (
             (update.period or cur_item.period) if overwrite else cur_item.period or update.period

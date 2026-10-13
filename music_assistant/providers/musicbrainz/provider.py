@@ -65,6 +65,7 @@ from .models import (
     MusicBrainzRelease,
     MusicBrainzReleaseGroup,
     MusicBrainzTag,
+    MusicBrainzWork,
     release_year,
 )
 from .recommendations import MusicBrainzRecommendationManager
@@ -648,6 +649,24 @@ class MusicbrainzProvider(MetadataProvider):
                 raise InvalidDataError from err
         msg = "Invalid MusicBrainz ReleaseGroup ID provided"
         raise InvalidDataError(msg)
+
+    async def get_work_details(self, work_id: str) -> MusicBrainzWork | None:
+        """
+        Get a Work with its artist, work and series relations by its MusicBrainz Work id.
+
+        :param work_id: MusicBrainz Work id.
+        :return: The work, or None if MusicBrainz does not know it.
+        :raises InvalidDataError: If MusicBrainz returns a malformed work.
+        """
+        endpoint = f"work/{work_id}?inc=artist-rels+work-rels+series-rels"
+        if not (result := await self._api_client.get_data(endpoint)):
+            return None
+        if "id" not in result:
+            result["id"] = work_id
+        try:
+            return MusicBrainzWork.from_raw(result)
+        except MissingField as err:
+            raise InvalidDataError from err
 
     async def get_artist_details_by_album(
         self, artistname: str, ref_album: Album

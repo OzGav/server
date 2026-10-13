@@ -177,6 +177,7 @@ from .helpers import (
     is_metadata_file,
     is_placeholder_artist,
     open_real_path,
+    parse_catalog_numbers,
     parse_nfo_root,
     parse_track_work,
     performer_credit_role,
@@ -3255,6 +3256,7 @@ class LocalFileSystemProvider(MusicProvider):
             name=track_work.name,
             provider_mappings=set(),
             composers=UniqueList(track.composers),
+            catalog_numbers=parse_catalog_numbers(track_work.name),
         )
         if track_work.mbid:
             work.mbid = track_work.mbid

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from music_assistant_models.enums import Period
+
 # Map of normalised imageproxy `fmt` values to standards-compliant MIME types.
 # Used both to validate the client-supplied `fmt` query parameter and to set
 # the Content-Type on the response.
@@ -109,6 +111,24 @@ MUSICBRAINZ_LINK_ITEM_TIMEOUT = 60
 # music providers MusicBrainz links artists and releases to; their share URLs are parsed
 # by the hosts in helpers/uri.py
 MUSICBRAINZ_LINK_DOMAINS = ("spotify", "deezer", "apple_music", "tidal", "qobuz", "ytmusic")
+
+# how many levels of parent works are followed up to a work's top-level work on MusicBrainz
+MAX_MUSICBRAINZ_WORK_DEPTH = 4
+
+# a composer's working life, from which their period is estimated, is taken to start at this
+# age and to end this many years before their death
+COMPOSER_WORKING_LIFE_START_AGE = 25
+COMPOSER_WORKING_LIFE_END_OFFSET = 5
+
+# the first year of each classical period after the medieval one, oldest first
+COMPOSER_PERIOD_START_YEARS = (
+    (1400, Period.RENAISSANCE),
+    (1600, Period.BAROQUE),
+    (1750, Period.CLASSICAL),
+    (1820, Period.ROMANTIC),
+    (1900, Period.MODERN),
+    (1975, Period.CONTEMPORARY),
+)
 
 CONF_THUMB_CACHE_MAX_SIZE = "thumb_cache_max_size"
 

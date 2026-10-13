@@ -346,6 +346,7 @@ async def test_migrate_database_backfills_external_id_lookup(
     # populate a fresh library database with a track carrying external ids
     music = MusicController(mass_minimal)
     mass_minimal.music = music
+    mass_minimal.metadata = MagicMock(set_composer_periods=AsyncMock())
     await music._setup_database()
     table_names = {
         row["name"]

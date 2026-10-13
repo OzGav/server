@@ -23,6 +23,7 @@ BARCODE = "0724354283857"
 @pytest.fixture
 async def music(mass_minimal: MusicAssistant) -> AsyncGenerator[MusicController]:
     """Return a music controller with a real library database."""
+    mass_minimal.metadata = MagicMock(set_composer_periods=AsyncMock())
     controller = MusicController(mass_minimal)
     mass_minimal.music = controller
     # remove_item_from_library routes audio analysis cleanup through the AA controller
