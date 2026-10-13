@@ -342,6 +342,8 @@ DEFAULT_GENRES: Final[tuple[str, ...]] = tuple(entry["genre"] for entry in DEFAU
 
 # fallback genre for a podcast or audiobook whose provider has no categories of its own
 DEFAULT_AUDIOBOOK_PODCAST_GENRE: Final[str] = "Spoken Word"
+# the genre name a provider gives a classical album, which maps to the curated Classical genre
+CLASSICAL_GENRE_NAME: Final[str] = "Classical"
 
 
 # all other

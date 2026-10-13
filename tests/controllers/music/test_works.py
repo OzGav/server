@@ -36,6 +36,23 @@ from music_assistant_models.media_items import (
 from music_assistant.constants import DB_TABLE_WORK_ARRANGEMENTS, DB_TABLE_WORK_ARTISTS
 from music_assistant.controllers.webserver.helpers.auth_middleware import current_user
 from music_assistant.mass import MusicAssistant
+from music_assistant.models.music_provider import MusicProvider
+
+
+async def test_merging_track_update_adds_no_provider_work(mass: MusicAssistant) -> None:
+    """A merging update keeps the stored work and leaves the work it describes out."""
+    work = await _add_work(mass, f"Work {_token()}")
+    track = await _add_track(mass, work)
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.work = _work(f"Other {_token()}")
+    before = await _library_work_ids(mass)
+
+    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+
+    assert stored.work is not None
+    assert stored.work.item_id == work.item_id
+    assert await _library_work_ids(mass) == before
+
 
 PROVIDER_INSTANCE = "works_instance"
 # works are added the way a tag parser hands them over, from their source without mappings
@@ -582,6 +599,24 @@ async def test_track_work_resolved_by_musicbrainz_id(mass: MusicAssistant) -> No
     assert unknown.work is None
 
 
+async def test_track_work_with_its_musicbrainz_id_is_added(mass: MusicAssistant) -> None:
+    """A provider work carrying its MusicBrainz id is added with the track, shared by others."""
+    composer = await _add_artist(mass, "Composer")
+    name = f"Symphony No. 5 {_token()}, Op. 67"
+    mbid = _mbid()
+
+    first = await _add_track(mass, _work(name, [composer], mbid), movement_number=1)
+    second = await _add_track(mass, _work(name, [composer], mbid), movement_number=2)
+
+    assert first.work is not None
+    assert second.work is not None
+    assert first.work.item_id == second.work.item_id
+    work = await mass.music.works.get_library_item(first.work.item_id)
+    assert work.name == name
+    assert _ids(work.composers) == [composer.item_id]
+    assert _composer_ids(first) == [composer.item_id]
+
+
 async def test_track_work_named_without_an_id_is_not_added(mass: MusicAssistant) -> None:
     """A work read from a pop track's title is not added and does not make the track classical."""
     before = await _library_work_ids(mass)
@@ -591,6 +626,33 @@ async def test_track_work_named_without_an_id_is_not_added(mass: MusicAssistant)
     assert track.work is None
     assert await _library_work_ids(mass) == before
     assert (track.classical_tag, track.is_classical) == (False, False)
+
+
+async def test_provider_work_matches_a_composer_the_provider_names_differently(
+    mass: MusicAssistant,
+) -> None:
+    """Tracks share a provider work whose composer the provider spells unlike the library."""
+    mapping = _mapping()
+    composer = await mass.music.artists.add_item_to_library(
+        Artist(item_id="0", provider="library", name="Schubert", provider_mappings={mapping})
+    )
+    provider_composer = Artist(
+        item_id=mapping.item_id,
+        provider=mapping.provider_instance,
+        name="Franz Schubert",
+        provider_mappings={mapping},
+    )
+    name = f"Trout Quintet {_token()}"
+    mbid = _mbid()
+
+    first = await _add_track(mass, _work(name, [provider_composer], mbid))
+    second = await _add_track(mass, _work(name, [provider_composer], mbid))
+
+    assert first.work is not None
+    assert second.work is not None
+    assert first.work.item_id == second.work.item_id
+    work = await mass.music.works.get_library_item(first.work.item_id)
+    assert _ids(work.composers) == [composer.item_id]
 
 
 async def test_work_takes_a_new_name(mass: MusicAssistant) -> None:
@@ -716,6 +778,62 @@ async def test_track_overwrite_naming_its_own_work_takes_the_movement_of_the_upd
     assert stored.work.item_id == act.item_id
     assert (stored.movement_number, stored.movement_name) == (5, "Tag name")
     assert not _track_work_ids(stored)
+
+
+async def test_track_overwrite_naming_its_stored_work_id_keeps_its_place(
+    mass: MusicAssistant,
+) -> None:
+    """An overwrite naming a work id the track carries keeps it on a work listing no movements."""
+    work = await _add_work(mass, f"Act {_token()}", mbid=_mbid())
+    held = _mbid()
+    track = await _add_track(mass, work, movement_number=2, work_ids=[held])
+    before = await _library_work_ids(mass)
+
+    stored = await _overwrite_with_tag_work(mass, track, held)
+
+    assert stored.work is not None
+    assert stored.work.item_id == work.item_id
+    assert stored.movement_number == 2
+    assert await _library_work_ids(mass) == before
+    assert _track_work_ids(stored) == {held}
+
+
+@pytest.mark.parametrize("sibling", [True, False])
+async def test_track_overwrite_naming_another_work_moves_it(
+    mass: MusicAssistant, sibling: bool
+) -> None:
+    """An overwrite naming another movement of the work, or an unknown work, moves the track."""
+    act, first, _second = await _add_act(mass)
+    track = await _add_track(mass, act, movement_number=2, movement_name="No. 2")
+    mbid = first if sibling else _mbid()
+
+    stored = await _overwrite_with_tag_work(mass, track, mbid)
+
+    assert stored.work is not None
+    assert stored.work.item_id != act.item_id
+    assert (await mass.music.works.get_library_item(stored.work.item_id)).mbid == mbid
+    assert (stored.movement_number, stored.movement_name) == (5, "Tag name")
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_track_overwrite_keeps_musicbrainz_work_ids_only_from_streaming(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch, streaming: bool
+) -> None:
+    """A streaming overwrite keeps the stored work ids, a file overwrite takes its tags' ids."""
+    stored_id, tag_id = _mbid(), _mbid()
+    track = await _add_track(mass, work_ids=[stored_id])
+    source = Mock(spec=MusicProvider, is_streaming_provider=streaming)
+    monkeypatch.setattr(mass, "get_provider", Mock(return_value=source))
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.external_ids = (
+        {(ExternalID.MB_RECORDING, _mbid())} if streaming else {(ExternalID.MB_WORK, tag_id)}
+    )
+
+    await mass.music.tracks.update_item_in_library(track.item_id, update, overwrite=True)
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert _track_work_ids(stored) == ({stored_id} if streaming else {tag_id})
 
 
 async def test_track_of_a_work_gets_its_composers(mass: MusicAssistant) -> None:
@@ -1098,3 +1216,33 @@ async def test_parts_are_listed_through_their_work(mass: MusicAssistant) -> None
 
     assert sorted(_ids(listed)) == sorted([opera.item_id, lone.item_id])
     assert _ids(by_part) == [opera.item_id]
+
+
+async def test_streaming_update_drops_the_joined_composer_it_replaces(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A joined name replaced on a streaming update loses its artist, track and work credits."""
+    beethoven = await _add_artist(mass, "Ludwig van Beethoven")
+    joined = await _add_artist(mass, "Ludwig van Beethoven & Conducted By William Bowles")
+    composers = AsyncMock(return_value=[])
+    monkeypatch.setattr(mass.music.artists, "get_library_composers", composers)
+    work = await _add_work(mass, f"Für Elise {_token()}", [joined])
+    track = await _add_track(
+        mass, work, item_credits=[Credit(artist=joined, role=ArtistRole.COMPOSER)]
+    )
+    performer = track.artists[0]
+    track.artists = UniqueList([joined])
+    await mass.music.tracks.update_item_in_library(track.item_id, track)
+    composers.return_value = [beethoven]
+    streaming = Mock(spec=MusicProvider, is_streaming_provider=True)
+    monkeypatch.setattr(mass, "get_provider", Mock(return_value=streaming))
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.credits = [Credit(artist=joined, role=ArtistRole.COMPOSER)]
+
+    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+    stored_work = await mass.music.works.get_library_item(work.item_id)
+
+    assert _composer_ids(stored) == [beethoven.item_id]
+    assert _ids(stored_work.composers) == []
+    assert sorted(_ids(stored.artists)) == sorted([performer.item_id, beethoven.item_id])

@@ -396,6 +396,33 @@ class WorksController(MediaControllerBase[Work]):
             return int(library_work.item_id)
         return None
 
+    async def get_or_add_library_work_id(self, work: Work | ItemMapping) -> int | None:
+        """
+        Return the library id of a track's work, adding the work if needed.
+
+        Only a library work, or a work carrying its MusicBrainz work id, is a track's work; for
+        any other work, such as one named after a track's title, None is returned.
+
+        :param work: The work a track names.
+        """
+        if (work_id := await self.get_library_work_id(work)) or not isinstance(work, Work):
+            return work_id
+        if not work.mbid:
+            return None
+        # matched on the library artists, as a provider may name a composer differently
+        work.composers = UniqueList(
+            [
+                ItemMapping(
+                    media_type=MediaType.ARTIST,
+                    item_id=str(await self._get_library_artist_id(x)),
+                    provider="library",
+                    name=x.name,
+                )
+                for x in work.composers
+            ]
+        )
+        return int((await self.add_item_to_library(work)).item_id)
+
     async def _add_library_item(self, item: Work, overwrite_existing: bool = False) -> int:
         """Add a new work record to the database."""
         catalog_numbers = _unique_catalog_numbers(item.catalog_numbers)

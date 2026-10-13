@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any, Final
 
-from music_assistant_models.enums import ExternalID, ImageType, RecordingSource
+from music_assistant_models.enums import ArtistRole, ExternalID, ImageType, RecordingSource
 from music_assistant_models.errors import InvalidProviderID, InvalidProviderURI
 from music_assistant_models.helpers import create_safe_string, get_global_cache_value
 from music_assistant_models.media_items import (
@@ -87,6 +87,18 @@ def has_musicbrainz_id(item_id: str, media_type: MediaType, id_type: ExternalID)
         f"WHERE {DB_TABLE_EXTERNAL_ID_LOOKUP}.media_type = '{media_type.value}' "
         f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.external_id_type = '{id_type.value}' "
         f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.item_id = {item_id})"
+    )
+
+
+def track_composers_query(tracks: str) -> str:
+    """
+    Return a subquery selecting the ids of the artists credited as composer on some tracks.
+
+    :param tracks: Subquery selecting the ids of the tracks.
+    """
+    return (
+        f"SELECT artist_id FROM {DB_TABLE_TRACK_CREDITS} "
+        f"WHERE role = '{ArtistRole.COMPOSER.value}' AND track_id IN ({tracks})"
     )
 
 

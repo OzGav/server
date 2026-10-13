@@ -38,7 +38,6 @@ from music_assistant.constants import (
     DB_TABLE_ALBUM_TRACKS,
     DB_TABLE_ALBUMS,
     DB_TABLE_ARTISTS,
-    DB_TABLE_EXTERNAL_ID_LOOKUP,
     DB_TABLE_PLAYLISTS,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_CREDITS,
@@ -1231,26 +1230,10 @@ def _musicbrainz_lookup_marker(table: str) -> str:
     return f"json_extract({table}.metadata,'$.last_musicbrainz_lookup')"
 
 
-def _has_musicbrainz_id(item_id: str, media_type: MediaType, id_type: ExternalID) -> str:
-    """
-    Return a query part that is true for an item carrying the given MusicBrainz id.
-
-    :param item_id: SQL expression of the library item id, e.g. ``albums.item_id``.
-    :param media_type: Media type of the item.
-    :param id_type: The MusicBrainz id type the item has to carry.
-    """
-    return (
-        f"EXISTS (SELECT 1 FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} "
-        f"WHERE {DB_TABLE_EXTERNAL_ID_LOOKUP}.media_type = '{media_type.value}' "
-        f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.external_id_type = '{id_type.value}' "
-        f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.item_id = {item_id})"
-    )
-
-
 def _albums_to_identify_query() -> str:
     """Return a query part selecting albums due for a MusicBrainz lookup (param ``stale``)."""
     marker = _musicbrainz_lookup_marker(DB_TABLE_ALBUMS)
-    identified = _has_musicbrainz_id(
+    identified = has_musicbrainz_id(
         f"{DB_TABLE_ALBUMS}.item_id", MediaType.ALBUM, ExternalID.MB_ALBUM
     )
     # an album MusicBrainz did not know is looked up again once its lookup is stale
@@ -1260,11 +1243,11 @@ def _albums_to_identify_query() -> str:
 def _artists_to_identify_query() -> str:
     """Return a query part selecting artists due for a MusicBrainz lookup."""
     marker = _musicbrainz_lookup_marker(DB_TABLE_ARTISTS)
-    identified = _has_musicbrainz_id(
+    identified = has_musicbrainz_id(
         f"{DB_TABLE_ARTISTS}.item_id", MediaType.ARTIST, ExternalID.MB_ARTIST
     )
     # the credits of an identified album name the artist at the cost of a cached lookup
-    album_identified = _has_musicbrainz_id(
+    album_identified = has_musicbrainz_id(
         f"{DB_TABLE_ALBUM_ARTISTS}.album_id", MediaType.ALBUM, ExternalID.MB_ALBUM
     )
     has_identified_album = (
@@ -1278,11 +1261,11 @@ def _artists_to_identify_query() -> str:
 def _tracks_to_identify_query() -> str:
     """Return a query part selecting tracks due for a MusicBrainz lookup."""
     marker = _musicbrainz_lookup_marker(DB_TABLE_TRACKS)
-    identified = _has_musicbrainz_id(
+    identified = has_musicbrainz_id(
         f"{DB_TABLE_TRACKS}.item_id", MediaType.TRACK, ExternalID.MB_RECORDING
     )
     # the tracklist of an identified album names the track at the cost of a cached lookup
-    album_identified = _has_musicbrainz_id(
+    album_identified = has_musicbrainz_id(
         f"{DB_TABLE_ALBUM_TRACKS}.album_id", MediaType.ALBUM, ExternalID.MB_ALBUM
     )
     has_identified_album = (
@@ -1296,15 +1279,13 @@ def _tracks_to_identify_query() -> str:
 def _works_to_enrich_query() -> str:
     """Return a query part selecting the works with a MusicBrainz id not looked up yet."""
     marker = _musicbrainz_lookup_marker(DB_TABLE_WORKS)
-    identified = _has_musicbrainz_id(
-        f"{DB_TABLE_WORKS}.item_id", MediaType.WORK, ExternalID.MB_WORK
-    )
+    identified = has_musicbrainz_id(f"{DB_TABLE_WORKS}.item_id", MediaType.WORK, ExternalID.MB_WORK)
     return f"({marker} ISNULL AND {identified})"
 
 
 def _albums_with_recordings_to_read_query() -> str:
     """Return a query part selecting identified albums with classical tracks left to read."""
-    identified = _has_musicbrainz_id(
+    identified = has_musicbrainz_id(
         f"{DB_TABLE_ALBUMS}.item_id", MediaType.ALBUM, ExternalID.MB_ALBUM
     )
     return (
@@ -1316,7 +1297,7 @@ def _albums_with_recordings_to_read_query() -> str:
 
 def _tracks_with_recording_to_read_query() -> str:
     """Return a query part selecting classical tracks left to read without an identified album."""
-    album_identified = _has_musicbrainz_id("at.album_id", MediaType.ALBUM, ExternalID.MB_ALBUM)
+    album_identified = has_musicbrainz_id("at.album_id", MediaType.ALBUM, ExternalID.MB_ALBUM)
     # the tracks of an identified album are read through its release
     on_identified_album = (
         f"EXISTS (SELECT 1 FROM {DB_TABLE_ALBUM_TRACKS} at "
@@ -1371,7 +1352,7 @@ def _tracks_with_recording_to_reread_query() -> str:
 def _recording_to_reread(track: str) -> str:
     """Return a query part true for a classical track whose recording was read before ``stale``."""
     marker = f"json_extract({track}.metadata,'$.last_musicbrainz_recording_lookup')"
-    recording = _has_musicbrainz_id(f"{track}.item_id", MediaType.TRACK, ExternalID.MB_RECORDING)
+    recording = has_musicbrainz_id(f"{track}.item_id", MediaType.TRACK, ExternalID.MB_RECORDING)
     return (
         f"({track}.is_classical = 1 AND {_valid_metadata_guard(track)} "
         f"AND {marker} < :stale AND {recording})"
@@ -1405,7 +1386,7 @@ def _relink_query(table: str, media_type: MediaType, id_type: ExternalID) -> str
     :param media_type: Media type of the items.
     :param id_type: The MusicBrainz id type an identified item carries.
     """
-    identified = _has_musicbrainz_id(f"{table}.item_id", media_type, id_type)
+    identified = has_musicbrainz_id(f"{table}.item_id", media_type, id_type)
     mapped = (
         f"EXISTS (SELECT 1 FROM {DB_TABLE_PROVIDER_MAPPINGS} "
         f"WHERE {DB_TABLE_PROVIDER_MAPPINGS}.media_type = '{media_type.value}' "

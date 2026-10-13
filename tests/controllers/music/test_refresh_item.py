@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import ANY, AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 import pytest
 from music_assistant_models.enums import ExternalID, MediaType
+from music_assistant_models.errors import MediaNotFoundError
 from music_assistant_models.media_items import (
     Album,
     Artist,
     ItemMapping,
+    MediaItemMetadata,
     MediaItemType,
     ProviderMapping,
     Track,
     UniqueList,
     Work,
+    WorkMovement,
 )
 
+from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.music import MusicController
 from music_assistant.mass import MusicAssistant
 from music_assistant.models.music_provider import MusicProvider
@@ -160,6 +164,56 @@ def _album_track(
     )
 
 
+async def test_album_refresh_reads_its_file_tracks_again() -> None:
+    """
+    A refreshed album reads its file tracks anew and leaves its streaming tracks as they are.
+
+    A file track whose work tag changed leaves its old work, which goes when empty.
+    """
+    files, spotify = _provider("filesystem", False), _provider("spotify", True)
+    file_track = Track(item_id="f1", provider="filesystem", name="Track 1", provider_mappings=set())
+    files.get_track = AsyncMock(return_value=file_track)
+    album_tracks = [
+        _album_track("1", "filesystem", work_id="5"),
+        _album_track("2", "spotify", work_id="6"),
+        _album_track("3", "filesystem", classical=False),
+    ]
+    mass = Mock()
+    mass.metadata = AsyncMock()
+    music = MusicController.__new__(MusicController)
+    music.mass = mass
+    music.albums = Mock(tracks=AsyncMock(return_value=album_tracks))
+    music.tracks = Mock(update_item_in_library=AsyncMock())
+    album = _album("library")
+    controller = AsyncMock()
+    controller.get_provider_item = AsyncMock(return_value=_album("spotify"))
+    controller.update_item_in_library = AsyncMock(return_value=album)
+
+    with (
+        patch.object(music, "get_controller", return_value=controller),
+        patch.object(
+            music,
+            "_visible_provider_for",
+            side_effect=lambda mapping: (
+                files if mapping.provider_domain == "filesystem" else spotify
+            ),
+        ),
+        patch("music_assistant.controllers.music.controller.invalidate_listings", AsyncMock()),
+    ):
+        await music.refresh_item(album)
+
+    spotify.get_track.assert_not_called()
+    spotify.get_album_tracks.assert_not_called()
+    assert music.tracks.update_item_in_library.await_args_list == [
+        call("1", file_track, overwrite=True),
+        call("3", file_track, overwrite=False),
+    ]
+    assert sorted(x.args[0] for x in mass.metadata.remove_work_if_empty.await_args_list) == [
+        "5",
+        "6",
+    ]
+
+
 def _file_mapping(item_id: str) -> ProviderMapping:
     """Return a mapping of an item read from a file."""
     return ProviderMapping(
@@ -187,3 +241,75 @@ def _file_track(**kwargs: Any) -> Track:
         classical_tag=True,
         **kwargs,
     )
+
+
+@pytest.mark.parametrize("retagged", [False, True])
+async def test_album_refresh_keeps_a_file_track_on_the_movement_its_tag_names(
+    music_mass: MusicAssistant, retagged: bool
+) -> None:
+    """
+    A file track whose tag names the movement it performs stays on its work through a refresh.
+
+    A track whose tag names another work now moves there, and its old work goes when empty.
+    """
+    act = await music_mass.music.works.add_item_to_library(
+        Work(
+            item_id="act",
+            provider="works_source",
+            name="Swan Lake: Act I",
+            provider_mappings=set(),
+            external_ids={(ExternalID.MB_WORK, ACT_ID)},
+            metadata=MediaItemMetadata(
+                movements=[WorkMovement(number=2, name="No. 2 Scène", mbid=NUMBER_ID)]
+            ),
+        )
+    )
+    track = await music_mass.music.tracks.add_item_to_library(
+        _file_track(
+            album=Album(
+                item_id="a1",
+                provider="filesystem_1",
+                name="Swan Lake",
+                provider_mappings={_file_mapping("a1")},
+            ),
+            work=ItemMapping.from_item(act),
+            movement_number=2,
+            movement_name="No. 2 Scène",
+        )
+    )
+    files = _provider("filesystem_local", streaming=False)
+    files.get_track = AsyncMock(
+        return_value=_file_track(
+            work=Work(
+                item_id="tag",
+                provider="filesystem_1",
+                name="Swan Lake: No. 2 Scène",
+                provider_mappings=set(),
+                external_ids={(ExternalID.MB_WORK, OTHER_ID if retagged else NUMBER_ID)},
+            )
+        )
+    )
+    assert track.album is not None
+    album = await music_mass.music.albums.get_library_item(track.album.item_id)
+
+    with (
+        patch.object(music_mass.music, "_visible_provider_for", return_value=files),
+        patch.object(music_mass, "get_provider", return_value=files),
+    ):
+        old_work_ids = await music_mass.music._refresh_album_tracks(album)
+    # the library-only server runs no metadata controller
+    metadata = MetaDataController.__new__(MetaDataController)
+    metadata.mass = music_mass
+    for work_id in old_work_ids:
+        await metadata.remove_work_if_empty(work_id)
+
+    stored = await music_mass.music.tracks.get_library_item(track.item_id)
+    assert stored.work is not None
+    assert old_work_ids == {act.item_id}
+    if retagged:
+        assert (await music_mass.music.works.get_library_item(stored.work.item_id)).mbid == OTHER_ID
+        with pytest.raises(MediaNotFoundError):
+            await music_mass.music.works.get_library_item(act.item_id)
+    else:
+        assert (stored.work.item_id, stored.movement_number) == (act.item_id, 2)
+        assert (await music_mass.music.works.get_library_item(act.item_id)).item_id == act.item_id

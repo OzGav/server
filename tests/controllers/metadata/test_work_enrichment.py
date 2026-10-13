@@ -29,7 +29,7 @@ from music_assistant.constants import DB_TABLE_TRACKS
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.constants import REFRESH_INTERVAL
 from music_assistant.controllers.metadata.controller import _works_to_enrich_query
-from music_assistant.controllers.metadata.work_enrichment import _is_named_by
+from music_assistant.helpers.compare import is_named_by
 from music_assistant.providers.musicbrainz.api_client import _FRESH_READS
 from music_assistant.providers.musicbrainz.models import (
     MusicBrainzAlias,
@@ -502,6 +502,52 @@ async def test_works_sharing_a_musicbrainz_id_merge_into_the_oldest(mass: MusicA
     assert survivor.metadata.last_musicbrainz_lookup is not None
 
 
+async def test_work_added_for_a_track_is_named_in_the_user_s_language(
+    mass: MusicAssistant,
+) -> None:
+    """A work added from a track's MusicBrainz id takes its English name, not its original one."""
+    token = _token()
+    (variations,) = _work_levels((f"Goldberg-Variationen, BWV 988 {token}", "Variations"))
+    english = f"Goldberg Variations {token}"
+    variations.aliases = [MusicBrainzAlias(english, english, "en", None, True)]
+    track = await _add_titled_track(
+        mass, f"Goldberg {token}: Aria", f"Goldberg {token}", [variations.id]
+    )
+    ctrl = _controller(mass, [variations])
+
+    await ctrl._add_track_work(track.item_id, [variations.id])
+
+    _, work = await _track_work(mass, track)
+    assert (work.mbid, work.name) == (variations.id, english)
+
+
+@pytest.mark.parametrize("held", [False, True])
+async def test_track_on_the_work_its_id_names_has_no_movement(
+    mass: MusicAssistant, held: bool
+) -> None:
+    """A track placed on the work its one id names keeps no movement its title gives."""
+    token = _token()
+    (vocalise,) = _work_levels((f"Vocalise, op. 34 no. 14 {token}", "Song"))
+    if held:
+        await _add_work(mass, vocalise.title, mbid=vocalise.id)
+    work_name = f"14 Romances, Op. 34 {token}"
+    track = await _add_titled_track(
+        mass,
+        f"{work_name}: XIV. Vocalise",
+        work_name,
+        [vocalise.id],
+        movement_number=14,
+        movement_name="XIV. Vocalise",
+    )
+    ctrl = _controller(mass, [vocalise])
+
+    await ctrl._add_track_work(track.item_id, [vocalise.id])
+
+    stored, work = await _track_work(mass, track)
+    assert work.mbid == vocalise.id
+    assert (stored.movement_number, stored.movement_name) == (None, None)
+
+
 def _tosca_act(token: str) -> list[MusicBrainzWork]:
     """Return two arias of an act of an opera, followed by the act and the opera."""
     first_aria, act, opera = _work_levels(
@@ -515,6 +561,45 @@ def _tosca_act(token: str) -> list[MusicBrainzWork]:
         relations=[MusicBrainzRelation(type="parts", direction="backward", work=act)],
     )
     return [first_aria, second_aria, act, opera]
+
+
+async def test_track_performing_several_parts_of_an_act_is_a_recording_of_the_act(
+    mass: MusicAssistant,
+) -> None:
+    """A track performing two arias of one act is placed on the act, added with its opera."""
+    token = _token()
+    first_aria, second_aria, act, opera = _tosca_act(token)
+    work_ids = [first_aria.id, second_aria.id]
+    work_name = f"Tosca {token}, Act I"
+    track = await _add_titled_track(
+        mass, f"{work_name}: Duet", work_name, work_ids, movement_number=3, movement_name="Duet"
+    )
+    ctrl = _controller(mass, [first_aria, second_aria, act, opera])
+
+    await ctrl._add_track_work(track.item_id, set(work_ids))
+
+    stored, work = await _track_work(mass, track)
+    assert work.mbid == act.id
+    assert work.parent_work is not None
+    assert (await mass.music.works.get_library_item(work.parent_work.item_id)).mbid == opera.id
+    assert (stored.movement_number, stored.movement_name) == (None, "Duet")
+    assert {x for id_type, x in stored.external_ids if id_type == ExternalID.MB_WORK} == set(
+        work_ids
+    )
+
+
+async def test_track_performing_parts_of_two_acts_gets_no_work(mass: MusicAssistant) -> None:
+    """A track performing an aria of each of two acts is left without a work."""
+    token = _token()
+    (first_aria, first_act, opera), (second_aria, second_act, _) = _boheme(token)
+    track = await _add_titled_track(
+        mass, f"La bohème {token}: Arias", f"La bohème {token}", [first_aria.id, second_aria.id]
+    )
+    ctrl = _controller(mass, [first_aria, first_act, second_aria, second_act, opera])
+
+    await ctrl._add_track_work(track.item_id, {first_aria.id, second_aria.id})
+
+    assert (await mass.music.tracks.get_library_item(track.item_id)).work is None
 
 
 def _preludes(token: str) -> tuple[MusicBrainzWork, MusicBrainzWork, MusicBrainzWork]:
@@ -557,6 +642,50 @@ async def test_work_looked_up_first_takes_the_musicbrainz_name(
     stored = await _enrich(ctrl, work)
 
     assert (stored.mbid, stored.name) == (preludes.id, f"24 Preludes, Op. 28 {token}")
+
+
+async def test_renamed_work_takes_the_catalog_numbers_of_its_new_name(mass: MusicAssistant) -> None:
+    """A work renamed after MusicBrainz no longer carries the catalog number of its old name."""
+    token = _token()
+    (concerto,) = _work_levels((f"Violin Concerto in E major, BWV 1042 {token}", "Concerto"))
+    work = await _add_work(
+        mass,
+        f"Violin Concerto in E major, BWV 1041 {token}",
+        mbid=concerto.id,
+        catalog_numbers=["BWV 1041"],
+    )
+    await _add_track(mass, work, [concerto.id], movement=None)
+    ctrl = _controller(mass, [concerto])
+
+    stored = await _enrich(ctrl, work)
+
+    assert (stored.name, stored.catalog_numbers) == (concerto.title, ["BWV 1042"])
+
+
+@pytest.mark.parametrize("named", [False, True])
+async def test_work_lists_the_catalog_numbers_its_name_gives_first(
+    mass: MusicAssistant, named: bool
+) -> None:
+    """A work's catalog numbers from MusicBrainz start with those its name gives, keeping all."""
+    token = _token()
+    title = f"Toccata and Fugue in D minor, BWV 565 {token}"
+    (toccata,) = _work_levels((title, None))
+    toccata.relations = [
+        MusicBrainzRelation(
+            type="part of",
+            series=MusicBrainzSeries(id=str(uuid4()), name=name, type="Catalogue"),
+            attribute_values={"number": number},
+        )
+        for name, number in (("Bach-Compendium", "BC J 37"), ("BWV", "BWV 565"))
+    ]
+    # named as MusicBrainz names it, or by a file's tag
+    work = await _add_work(mass, title if named else f"Toccata {token}", mbid=toccata.id)
+    await _add_track(mass, work, [toccata.id], movement=None)
+    ctrl = _controller(mass, [toccata])
+
+    stored = await _enrich(ctrl, work)
+
+    assert (stored.name, stored.catalog_numbers) == (title, ["BWV 565", "BC J 37"])
 
 
 @pytest.mark.parametrize("held", [True, False])
@@ -952,6 +1081,39 @@ async def test_enriching_again_changes_nothing(mass: MusicAssistant) -> None:
     assert [x.item_id for x in second.arrangement_of] == [original.item_id]
 
 
+# --------------------------------------------------------------------------- #
+#  acts and the levels of an opera                                             #
+# --------------------------------------------------------------------------- #
+
+
+def _boheme(token: str) -> tuple[list[MusicBrainzWork], list[MusicBrainzWork]]:
+    """Return an aria of each of two acts of an opera, each followed by its act and the opera."""
+    first_aria, first_act, opera = _work_levels(
+        (f"La bohème {token}: Atto I, no. 6. Che gelida manina", "Aria"),
+        (f"La bohème {token}: Atto I", None),
+        (f"La bohème {token}", "Opera"),
+    )
+    # the aria's place in its act differs from the number its title gives
+    first_aria.relations[0].ordering_key = 13
+    second_act = MusicBrainzWork(
+        id=str(uuid4()),
+        title=f"La bohème {token}: Atto II",
+        relations=[MusicBrainzRelation(type="parts", direction="backward", work=opera)],
+    )
+    second_aria = MusicBrainzWork(
+        id=str(uuid4()),
+        title=f"La bohème {token}: Atto II. Quando me'n vo'",
+        type="Aria",
+        relations=[MusicBrainzRelation(type="parts", direction="backward", work=second_act)],
+    )
+    return [first_aria, first_act, opera], [second_aria, second_act, opera]
+
+
+async def _add_act(mass: MusicAssistant, name: str, parent: Work) -> Work:
+    """Store a library act of a work, the way a streaming provider names one."""
+    return await _add_work(mass, name, parent_work=ItemMapping.from_item(parent))
+
+
 async def test_part_taken_in_by_another_work_leaves_its_empty_parent(
     mass: MusicAssistant,
 ) -> None:
@@ -1054,6 +1216,7 @@ async def test_composer_musicbrainz_does_not_confirm_gets_no_musicbrainz_id(
         ("Prokofiev", "Sergei Prokofiev", "Prokofiev, Sergei Sergeyevich", True),
         ("Sergeyevich Prokofiev", "Sergei Prokofiev", "Prokofiev, Sergei Sergeyevich", True),
         ("antonín DVOŘÁK", "Antonín Dvořák", "Dvořák, Antonín", True),
+        ("Vaughan-Williams", "Ralph Vaughan Williams", "Vaughan Williams, Ralph", True),
         ("Beethoven", "Johann Sebastian Bach", "Bach, Johann Sebastian", False),
         ("Gustav Holst", "Gustav Mahler", "Mahler, Gustav", False),
         ("...", "Gustav Mahler", "Mahler, Gustav", False),
@@ -1062,10 +1225,10 @@ async def test_composer_musicbrainz_does_not_confirm_gets_no_musicbrainz_id(
 def test_is_named_by_needs_every_word_of_the_name(
     name: str, mb_name: str, mb_sort_name: str, expected: bool
 ) -> None:
-    """Every word of the name, case and accents aside, is in the name or the sort name."""
+    """Every word of the name, case, accents and hyphens aside, is in the name or sort name."""
     mb_artist = MusicBrainzArtist(id=str(uuid4()), name=mb_name, sort_name=mb_sort_name)
 
-    assert _is_named_by(name, mb_artist) is expected
+    assert is_named_by(name, mb_artist) is expected
 
 
 _SEARCH_HINT = MusicBrainzAlias("Tschaikowsky", "Tschaikowsky", type="Search hint")

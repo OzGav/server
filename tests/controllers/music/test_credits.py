@@ -266,6 +266,15 @@ async def test_artists_win_over_main_artist_credits(mass: MusicAssistant) -> Non
             False,
             {(NEW, ArtistRole.COMPOSER)},
         ),
+        # one from a streaming service, which names only some credits, adds them
+        (
+            [ArtistRole.CONDUCTOR],
+            [ArtistRole.COMPOSER],
+            "streaming",
+            False,
+            False,
+            {(NEW, ArtistRole.COMPOSER), (STORED, ArtistRole.CONDUCTOR)},
+        ),
         # an overwriting update replaces them, unless it brings none
         (
             [ArtistRole.COMPOSER],
@@ -276,6 +285,24 @@ async def test_artists_win_over_main_artist_credits(mass: MusicAssistant) -> Non
             {(NEW, ArtistRole.LYRICIST)},
         ),
         ([ArtistRole.COMPOSER], [], "same", True, False, {(STORED, ArtistRole.COMPOSER)}),
+        # a refreshed classical track read from its files gets the performers they name now,
+        # one from a streaming service keeps a performer it no longer names
+        (
+            [ArtistRole.CONDUCTOR],
+            [ArtistRole.SOLOIST],
+            "same",
+            True,
+            True,
+            {(NEW, ArtistRole.SOLOIST)},
+        ),
+        (
+            [ArtistRole.CONDUCTOR],
+            [ArtistRole.SOLOIST],
+            "streaming",
+            True,
+            True,
+            {(STORED, ArtistRole.CONDUCTOR), (NEW, ArtistRole.SOLOIST)},
+        ),
     ],
 )
 async def test_update_adds_or_replaces_credits(
@@ -291,15 +318,16 @@ async def test_update_adds_or_replaces_credits(
     """
     An update adds its credits to the stored ones, or replaces them when it names them all.
 
-    An update from the only provider of a track names them all. An overwriting update replaces
-    them unless it brings none. The main artists of a merging update are added, those of an
-    overwriting update replace the stored ones.
+    An update from the only provider of a track names them all, unless it is a streaming
+    service, which names only some. An overwriting update replaces them unless it brings
+    none, and a streaming service keeps the stored performers. The main artists of a merging
+    update are added, those of an overwriting update replace the stored ones.
 
     :param stored: The roles of the stored credits.
     :param update: The roles of the credits of the update.
-    :param source: Where the update comes from: the only provider of the track ("same"), a
-        provider the track is not on ("other"), or one of the two providers of the track
-        ("shared").
+    :param source: Where the update comes from: the only provider of the track ("same"), the
+        only one being a streaming service ("streaming"), a provider the track is not on
+        ("other"), or one of the two providers of the track ("shared").
     :param overwrite: Whether the update overwrites the track.
     :param classical: Whether the track is classical.
     :param expected: The (stored or new, role) of the credits the track ends up with.

@@ -61,6 +61,7 @@ from music_assistant.controllers.music.helpers import (
     has_musicbrainz_id,
     metadata_for_update,
     provider_mappings_for_update,
+    track_composers_query,
 )
 from music_assistant.controllers.music.listing import apply_listing, resolve_listing_sort
 from music_assistant.controllers.music.listing_cache import Listing
@@ -1704,6 +1705,39 @@ class ArtistsController(MediaControllerBase[Artist]):
         )
         library_item = await self.get_library_item(item_id)
         self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+
+    async def get_library_composers(
+        self, with_mbid: bool, named_by: str | None = None
+    ) -> list[Artist]:
+        """
+        Return the library artists credited as composer on classical tracks.
+
+        :param with_mbid: True for the composers with a MusicBrainz artist id, False for those
+            without one.
+        :param named_by: Leave out the composers this name, such as "Chopin", cannot name.
+        """
+        classical_tracks = f"SELECT item_id FROM {DB_TABLE_TRACKS} WHERE is_classical = 1"
+        has_mbid = has_musicbrainz_id(
+            f"{DB_TABLE_ARTISTS}.item_id", MediaType.ARTIST, ExternalID.MB_ARTIST
+        )
+        query_parts = [
+            f"{DB_TABLE_ARTISTS}.item_id IN ({track_composers_query(classical_tracks)})",
+            has_mbid if with_mbid else f"NOT {has_mbid}",
+        ]
+        query_params: dict[str, Any] = {}
+        if named_by is not None:
+            # every word of a name is part of the stored search name of an artist it names
+            words = create_safe_string(named_by.replace("-", " ")).split()
+            if not words:
+                return []
+            query_parts.append(
+                f"({DB_TABLE_ARTISTS}.search_name LIKE :named_by "
+                f"OR {DB_TABLE_ARTISTS}.search_sort_name LIKE :named_by)"
+            )
+            query_params["named_by"] = f"%{max(words, key=len)}%"
+        return await self.get_library_items_by_query(
+            extra_query_parts=query_parts, extra_query_params=query_params, limit=0
+        )
 
     def artist_from_item_mapping(self, item: ItemMapping) -> Artist:
         """Create an Artist object from an ItemMapping object."""
