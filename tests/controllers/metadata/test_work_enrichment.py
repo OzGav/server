@@ -177,6 +177,15 @@ async def _library_work_ids(mass: MusicAssistant) -> set[str]:
     return {str(row["item_id"]) for row in rows}
 
 
+def _linked(works: Iterable[Work | ItemMapping]) -> list[tuple[str, list[str]]]:
+    """Return the id and composer ids of each linked work."""
+    linked = []
+    for work in works:
+        assert isinstance(work, Work)
+        linked.append((work.item_id, [x.item_id for x in work.composers]))
+    return linked
+
+
 def _composers(track: Track) -> list[str]:
     """Return the names of the composers credited on a track."""
     return [c.artist.name for c in track.credits if c.role == ArtistRole.COMPOSER]
@@ -404,6 +413,63 @@ async def test_work_musicbrainz_does_not_know_is_marked_looked_up(mass: MusicAss
     assert stored.work_type is None
     assert stored.metadata.last_musicbrainz_lookup is not None
     cast("Mock", ctrl.schedule_update_metadata).assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+#  arrangements                                                                #
+# --------------------------------------------------------------------------- #
+
+
+async def test_arrangement_in_the_library_is_linked_to_its_original(mass: MusicAssistant) -> None:
+    """An original's forward arrangement relation links the library work arranged from it."""
+    symphony = _musicbrainz_works("symphony_5")["symphony_5"]
+    [relation] = symphony.arrangement_relations
+    assert relation.work is not None
+    composer = await _add_artist(mass, f"Beethoven {_token()}")
+    original = await _add_work(mass, f"Symphony no. 5 {_token()}", [composer], mbid=symphony.id)
+    transcription = await _add_work(mass, f"S. 464 no. 5 {_token()}", mbid=relation.work.id)
+    ctrl = _controller(mass, [symphony])
+
+    stored = await _enrich(ctrl, original)
+
+    assert _linked(stored.arrangements) == [(transcription.item_id, [])]
+    arranged = await mass.music.works.get_library_item(transcription.item_id)
+    assert _linked(arranged.arrangement_of) == [(original.item_id, [composer.item_id])]
+
+
+@pytest.mark.parametrize("relation_type", ["arrangement", "orchestration"])
+async def test_arrangement_is_linked_to_its_original_in_the_library(
+    mass: MusicAssistant, relation_type: str
+) -> None:
+    """A work's backward arrangement or orchestration relation links it to its original."""
+    token = _token()
+    original_mb = MusicBrainzWork(id=str(uuid4()), title=f"Pictures {token}")
+    arrangement_mb = MusicBrainzWork(
+        id=str(uuid4()),
+        title=f"Pictures, orchestrated {token}",
+        relations=[MusicBrainzRelation(type=relation_type, direction="backward", work=original_mb)],
+    )
+    original = await _add_work(mass, original_mb.title, mbid=original_mb.id)
+    arrangement = await _add_work(mass, arrangement_mb.title, mbid=arrangement_mb.id)
+    ctrl = _controller(mass, [arrangement_mb])
+
+    stored = await _enrich(ctrl, arrangement)
+
+    assert [x.item_id for x in stored.arrangement_of] == [original.item_id]
+    assert stored.arrangements == []
+
+
+async def test_arrangement_missing_from_the_library_is_not_added(mass: MusicAssistant) -> None:
+    """An arrangement MusicBrainz names that the library lacks adds no work."""
+    symphony = _musicbrainz_works("symphony_5")["symphony_5"]
+    original = await _add_work(mass, f"Symphony no. 5 {_token()}", mbid=symphony.id)
+    ctrl = _controller(mass, [symphony])
+    before = await _library_work_ids(mass)
+
+    stored = await _enrich(ctrl, original)
+
+    assert stored.arrangements == []
+    assert await _library_work_ids(mass) == before
 
 
 # --------------------------------------------------------------------------- #

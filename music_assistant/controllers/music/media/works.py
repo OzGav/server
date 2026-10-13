@@ -105,6 +105,10 @@ class WorksController(MediaControllerBase[Work]):
                 'name', w.name,
                 'sort_name', w.sort_name,
                 'media_type', '{MediaType.WORK.value}'"""
+        # the related works are slim works that carry their composers
+        related_work_fields = f"""{work_fields},
+                'provider_mappings', json('[]'),
+                'composers', json({self._composers_query(artist_fields, "w.item_id")})"""
         query = f"""
         SELECT
             {DB_TABLE_WORKS}.*,
@@ -113,7 +117,8 @@ class WorksController(MediaControllerBase[Work]):
             {self._provider_mappings_query()} AS provider_mappings,
             {self._composers_query(artist_fields)} AS composers,
             {self._parent_work_query(work_fields)} AS parent_work,
-            {self._arrangement_of_query(work_fields)} AS arrangement_of
+            {self._arrangement_of_query(related_work_fields)} AS arrangement_of,
+            {self._arrangements_query(related_work_fields)} AS arrangements
             FROM {DB_TABLE_WORKS}"""
         return query, {}
 
@@ -492,14 +497,16 @@ class WorksController(MediaControllerBase[Work]):
         )
         await self.mass.music.tracks.credit_work_composers(target_id)
 
-    def _composers_query(self, artist_fields: str) -> str:
-        """Return a subquery selecting the composers as a JSON array, in credited order."""
+    def _composers_query(
+        self, artist_fields: str, work_id: str = f"{DB_TABLE_WORKS}.item_id"
+    ) -> str:
+        """Return a subquery selecting a work's composers as a JSON array, in credited order."""
         # relies on the same json_group_array ordering as _main_artists_query
         return f"""(SELECT JSON_GROUP_ARRAY(json(artist)) FROM (
             SELECT json_object({artist_fields}) AS artist
             FROM {DB_TABLE_WORK_ARTISTS}
             JOIN artists ON artists.item_id = {DB_TABLE_WORK_ARTISTS}.artist_id
-            WHERE {DB_TABLE_WORK_ARTISTS}.work_id = {DB_TABLE_WORKS}.item_id
+            WHERE {DB_TABLE_WORK_ARTISTS}.work_id = {work_id}
             AND {DB_TABLE_WORK_ARTISTS}.role = '{ArtistRole.COMPOSER.value}'
             ORDER BY {DB_TABLE_WORK_ARTISTS}.position, {DB_TABLE_WORK_ARTISTS}.rowid))"""
 
@@ -515,6 +522,15 @@ class WorksController(MediaControllerBase[Work]):
             FROM {DB_TABLE_WORK_ARRANGEMENTS} wa
             JOIN {DB_TABLE_WORKS} w ON w.item_id = wa.source_work_id
             WHERE wa.work_id = {DB_TABLE_WORKS}.item_id
+            ORDER BY wa.rowid))"""
+
+    def _arrangements_query(self, work_fields: str) -> str:
+        """Return a subquery selecting the works arranged from this one as a JSON array."""
+        return f"""(SELECT JSON_GROUP_ARRAY(json(work)) FROM (
+            SELECT json_object({work_fields}) AS work
+            FROM {DB_TABLE_WORK_ARRANGEMENTS} wa
+            JOIN {DB_TABLE_WORKS} w ON w.item_id = wa.work_id
+            WHERE wa.source_work_id = {DB_TABLE_WORKS}.item_id
             ORDER BY wa.rowid))"""
 
     def _get_sort_sql(self, field: SortField, direction: SortDirection | None) -> str:
