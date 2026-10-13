@@ -50,6 +50,7 @@ from music_assistant.constants import (
     DB_TABLE_WORK_ARTISTS,
     DB_TABLE_WORKS,
 )
+from music_assistant.controllers.music.classical import PERFORMING_ROLES
 from music_assistant.controllers.music.constants import SIMILAR_ITEMS_LIMIT
 from music_assistant.controllers.music.helpers import (
     provider_mappings_for_update,
@@ -84,6 +85,8 @@ from .works import SUMMARY_WORK_FIELDS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from music_assistant_models.media_items import Credit
 
     from music_assistant import MusicAssistant
     from music_assistant.models.media_capabilities import MusicDiscoveryMixin
@@ -709,6 +712,16 @@ class TracksController(MediaControllerBase[Track]):
             return
 
         await self.update_item_in_library(int(track.item_id), track)
+
+    async def add_credits(self, item_id: int, item_credits: Iterable[Credit]) -> None:
+        """
+        Add credits to a library track, keeping the credits it has.
+
+        :param item_id: Library id of the track.
+        :param item_credits: The credits to add; main artist credits are left out.
+        """
+        await self._set_credits(item_id, item_credits)
+        await self.mass.music.classification.update(track_ids=[item_id])
 
     async def credit_work_composers(self, work_id: int) -> None:
         """
@@ -1666,6 +1679,23 @@ class TracksController(MediaControllerBase[Track]):
         metadata.lrc_lyrics = normalize_lrc_lyrics(
             metadata.lrc_lyrics or extract_lrc_lyrics(metadata.lyrics)
         )
+        # an update from the only provider instance the track is known on (e.g. a renamed
+        # file) carries its complete credits, so they replace the stored ones
+        update_instances = {x.provider_instance for x in update.provider_mappings}
+        replace_credits = bool(update_instances) and all(
+            x.provider_instance in update_instances for x in cur_item.provider_mappings
+        )
+        if overwrite:
+            # kept until the MusicBrainz link run has read the track's recording again
+            metadata.recording_year = metadata.recording_year or cur_item.metadata.recording_year
+        elif (
+            replace_credits
+            and any(x.role != ArtistRole.MAIN_ARTIST for x in update.credits)
+            and not any(x.role in PERFORMING_ROLES for x in update.credits)
+            and any(x.role in PERFORMING_ROLES for x in cur_item.credits)
+        ):
+            # the MusicBrainz link run credits the track artists with their roles again
+            metadata.last_musicbrainz_recording_lookup = None
         cur_item.external_ids.update(update.external_ids)
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
@@ -1701,12 +1731,6 @@ class TracksController(MediaControllerBase[Track]):
         # update/set external id lookup table
         await self.set_external_ids(
             db_id, update.external_ids if overwrite else cur_item.external_ids
-        )
-        # an update from the only provider instance the track is known on (e.g. a renamed
-        # file) carries its complete credits, so they replace the stored ones
-        update_instances = {x.provider_instance for x in update.provider_mappings}
-        replace_credits = bool(update_instances) and all(
-            x.provider_instance in update_instances for x in cur_item.provider_mappings
         )
         # update/set provider_mappings table
         provider_mappings = provider_mappings_for_update(

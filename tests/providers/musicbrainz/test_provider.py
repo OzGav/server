@@ -1224,7 +1224,7 @@ async def test_release_details_parses_a_full_release_lookup() -> None:
 
     get_data.assert_awaited_once_with(
         "release/rel-1?inc=artist-credits+aliases+labels+release-groups"
-        "+recordings+isrcs+url-rels+genres"
+        "+recordings+isrcs+url-rels+genres+artist-rels+recording-level-rels+work-rels+place-rels"
     )
     assert release.count is None
     assert release.barcode == BARCODE

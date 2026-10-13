@@ -1,0 +1,580 @@
+{
+  "media": [
+    {
+      "title": "",
+      "format-id": null,
+      "position": 1,
+      "id": "f36fd5b7-e1b1-3dd3-b077-ee264b9bec9f",
+      "track-count": 15,
+      "format": null,
+      "track-offset": 0,
+      "tracks": [
+        {
+          "recording": {
+            "artist-credit": [
+              {
+                "name": "Boston Pops Orchestra",
+                "artist": {
+                  "country": null,
+                  "name": "Boston Pops Orchestra",
+                  "id": "cba412a5-4f8d-4999-827a-92b63e112892",
+                  "type": "Orchestra",
+                  "type-id": "a0b36c92-3eb1-3839-a4f9-4799823f54a5",
+                  "sort-name": "Boston Pops Orchestra",
+                  "disambiguation": ""
+                },
+                "joinphrase": ", "
+              },
+              {
+                "joinphrase": "",
+                "artist": {
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "sort-name": "Fiedler, Arthur",
+                  "disambiguation": "conductor",
+                  "country": "US",
+                  "name": "Arthur Fiedler",
+                  "id": "7c0ae486-bab5-410f-9ece-255c11f4876d",
+                  "type": "Person"
+                },
+                "name": "Arthur Fiedler"
+              }
+            ],
+            "title": "Sabre Dance from \"Gayne\" Ballet Suite",
+            "video": false,
+            "length": 146800,
+            "id": "2f6c7875-7e62-454c-8736-e67ce2915691",
+            "disambiguation": "",
+            "relations": [
+              {
+                "begin": null,
+                "artist": {
+                  "sort-name": "Fiedler, Arthur",
+                  "disambiguation": "conductor",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "type": "Person",
+                  "id": "7c0ae486-bab5-410f-9ece-255c11f4876d",
+                  "country": "US",
+                  "name": "Arthur Fiedler"
+                },
+                "attributes": [],
+                "end": null,
+                "direction": "backward",
+                "type": "conductor",
+                "attribute-values": {},
+                "type-id": "234670ce-5f22-4fd0-921b-ef1662695c5d",
+                "ended": false,
+                "target-credit": "",
+                "source-credit": "",
+                "attribute-ids": {},
+                "target-type": "artist"
+              },
+              {
+                "begin": null,
+                "type": "performer",
+                "end": null,
+                "direction": "backward",
+                "attribute-values": {},
+                "artist": {
+                  "id": "cba412a5-4f8d-4999-827a-92b63e112892",
+                  "type": "Orchestra",
+                  "country": null,
+                  "name": "Boston Pops Orchestra",
+                  "sort-name": "Boston Pops Orchestra",
+                  "disambiguation": "",
+                  "type-id": "a0b36c92-3eb1-3839-a4f9-4799823f54a5"
+                },
+                "attributes": [],
+                "target-credit": "",
+                "ended": false,
+                "type-id": "628a9658-f54c-4142-b0c0-95f031b544da",
+                "target-type": "artist",
+                "source-credit": "",
+                "attribute-ids": {}
+              },
+              {
+                "begin": null,
+                "attribute-values": {},
+                "direction": "backward",
+                "end": null,
+                "type": "performing orchestra",
+                "artist": {
+                  "type": "Orchestra",
+                  "id": "cba412a5-4f8d-4999-827a-92b63e112892",
+                  "name": "Boston Pops Orchestra",
+                  "country": null,
+                  "disambiguation": "",
+                  "sort-name": "Boston Pops Orchestra",
+                  "type-id": "a0b36c92-3eb1-3839-a4f9-4799823f54a5"
+                },
+                "attributes": [],
+                "ended": false,
+                "target-credit": "Boston Pops",
+                "type-id": "3b6616c5-88ba-4341-b4ee-81ce1e6d7ebb",
+                "target-type": "artist",
+                "attribute-ids": {},
+                "source-credit": ""
+              },
+              {
+                "source-credit": "",
+                "attribute-ids": {},
+                "target-type": "artist",
+                "type-id": "5c0ceac3-feb4-41f0-868d-dc06f6e27fc0",
+                "target-credit": "",
+                "ended": false,
+                "attributes": [],
+                "artist": {
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "sort-name": "Mohr, Richard",
+                  "disambiguation": "producer",
+                  "country": "US",
+                  "name": "Richard Mohr",
+                  "type": "Person",
+                  "id": "2dd062dc-aa40-4bc5-8c00-2be94ef42fbf"
+                },
+                "end": null,
+                "direction": "backward",
+                "type": "producer",
+                "attribute-values": {},
+                "begin": null
+              },
+              {
+                "source-credit": "",
+                "attribute-ids": {},
+                "target-type": "artist",
+                "type-id": "a01ee869-80a8-45ef-9447-c59e91aa7926",
+                "target-credit": "",
+                "ended": false,
+                "artist": {
+                  "disambiguation": "engineer",
+                  "sort-name": "Layton, Lewis",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "type": "Person",
+                  "id": "1260a30c-096b-49e6-ba98-2a1ca5b6432a",
+                  "name": "Lewis Layton",
+                  "country": null
+                },
+                "attributes": [],
+                "type": "recording",
+                "end": null,
+                "direction": "backward",
+                "attribute-values": {},
+                "begin": null
+              },
+              {
+                "attributes": [],
+                "end": null,
+                "direction": "forward",
+                "type": "performance",
+                "attribute-values": {},
+                "begin": null,
+                "source-credit": "",
+                "attribute-ids": {},
+                "target-type": "work",
+                "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+                "ended": false,
+                "target-credit": "",
+                "work": {
+                  "language": null,
+                  "title": "Gayaneh: Act III, Scene VII (Expiation). Sabre Dance",
+                  "attributes": [],
+                  "id": "c912e891-de3e-4864-934c-efcace339e90",
+                  "type": null,
+                  "iswcs": [],
+                  "languages": [],
+                  "type-id": null,
+                  "disambiguation": ""
+                }
+              },
+              {
+                "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+                "ended": false,
+                "target-credit": "",
+                "work": {
+                  "id": "4f10d0d0-d644-463e-8791-c65b65d6ff36",
+                  "type": null,
+                  "title": "Sabre Dance, from the ballet Gayaneh",
+                  "attributes": [],
+                  "language": "zxx",
+                  "disambiguation": "catch-all for unknown versions",
+                  "type-id": null,
+                  "iswcs": [
+                    "T-801.025.525-2",
+                    "T-914.729.240-8"
+                  ],
+                  "languages": [
+                    "zxx"
+                  ]
+                },
+                "source-credit": "",
+                "attribute-ids": {},
+                "target-type": "work",
+                "begin": null,
+                "attributes": [],
+                "type": "performance",
+                "end": null,
+                "direction": "forward",
+                "attribute-values": {}
+              },
+              {
+                "target-type": "work",
+                "attribute-ids": {},
+                "source-credit": "",
+                "work": {
+                  "iswcs": [],
+                  "languages": [
+                    "zxx"
+                  ],
+                  "type-id": null,
+                  "disambiguation": "",
+                  "language": "zxx",
+                  "title": "Third Suite from the ballet “Gayaneh” for orchestra, op. 55: V. Sabre Dance",
+                  "attributes": [],
+                  "id": "a3403569-3995-33cd-936a-8d9d19190eef",
+                  "type": null
+                },
+                "target-credit": "",
+                "ended": false,
+                "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+                "attribute-values": {},
+                "type": "performance",
+                "end": null,
+                "direction": "forward",
+                "attributes": [],
+                "begin": null
+              }
+            ]
+          },
+          "number": "12",
+          "position": 12,
+          "id": "25ef5e09-662a-3f4d-8c40-bf76b870268d",
+          "length": 150306,
+          "artist-credit": [
+            {
+              "artist": {
+                "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                "disambiguation": "Soviet-Armenian composer",
+                "sort-name": "Khachaturian, Aram Ilich",
+                "name": "Արամ Խաչատրյան",
+                "country": "SU",
+                "id": "fa25cd1f-beeb-4718-b4bb-d3da4f53539f",
+                "type": "Person"
+              },
+              "name": "Արամ Խաչատրյան",
+              "joinphrase": ""
+            }
+          ],
+          "title": "Gayne - Sabre Dance"
+        },
+        {
+          "length": 516333,
+          "title": "Grand Canyon Suite - Cloudburst",
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "name": "Ferde Grofé",
+              "artist": {
+                "country": "US",
+                "name": "Ferde Grofé",
+                "type": "Person",
+                "id": "524d91c8-2162-4a41-a88e-600fa87d8b32",
+                "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                "sort-name": "Grofé, Ferde",
+                "disambiguation": "pianist, arranger, conductor and composer"
+              }
+            }
+          ],
+          "recording": {
+            "length": 513453,
+            "video": false,
+            "title": "Grand Canyon Suite: Cloudburst",
+            "artist-credit": [
+              {
+                "joinphrase": ", ",
+                "name": "Morton Gould Orchestra",
+                "artist": {
+                  "disambiguation": "",
+                  "sort-name": "Morton Gould's Symphonic Band",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "type": "Group",
+                  "id": "f629e337-cf4b-4a2b-ac6f-7afea61afb15",
+                  "name": "Morton Gould's Symphonic Band",
+                  "country": "US"
+                }
+              },
+              {
+                "artist": {
+                  "type": "Person",
+                  "id": "4db4e744-3007-4386-b87d-9653acfe0464",
+                  "country": "US",
+                  "name": "Morton Gould",
+                  "sort-name": "Gould, Morton",
+                  "disambiguation": "American composer and conductor",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+                },
+                "name": "Morton Gould",
+                "joinphrase": ""
+              }
+            ],
+            "relations": [
+              {
+                "begin": "1960-02-19",
+                "direction": "backward",
+                "end": "1960-02-19",
+                "type": "conductor",
+                "attribute-values": {},
+                "artist": {
+                  "name": "Morton Gould",
+                  "country": "US",
+                  "id": "4db4e744-3007-4386-b87d-9653acfe0464",
+                  "type": "Person",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "disambiguation": "American composer and conductor",
+                  "sort-name": "Gould, Morton"
+                },
+                "attributes": [],
+                "target-credit": "",
+                "ended": true,
+                "type-id": "234670ce-5f22-4fd0-921b-ef1662695c5d",
+                "target-type": "artist",
+                "source-credit": "",
+                "attribute-ids": {}
+              },
+              {
+                "attribute-values": {},
+                "end": "1960-02-19",
+                "direction": "backward",
+                "type": "performing orchestra",
+                "artist": {
+                  "name": "Morton Gould's Symphonic Band",
+                  "country": "US",
+                  "id": "f629e337-cf4b-4a2b-ac6f-7afea61afb15",
+                  "type": "Group",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "disambiguation": "",
+                  "sort-name": "Morton Gould's Symphonic Band"
+                },
+                "attributes": [],
+                "begin": "1960-02-19",
+                "target-type": "artist",
+                "attribute-ids": {},
+                "source-credit": "",
+                "ended": true,
+                "target-credit": "Morton Gould Orchestra",
+                "type-id": "3b6616c5-88ba-4341-b4ee-81ce1e6d7ebb"
+              },
+              {
+                "source-credit": "",
+                "attribute-ids": {},
+                "target-type": "artist",
+                "type-id": "5c0ceac3-feb4-41f0-868d-dc06f6e27fc0",
+                "ended": false,
+                "target-credit": "",
+                "artist": {
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "disambiguation": "",
+                  "sort-name": "Habig, Joseph",
+                  "name": "Joseph Habig",
+                  "country": null,
+                  "id": "75451136-0778-4773-badf-354dc566724e",
+                  "type": "Person"
+                },
+                "attributes": [],
+                "end": null,
+                "direction": "backward",
+                "type": "producer",
+                "attribute-values": {},
+                "begin": null
+              },
+              {
+                "begin": null,
+                "artist": {
+                  "sort-name": "Pfeiffer, John",
+                  "disambiguation": "producer and engineer",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "id": "574c6f3b-1401-45a6-b6b4-40870b638684",
+                  "type": "Person",
+                  "country": "US",
+                  "name": "John Pfeiffer"
+                },
+                "attributes": [],
+                "attribute-values": {},
+                "direction": "backward",
+                "end": null,
+                "type": "producer",
+                "type-id": "5c0ceac3-feb4-41f0-868d-dc06f6e27fc0",
+                "ended": false,
+                "target-credit": "",
+                "attribute-ids": {},
+                "source-credit": "",
+                "target-type": "artist"
+              },
+              {
+                "begin": "1960-02-19",
+                "type": "recording",
+                "end": "1960-02-19",
+                "direction": "backward",
+                "attribute-values": {},
+                "artist": {
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "sort-name": "Layton, Lewis",
+                  "disambiguation": "engineer",
+                  "country": null,
+                  "name": "Lewis Layton",
+                  "id": "1260a30c-096b-49e6-ba98-2a1ca5b6432a",
+                  "type": "Person"
+                },
+                "attributes": [],
+                "ended": true,
+                "target-credit": "",
+                "type-id": "a01ee869-80a8-45ef-9447-c59e91aa7926",
+                "target-type": "artist",
+                "source-credit": "",
+                "attribute-ids": {}
+              },
+              {
+                "begin": "1960-02-19",
+                "attribute-values": {},
+                "end": "1960-02-19",
+                "type": "recorded at",
+                "direction": "backward",
+                "attributes": [],
+                "ended": true,
+                "target-credit": "",
+                "type-id": "ad462279-14b0-4180-9b58-571d0eef7c51",
+                "target-type": "place",
+                "place": {
+                  "coordinates": {
+                    "longitude": -73.994189,
+                    "latitude": 40.752908
+                  },
+                  "disambiguation": "",
+                  "address": "311 West 34th Street",
+                  "area": {
+                    "disambiguation": "",
+                    "id": "edd27a39-ff8a-4af4-8bbf-f369b0fb1899",
+                    "sort-name": "Midtown Manhattan",
+                    "type": "City",
+                    "name": "Midtown Manhattan",
+                    "type-id": "6fd8f29a-3d0a-32fc-980d-ea697b69da78"
+                  },
+                  "type-id": "cd92781a-a73f-30e8-a430-55d7521338db",
+                  "type": "Venue",
+                  "id": "bbc4e292-29ee-4daa-b436-7a6827e6415a",
+                  "name": "Manhattan Center"
+                },
+                "attribute-ids": {},
+                "source-credit": ""
+              },
+              {
+                "attribute-ids": {},
+                "source-credit": "",
+                "target-type": "work",
+                "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+                "work": {
+                  "disambiguation": "",
+                  "type-id": null,
+                  "languages": [
+                    "zxx"
+                  ],
+                  "iswcs": [],
+                  "type": null,
+                  "id": "908ea49b-ac6c-39a0-ac54-fb8117bd7812",
+                  "attributes": [],
+                  "title": "Grand Canyon Suite: V. Cloudburst",
+                  "language": "zxx"
+                },
+                "ended": true,
+                "target-credit": "",
+                "attributes": [],
+                "attribute-values": {},
+                "direction": "forward",
+                "end": "1960-02-19",
+                "type": "performance",
+                "begin": "1960-02-19"
+              }
+            ],
+            "disambiguation": "",
+            "id": "46bf423f-f034-4103-a9d7-b2cad7222b98"
+          },
+          "id": "2b3368d0-2b8c-3b07-b160-4f2e482cc62a",
+          "number": "14",
+          "position": 14
+        }
+      ]
+    }
+  ],
+  "release-events": [
+    {
+      "date": "1994-02-15",
+      "area": null
+    }
+  ],
+  "packaging-id": null,
+  "barcode": "090266195343",
+  "quality": "low",
+  "relations": [],
+  "packaging": null,
+  "disambiguation": "",
+  "asin": "B000003FMU",
+  "date": "1994-02-15",
+  "status": "Official",
+  "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+  "release-group": {
+    "disambiguation": "",
+    "primary-type": "Album",
+    "secondary-types": [
+      "Compilation"
+    ],
+    "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+    "id": "4431ac9e-2fdd-34d8-9933-74e66e3bf095",
+    "first-release-date": "1994-02-15",
+    "artist-credit": [
+      {
+        "artist": {
+          "name": "Various Artists",
+          "country": null,
+          "type": "Other",
+          "id": "89ad4ac3-39f7-470e-963a-56509c546377",
+          "type-id": "ac897045-5043-3294-969b-187360e45d86",
+          "disambiguation": "add compilations to this artist",
+          "sort-name": "Various Artists"
+        },
+        "name": "Various Artists",
+        "joinphrase": ""
+      }
+    ],
+    "title": "Power Classics",
+    "secondary-type-ids": [
+      "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+    ]
+  },
+  "title": "Power Classics",
+  "text-representation": {
+    "language": null,
+    "script": "Latn"
+  },
+  "cover-art-archive": {
+    "artwork": true,
+    "count": 1,
+    "back": false,
+    "darkened": false,
+    "front": true
+  },
+  "country": null,
+  "id": "63d87d35-12f1-415c-b393-6579f346bc40",
+  "artist-credit": [
+    {
+      "joinphrase": "",
+      "artist": {
+        "disambiguation": "add compilations to this artist",
+        "sort-name": "Various Artists",
+        "type-id": "ac897045-5043-3294-969b-187360e45d86",
+        "id": "89ad4ac3-39f7-470e-963a-56509c546377",
+        "type": "Other",
+        "name": "Various Artists",
+        "country": null
+      },
+      "name": "Various Artists"
+    }
+  ]
+}

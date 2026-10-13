@@ -41,9 +41,11 @@ from music_assistant.controllers.metadata.constants import (
 )
 from music_assistant.controllers.metadata.controller import (
     _albums_to_identify_query,
+    _albums_with_recordings_to_read_query,
     _artists_to_identify_query,
     _relink_query,
     _tracks_to_identify_query,
+    _tracks_with_recording_to_read_query,
     _works_to_enrich_query,
 )
 from music_assistant.controllers.tasks import TasksController
@@ -180,10 +182,17 @@ def _queue(
     """
     queried: list[str] = []
     music = _mass(ctrl).music
+    performer_queries = (
+        _albums_with_recordings_to_read_query(),
+        _tracks_with_recording_to_read_query(),
+    )
 
     def _answer(name: str, items: Sequence[Mock], relink_items: Sequence[Mock]) -> AsyncMock:
         async def _query(**kwargs: Any) -> list[Mock]:
             params = kwargs.get("extra_query_params") or {}
+            if kwargs["extra_query_parts"][0] in performer_queries:
+                queried.append(f"{name} performers")
+                return []
             if "domain" in params:
                 queried.append(f"relink {name} {params['domain']}")
                 return list(relink_items)[: kwargs["limit"]]
@@ -247,15 +256,24 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
     with patch(f"{_CONTROLLER}.time", return_value=float(NOW)):
         await ctrl._link_library_to_musicbrainz()
 
-    assert queried == ["albums", "artists", "tracks", "works"]
+    assert queried == [
+        "albums",
+        "artists",
+        "tracks",
+        "works",
+        "albums performers",
+        "tracks performers",
+    ]
     music = _mass(ctrl).music
     for controller, query, params in (
         (music.albums, _albums_to_identify_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.artists, _artists_to_identify_query(), {}),
         (music.tracks, _tracks_to_identify_query(), {}),
         (music.works, _works_to_enrich_query(), {"stale": NOW - REFRESH_INTERVAL}),
+        (music.albums, _albums_with_recordings_to_read_query(), {}),
+        (music.tracks, _tracks_with_recording_to_read_query(), {}),
     ):
-        controller.get_library_items_by_query.assert_awaited_once_with(
+        controller.get_library_items_by_query.assert_any_await(
             limit=MUSICBRAINZ_LINK_BATCH_SIZE,
             sort_field=SortField.TIMESTAMP_ADDED,
             sort_direction=SortDirection.DESC,
@@ -479,6 +497,8 @@ async def test_link_run_relinks_for_a_provider_loaded_since_the_previous_run() -
         "relink albums tidal",
         "relink artists tidal",
         "works",
+        "albums performers",
+        "tracks performers",
     ]
     relink_calls = [
         call.kwargs
@@ -676,12 +696,19 @@ async def test_link_item_hands_a_work_to_the_work_step() -> None:
 async def test_diagnostics_report_the_last_run_and_the_pending_counts() -> None:
     """Diagnostics carry the last run summary and how many items each phase still has."""
     ctrl = _controller()
-    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[4, 3, 2, 1])
+    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[6, 5, 4, 3, 2, 1])
 
     assert await ctrl.get_diagnostics() == {
         "musicbrainz_link": {
             "last_run": None,
-            "pending": {"albums": 4, "artists": 3, "tracks": 2, "works": 1},
+            "pending": {
+                "albums": 6,
+                "artists": 5,
+                "tracks": 4,
+                "works": 3,
+                "album performers": 2,
+                "track performers": 1,
+            },
         }
     }
 
@@ -791,7 +818,14 @@ async def test_link_run_selects_albums_by_their_lookup_marker(mass: MusicAssista
     assert diagnostics is not None
     assert diagnostics["musicbrainz_link"] == {
         "last_run": None,
-        "pending": {"albums": 2, "artists": 0, "tracks": 0, "works": 0},
+        "pending": {
+            "albums": 2,
+            "artists": 0,
+            "tracks": 0,
+            "works": 0,
+            "album performers": 0,
+            "track performers": 0,
+        },
     }
 
     assert await _linked_ids(mass) == {never.item_id, stale_unknown.item_id}

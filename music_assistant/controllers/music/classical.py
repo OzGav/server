@@ -180,7 +180,8 @@ TRACK_ALBUM_YEAR: Final[str] = f"""(SELECT {DB_TABLE_ALBUMS}.year FROM {DB_TABLE
 # the work tracks with the albums they are on, one row per album
 WORK_TRACKS_QUERY: Final[str] = f"""
     SELECT t.item_id AS track_id, t.work_id, t.movement_number, t.movement_name,
-        t.search_name,
+        t.search_name, CASE WHEN json_valid(t.metadata)
+            THEN json_extract(t.metadata, '$.recording_year') END AS recording_year,
         (SELECT MIN(e.external_id) FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} e
             WHERE e.media_type = '{MediaType.TRACK.value}' AND e.item_id = t.item_id
             AND e.external_id_type = '{ExternalID.MB_RECORDING.value}') AS mb_recording,
@@ -819,6 +820,7 @@ class ClassicalController:
                     or create_safe_string(row["movement_name"] or "", True, True)
                     or row["search_name"],
                     mb_recording=(row["mb_recording"] or "").casefold() or None,
+                    recording_year=row["recording_year"],
                 )
                 work_tracks[int(row["work_id"])].append(track)
             if row["album_id"] is not None:
@@ -862,14 +864,17 @@ class _WorkTrack:
     movement_number: int | None
     movement: int | str
     mb_recording: str | None
+    recording_year: int | None = None
     performers: set[int] = field(default_factory=set)
     leaders: set[int] = field(default_factory=set)
     appearances: list[_Appearance] = field(default_factory=list)
 
     @property
     def year(self) -> int | None:
-        """Return the earliest year of the albums the track is on."""
-        return min((x.year for x in self.appearances if x.year), default=None)
+        """Return the year the track was recorded, else the earliest year of its albums."""
+        return self.recording_year or min(
+            (x.year for x in self.appearances if x.year), default=None
+        )
 
     @property
     def signature(self) -> frozenset[int]:

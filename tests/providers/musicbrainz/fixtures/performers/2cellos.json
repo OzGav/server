@@ -1,0 +1,519 @@
+{
+  "artist-credit": [
+    {
+      "joinphrase": "",
+      "name": "2Cellos",
+      "artist": {
+        "country": "HR",
+        "name": "2CELLOS",
+        "id": "c8e94c78-0e17-4d9a-b1f6-96e1b22ebe97",
+        "type": "Group",
+        "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+        "sort-name": "2CELLOS",
+        "disambiguation": "Croatian cellist duo"
+      }
+    }
+  ],
+  "title": "2CELLOS",
+  "cover-art-archive": {
+    "back": false,
+    "darkened": false,
+    "count": 1,
+    "front": true,
+    "artwork": true
+  },
+  "text-representation": {
+    "language": "eng",
+    "script": "Latn"
+  },
+  "country": "JP",
+  "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+  "release-group": {
+    "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+    "secondary-types": [],
+    "id": "4540f2e6-6ced-49ff-8f9c-8001794f369f",
+    "disambiguation": "",
+    "primary-type": "Album",
+    "artist-credit": [
+      {
+        "joinphrase": "",
+        "artist": {
+          "disambiguation": "Croatian cellist duo",
+          "sort-name": "2CELLOS",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "type": "Group",
+          "id": "c8e94c78-0e17-4d9a-b1f6-96e1b22ebe97",
+          "name": "2CELLOS",
+          "country": "HR"
+        },
+        "name": "2CΞLLOS"
+      }
+    ],
+    "secondary-type-ids": [],
+    "title": "2CΞLLOS",
+    "first-release-date": "2011-04-26"
+  },
+  "id": "4b8d8534-4dc9-41da-9db0-d9a1b57abe96",
+  "quality": "normal",
+  "date": "2011-09-21",
+  "asin": "B005E35JCM",
+  "status": "Official",
+  "relations": [],
+  "disambiguation": "初回生産限定盤",
+  "packaging": "Digipak",
+  "packaging-id": "8f931351-d2e2-310f-afc6-37b89ddba246",
+  "media": [
+    {
+      "tracks": [
+        {
+          "position": 1,
+          "number": "1",
+          "id": "de11e033-c1c4-3a52-93d5-4843bc39e2ed",
+          "recording": {
+            "id": "5710edd9-9211-4764-a322-0a2360054ca0",
+            "disambiguation": "",
+            "relations": [
+              {
+                "begin": null,
+                "end": null,
+                "type": "instrument",
+                "direction": "backward",
+                "attribute-credits": {},
+                "attribute-values": {},
+                "attributes": [
+                  "cello"
+                ],
+                "artist": {
+                  "sort-name": "Hauser, Stjepan",
+                  "disambiguation": "",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "id": "6fbb482c-528a-4138-aaed-27abc777ed7a",
+                  "type": "Person",
+                  "country": "HR",
+                  "name": "Stjepan Hauser"
+                },
+                "ended": false,
+                "target-credit": "",
+                "type-id": "59054b12-01ac-43ee-a618-285fd397e461",
+                "target-type": "artist",
+                "source-credit": "",
+                "attribute-ids": {
+                  "cello": "0db03a60-1142-4b25-ab1b-72027d0dc357"
+                }
+              },
+              {
+                "attribute-ids": {
+                  "cello": "0db03a60-1142-4b25-ab1b-72027d0dc357"
+                },
+                "source-credit": "",
+                "target-type": "artist",
+                "type-id": "59054b12-01ac-43ee-a618-285fd397e461",
+                "ended": false,
+                "target-credit": "",
+                "attributes": [
+                  "cello"
+                ],
+                "artist": {
+                  "name": "Luka Šulić",
+                  "country": "SI",
+                  "id": "0afe2d8d-2445-46e5-a165-7d7dda2b8330",
+                  "type": "Person",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "disambiguation": "",
+                  "sort-name": "Šulić, Luka"
+                },
+                "attribute-values": {},
+                "end": null,
+                "direction": "backward",
+                "type": "instrument",
+                "attribute-credits": {},
+                "begin": null
+              },
+              {
+                "begin": null,
+                "attribute-values": {},
+                "end": null,
+                "type": "instrument arranger",
+                "direction": "backward",
+                "artist": {
+                  "name": "Stjepan Hauser",
+                  "country": "HR",
+                  "type": "Person",
+                  "id": "6fbb482c-528a-4138-aaed-27abc777ed7a",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "disambiguation": "",
+                  "sort-name": "Hauser, Stjepan"
+                },
+                "attributes": [],
+                "target-credit": "",
+                "ended": false,
+                "type-id": "4820daa1-98d6-4f8b-aa4b-6895c5b79b27",
+                "target-type": "artist",
+                "attribute-ids": {},
+                "source-credit": ""
+              },
+              {
+                "attribute-values": {},
+                "type": "instrument arranger",
+                "end": null,
+                "direction": "backward",
+                "attributes": [],
+                "artist": {
+                  "disambiguation": "",
+                  "sort-name": "Šulić, Luka",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "type": "Person",
+                  "id": "0afe2d8d-2445-46e5-a165-7d7dda2b8330",
+                  "name": "Luka Šulić",
+                  "country": "SI"
+                },
+                "begin": null,
+                "target-type": "artist",
+                "attribute-ids": {},
+                "source-credit": "",
+                "ended": false,
+                "target-credit": "",
+                "type-id": "4820daa1-98d6-4f8b-aa4b-6895c5b79b27"
+              },
+              {
+                "attribute-ids": {},
+                "source-credit": "",
+                "target-type": "artist",
+                "type-id": "3e3102e1-1896-4f50-b5b2-dd9824e46efe",
+                "ended": false,
+                "target-credit": "",
+                "attributes": [],
+                "artist": {
+                  "sort-name": "Vidović, Miro",
+                  "disambiguation": "",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "id": "cc2ecce7-82ba-40c2-98ff-18e7e9677188",
+                  "type": "Person",
+                  "country": null,
+                  "name": "Miro Vidović"
+                },
+                "attribute-values": {},
+                "direction": "backward",
+                "end": null,
+                "type": "mix",
+                "begin": null
+              },
+              {
+                "type-id": "5c0ceac3-feb4-41f0-868d-dc06f6e27fc0",
+                "ended": false,
+                "target-credit": "",
+                "source-credit": "",
+                "attribute-ids": {},
+                "target-type": "artist",
+                "begin": null,
+                "attributes": [],
+                "artist": {
+                  "sort-name": "Hauser, Stjepan",
+                  "disambiguation": "",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "type": "Person",
+                  "id": "6fbb482c-528a-4138-aaed-27abc777ed7a",
+                  "country": "HR",
+                  "name": "Stjepan Hauser"
+                },
+                "end": null,
+                "direction": "backward",
+                "type": "producer",
+                "attribute-values": {}
+              },
+              {
+                "begin": null,
+                "attributes": [],
+                "artist": {
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "sort-name": "Šulić, Luka",
+                  "disambiguation": "",
+                  "country": "SI",
+                  "name": "Luka Šulić",
+                  "id": "0afe2d8d-2445-46e5-a165-7d7dda2b8330",
+                  "type": "Person"
+                },
+                "direction": "backward",
+                "end": null,
+                "type": "producer",
+                "attribute-values": {},
+                "type-id": "5c0ceac3-feb4-41f0-868d-dc06f6e27fc0",
+                "target-credit": "",
+                "ended": false,
+                "source-credit": "",
+                "attribute-ids": {},
+                "target-type": "artist"
+              },
+              {
+                "begin": null,
+                "attribute-values": {},
+                "direction": "backward",
+                "end": null,
+                "type": "producer",
+                "attributes": [
+                  "executive"
+                ],
+                "artist": {
+                  "disambiguation": "",
+                  "sort-name": "Vidović, Miro",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "type": "Person",
+                  "id": "cc2ecce7-82ba-40c2-98ff-18e7e9677188",
+                  "name": "Miro Vidović",
+                  "country": null
+                },
+                "ended": false,
+                "target-credit": "",
+                "type-id": "5c0ceac3-feb4-41f0-868d-dc06f6e27fc0",
+                "target-type": "artist",
+                "attribute-ids": {
+                  "executive": "e0039285-6667-4f94-80d6-aa6520c6d359"
+                },
+                "source-credit": ""
+              },
+              {
+                "target-type": "artist",
+                "source-credit": "",
+                "attribute-ids": {
+                  "co": "ac6f6b4c-a4ec-4483-a04e-9f425a914573"
+                },
+                "ended": false,
+                "target-credit": "",
+                "type-id": "5c0ceac3-feb4-41f0-868d-dc06f6e27fc0",
+                "end": null,
+                "direction": "backward",
+                "type": "producer",
+                "attribute-values": {},
+                "attributes": [
+                  "co"
+                ],
+                "artist": {
+                  "name": "Philip Vidović",
+                  "country": null,
+                  "type": "Person",
+                  "id": "e0e8149f-c6af-4487-afd1-345faa2bdfce",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "disambiguation": "",
+                  "sort-name": "Vidović, Philip"
+                },
+                "begin": null
+              },
+              {
+                "end": null,
+                "type": "producer",
+                "direction": "backward",
+                "attribute-values": {},
+                "attributes": [
+                  "executive"
+                ],
+                "artist": {
+                  "type": "Person",
+                  "id": "2569bfed-ea9e-4eea-a76a-4755d5557e50",
+                  "country": "US",
+                  "name": "Kirk Yano",
+                  "sort-name": "Yano, Kirk",
+                  "disambiguation": "",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+                },
+                "begin": null,
+                "target-type": "artist",
+                "source-credit": "",
+                "attribute-ids": {
+                  "executive": "e0039285-6667-4f94-80d6-aa6520c6d359"
+                },
+                "target-credit": "",
+                "ended": false,
+                "type-id": "5c0ceac3-feb4-41f0-868d-dc06f6e27fc0"
+              },
+              {
+                "type-id": "a01ee869-80a8-45ef-9447-c59e91aa7926",
+                "target-credit": "",
+                "ended": false,
+                "attribute-ids": {},
+                "source-credit": "",
+                "target-type": "artist",
+                "begin": null,
+                "artist": {
+                  "name": "Philip Vidović",
+                  "country": null,
+                  "id": "e0e8149f-c6af-4487-afd1-345faa2bdfce",
+                  "type": "Person",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "disambiguation": "",
+                  "sort-name": "Vidović, Philip"
+                },
+                "attributes": [],
+                "attribute-values": {},
+                "direction": "backward",
+                "end": null,
+                "type": "recording"
+              },
+              {
+                "begin": null,
+                "attributes": [],
+                "attribute-values": {},
+                "type": "mixed at",
+                "end": null,
+                "direction": "backward",
+                "type-id": "11d74801-1493-4a5d-bc0f-4ddc537acddb",
+                "target-credit": "",
+                "ended": false,
+                "attribute-ids": {},
+                "source-credit": "",
+                "place": {
+                  "id": "f005e798-341e-4f30-b2ea-4d54d64e6022",
+                  "type": "Studio",
+                  "name": "Morris Studio",
+                  "coordinates": null,
+                  "address": "",
+                  "area": {
+                    "disambiguation": "",
+                    "sort-name": "Zagreb",
+                    "type-id": "6fd8f29a-3d0a-32fc-980d-ea697b69da78",
+                    "iso-3166-2-codes": [
+                      "HR-21"
+                    ],
+                    "id": "55f3682e-ff80-4f11-9ec9-8923608a6ee1",
+                    "type": "City",
+                    "name": "Zagreb"
+                  },
+                  "disambiguation": "",
+                  "type-id": "05fa6a09-ff92-3d34-bdbb-5141d3c24f38"
+                },
+                "target-type": "place"
+              },
+              {
+                "type-id": "ad462279-14b0-4180-9b58-571d0eef7c51",
+                "ended": false,
+                "target-credit": "",
+                "source-credit": "",
+                "attribute-ids": {},
+                "target-type": "place",
+                "place": {
+                  "name": "Morris Studio",
+                  "type": "Studio",
+                  "id": "f005e798-341e-4f30-b2ea-4d54d64e6022",
+                  "type-id": "05fa6a09-ff92-3d34-bdbb-5141d3c24f38",
+                  "coordinates": null,
+                  "disambiguation": "",
+                  "address": "",
+                  "area": {
+                    "disambiguation": "",
+                    "sort-name": "Zagreb",
+                    "type-id": "6fd8f29a-3d0a-32fc-980d-ea697b69da78",
+                    "iso-3166-2-codes": [
+                      "HR-21"
+                    ],
+                    "id": "55f3682e-ff80-4f11-9ec9-8923608a6ee1",
+                    "type": "City",
+                    "name": "Zagreb"
+                  }
+                },
+                "begin": null,
+                "attributes": [],
+                "type": "recorded at",
+                "end": null,
+                "direction": "backward",
+                "attribute-values": {}
+              },
+              {
+                "begin": null,
+                "attributes": [
+                  "cover",
+                  "instrumental"
+                ],
+                "direction": "forward",
+                "end": null,
+                "type": "performance",
+                "attribute-values": {},
+                "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+                "ended": false,
+                "target-credit": "",
+                "work": {
+                  "languages": [
+                    "eng"
+                  ],
+                  "iswcs": [
+                    "T-011.335.525-1"
+                  ],
+                  "type-id": "f061270a-2fd6-32f1-a641-f0f8676d14e6",
+                  "disambiguation": "",
+                  "language": "eng",
+                  "attributes": [],
+                  "title": "Where the Streets Have No Name",
+                  "type": "Song",
+                  "id": "6d0b966b-4f31-393d-ae32-a07e477f7744"
+                },
+                "source-credit": "",
+                "attribute-ids": {
+                  "instrumental": "c031ed4f-c9bb-4394-8cf5-e8ce4db512ae",
+                  "cover": "1e8536bd-6eda-3822-8e78-1c0f4d3d2113"
+                },
+                "target-type": "work"
+              }
+            ],
+            "artist-credit": [
+              {
+                "joinphrase": "",
+                "artist": {
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "sort-name": "2CELLOS",
+                  "disambiguation": "Croatian cellist duo",
+                  "country": "HR",
+                  "name": "2CELLOS",
+                  "id": "c8e94c78-0e17-4d9a-b1f6-96e1b22ebe97",
+                  "type": "Group"
+                },
+                "name": "2CELLOS"
+              }
+            ],
+            "video": false,
+            "title": "Where the Streets Have No Name",
+            "length": 242133
+          },
+          "artist-credit": [
+            {
+              "name": "2CΞLLOS",
+              "artist": {
+                "name": "2CELLOS",
+                "country": "HR",
+                "id": "c8e94c78-0e17-4d9a-b1f6-96e1b22ebe97",
+                "type": "Group",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "disambiguation": "Croatian cellist duo",
+                "sort-name": "2CELLOS"
+              },
+              "joinphrase": ""
+            }
+          ],
+          "title": "Where the Streets Have No Name",
+          "length": 244613
+        }
+      ],
+      "track-offset": 0,
+      "format": "CD",
+      "track-count": 13,
+      "id": "e2314f81-da20-3092-8e50-ab75f15424eb",
+      "position": 1,
+      "format-id": "9712d52a-4509-3d4b-a1a2-67c88c643e31",
+      "title": ""
+    }
+  ],
+  "release-events": [
+    {
+      "area": {
+        "name": "Japan",
+        "id": "2db42837-c832-3c27-b4a3-08198f75693c",
+        "type": null,
+        "iso-3166-1-codes": [
+          "JP"
+        ],
+        "type-id": null,
+        "disambiguation": "",
+        "sort-name": "Japan"
+      },
+      "date": "2011-09-21"
+    }
+  ],
+  "barcode": "4547366061154"
+}
