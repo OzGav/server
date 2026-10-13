@@ -171,6 +171,12 @@ async def _enrich(ctrl: MetaDataController, work: Work) -> Work:
     return await ctrl.mass.music.works.get_library_item(work.item_id)
 
 
+async def _library_work_ids(mass: MusicAssistant) -> set[str]:
+    """Return the ids of every work stored in the library."""
+    rows = await mass.music.database.get_rows_from_query("SELECT item_id FROM works", limit=0)
+    return {str(row["item_id"]) for row in rows}
+
+
 def _composers(track: Track) -> list[str]:
     """Return the names of the composers credited on a track."""
     return [c.artist.name for c in track.credits if c.role == ArtistRole.COMPOSER]
@@ -277,23 +283,39 @@ async def test_values_the_work_already_has_are_kept(mass: MusicAssistant) -> Non
     ) == (WorkType.OTHER, 1807, "eng", "c-moll", ["Op. 67"])
 
 
-async def test_parent_held_by_another_work_leaves_both_alone(mass: MusicAssistant) -> None:
-    """When another library work already holds the parent's id, neither work is changed."""
+async def test_parent_held_by_another_work_merges_into_the_oldest(mass: MusicAssistant) -> None:
+    """When another library work already holds the parent's id, the two works merge."""
     works = _musicbrainz_works("symphony_5", "symphony_5_movement_1")
     symphony = works["symphony_5"]
-    holder = await _add_work(mass, f"Fifth {_token()}", mbid=symphony.id)
+    holder_name = f"Fifth {_token()}"
+    holder = await _add_work(mass, holder_name, mbid=symphony.id)
+    await _add_track(mass, holder)
     work = await _add_work(mass, f"Symphony no. 5 {_token()}")
-    await _add_track(mass, work, [works["symphony_5_movement_1"].id])
+    track = await _add_track(mass, work, [works["symphony_5_movement_1"].id])
     ctrl = _controller(mass, works.values())
 
-    stored = await _enrich(ctrl, work)
+    await ctrl.link_item_to_musicbrainz(await mass.music.works.get_library_item(work.item_id))
 
-    assert stored.mbid is None
-    assert stored.work_type is None
-    assert stored.composers == []
-    assert stored.metadata.last_musicbrainz_lookup is not None
+    assert await _library_work_ids(mass) & {holder.item_id, work.item_id} == {holder.item_id}
     kept = await mass.music.works.get_library_item(holder.item_id)
-    assert (kept.mbid, kept.work_type) == (symphony.id, None)
+    assert (kept.name, kept.mbid, kept.work_type) == (holder_name, symphony.id, WorkType.SYMPHONY)
+    assert kept.metadata.last_musicbrainz_lookup is not None
+    stored_track = await mass.music.tracks.get_library_item(track.item_id)
+    assert stored_track.work is not None
+    assert stored_track.work.item_id == holder.item_id
+
+
+async def test_works_sharing_a_musicbrainz_id_merge_into_the_oldest(mass: MusicAssistant) -> None:
+    """Library works carrying the same MusicBrainz id merge when one of them is enriched."""
+    symphony = _musicbrainz_works("symphony_5")["symphony_5"]
+    older = await _add_work(mass, f"Fifth {_token()}", mbid=symphony.id)
+    newer = await _add_work(mass, f"Fifth again {_token()}", mbid=symphony.id)
+    ctrl = _controller(mass, [symphony])
+
+    await ctrl.link_item_to_musicbrainz(await mass.music.works.get_library_item(newer.item_id))
+
+    assert await _library_work_ids(mass) & {older.item_id, newer.item_id} == {older.item_id}
+    assert (await mass.music.works.get_library_item(older.item_id)).work_type == (WorkType.SYMPHONY)
 
 
 @pytest.mark.parametrize(
