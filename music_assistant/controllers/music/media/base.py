@@ -2698,6 +2698,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         db_row_dict = dict(db_row)
         db_row_dict["provider"] = "library"
         db_row_dict["favorite"] = parse_optional_bool(db_row_dict["favorite"])
+        for key in ("is_classical", "classical_tag"):
+            if key in db_row_dict:
+                db_row_dict[key] = bool(db_row_dict[key])
         db_row_dict["item_id"] = str(db_row_dict["item_id"])
         db_row_dict["date_added"] = datetime.fromtimestamp(
             db_row_dict["timestamp_added"], tz=UTC

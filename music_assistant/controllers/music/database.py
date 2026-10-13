@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 from typing import TYPE_CHECKING, Final
 
+from music_assistant_models.enums import ArtistRole
 from music_assistant_models.errors import MusicAssistantError
 
 from music_assistant.constants import (
@@ -41,7 +42,11 @@ from music_assistant.constants import (
     DB_TABLE_RADIOS,
     DB_TABLE_SETTINGS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORK_ARRANGEMENTS,
+    DB_TABLE_WORK_ARTISTS,
+    DB_TABLE_WORKS,
     MEDIA_ITEM_DB_TABLES,
     VACUUM_MIN_RECLAIM_RATIO,
 )
@@ -336,7 +341,8 @@ class MusicDatabaseSetupMixin:
                     [timestamp_added] INTEGER DEFAULT (cast(strftime('%s','now') as int)),
                     [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
                     [search_name] TEXT NOT NULL,
-                    [search_sort_name] TEXT NOT NULL
+                    [search_sort_name] TEXT NOT NULL,
+                    [is_classical] BOOLEAN NOT NULL DEFAULT 0
                 );"""
         )
         await self.database.execute(
@@ -352,7 +358,31 @@ class MusicDatabaseSetupMixin:
             [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
             [search_name] TEXT NOT NULL,
             [search_sort_name] TEXT NOT NULL,
-            [artist_type] TEXT NOT NULL
+            [artist_type] TEXT NOT NULL,
+            [period] TEXT,
+            [is_classical] BOOLEAN NOT NULL DEFAULT 0
+            );"""
+        )
+        await self.database.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {DB_TABLE_WORKS}(
+            [item_id] INTEGER PRIMARY KEY AUTOINCREMENT,
+            [name] TEXT NOT NULL,
+            [sort_name] TEXT NOT NULL,
+            [version] TEXT,
+            [catalog_numbers] json NOT NULL DEFAULT '[]',
+            [catalog_sort] TEXT,
+            [name_sort] TEXT,
+            [work_type] TEXT,
+            [composition_year] INTEGER,
+            [language] TEXT,
+            [musical_key] TEXT,
+            [parent_work_id] INTEGER REFERENCES {DB_TABLE_WORKS}(item_id),
+            [metadata] json NOT NULL,
+            [timestamp_added] INTEGER DEFAULT (cast(strftime('%s','now') as int)),
+            [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
+            [search_name] TEXT NOT NULL,
+            [search_sort_name] TEXT NOT NULL
             );"""
         )
         await self.database.execute(
@@ -369,7 +399,13 @@ class MusicDatabaseSetupMixin:
             [timestamp_added] INTEGER DEFAULT (cast(strftime('%s','now') as int)),
             [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
             [search_name] TEXT NOT NULL,
-            [search_sort_name] TEXT NOT NULL
+            [search_sort_name] TEXT NOT NULL,
+            [work_id] INTEGER REFERENCES {DB_TABLE_WORKS}(item_id),
+            [movement_number] INTEGER,
+            [movement_total] INTEGER,
+            [movement_name] TEXT,
+            [is_classical] BOOLEAN NOT NULL DEFAULT 0,
+            [classical_tag] BOOLEAN NOT NULL DEFAULT 0
             );"""
         )
         await self.database.execute(
@@ -542,6 +578,20 @@ class MusicDatabaseSetupMixin:
             UNIQUE(track_id, artist_id)
             );"""
         )
+        # the credits of a track other than its main artists, such as its composer;
+        # a credit without an instrument holds an empty one, so it stays unique
+        await self.database.execute(
+            f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_TRACK_CREDITS}(
+            [track_id] INTEGER NOT NULL,
+            [artist_id] INTEGER NOT NULL,
+            [role] TEXT NOT NULL,
+            [instrument] TEXT NOT NULL DEFAULT '',
+            [position] INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY([track_id]) REFERENCES [{DB_TABLE_TRACKS}]([item_id]),
+            FOREIGN KEY([artist_id]) REFERENCES [{DB_TABLE_ARTISTS}]([item_id]),
+            UNIQUE(track_id, artist_id, role, instrument)
+            );"""
+        )
         await self.database.execute(
             f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_ALBUM_ARTISTS}(
             [album_id] INTEGER NOT NULL,
@@ -549,6 +599,26 @@ class MusicDatabaseSetupMixin:
             FOREIGN KEY([album_id]) REFERENCES [albums]([item_id]),
             FOREIGN KEY([artist_id]) REFERENCES [artists]([item_id]),
             UNIQUE(album_id, artist_id)
+            );"""
+        )
+        await self.database.execute(
+            f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_WORK_ARRANGEMENTS}(
+            [work_id] INTEGER NOT NULL,
+            [source_work_id] INTEGER NOT NULL,
+            FOREIGN KEY([work_id]) REFERENCES [{DB_TABLE_WORKS}]([item_id]),
+            FOREIGN KEY([source_work_id]) REFERENCES [{DB_TABLE_WORKS}]([item_id]),
+            UNIQUE(work_id, source_work_id)
+            );"""
+        )
+        await self.database.execute(
+            f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_WORK_ARTISTS}(
+            [work_id] INTEGER NOT NULL,
+            [artist_id] INTEGER NOT NULL,
+            [role] TEXT NOT NULL DEFAULT '{ArtistRole.COMPOSER.value}',
+            [position] INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY([work_id]) REFERENCES [{DB_TABLE_WORKS}]([item_id]),
+            FOREIGN KEY([artist_id]) REFERENCES [{DB_TABLE_ARTISTS}]([item_id]),
+            UNIQUE(work_id, artist_id, role)
             );"""
         )
         await self.database.execute(
@@ -670,6 +740,11 @@ class MusicDatabaseSetupMixin:
             f"CREATE INDEX IF NOT EXISTS {DB_TABLE_TRACK_ARTISTS}_artist_id_idx "
             f"on {DB_TABLE_TRACK_ARTISTS}(artist_id);"
         )
+        # index on track_credits table; its unique constraint leads with track_id
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_TRACK_CREDITS}_artist_id_idx "
+            f"on {DB_TABLE_TRACK_CREDITS}(artist_id, role);"
+        )
         # indexes on album_artists table
         await self.database.execute(
             f"CREATE INDEX IF NOT EXISTS {DB_TABLE_ALBUM_ARTISTS}_album_id_idx "
@@ -683,6 +758,45 @@ class MusicDatabaseSetupMixin:
         await self.database.execute(
             f"CREATE INDEX IF NOT EXISTS {DB_TABLE_ALBUM_TRACKS}_album_id_idx "
             f"on {DB_TABLE_ALBUM_TRACKS}(album_id);"
+        )
+        # indexes on works table
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORKS}_sort_name_idx "
+            f"on {DB_TABLE_WORKS}(sort_name);"
+        )
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORKS}_search_name_idx "
+            f"on {DB_TABLE_WORKS}(search_name);"
+        )
+        # works has the standard browse indexes minus play_count/last_played
+        # (works are compositions, not directly playable)
+        for column in (
+            "name",
+            "search_sort_name",
+            "timestamp_added",
+        ):
+            await self.database.execute(
+                f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORKS}_{column}_idx "
+                f"on {DB_TABLE_WORKS}({column});"
+            )
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORKS}_parent_work_id_idx "
+            f"on {DB_TABLE_WORKS}(parent_work_id);"
+        )
+        # index on tracks.work_id for the Work detail page query
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_TRACKS}_work_id_idx "
+            f"on {DB_TABLE_TRACKS}(work_id);"
+        )
+        # index on work_arrangements table; its unique constraint leads with work_id
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORK_ARRANGEMENTS}_source_work_id_idx "
+            f"on {DB_TABLE_WORK_ARRANGEMENTS}(source_work_id);"
+        )
+        # index on work_artists table; its unique constraint leads with work_id
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORK_ARTISTS}_artist_id_idx "
+            f"on {DB_TABLE_WORK_ARTISTS}(artist_id);"
         )
         # indexes on genre_media_item_mapping table
         await self.database.execute(
