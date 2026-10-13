@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
-from music_assistant_models.enums import ExternalID
+from music_assistant_models.enums import ExternalID, RecordingSource
 from music_assistant_models.errors import (
     MediaNotFoundError,
     RateLimited,
@@ -471,9 +471,12 @@ def _album_harness(
     """
     ctrl = AlbumsController.__new__(AlbumsController)
     ctrl.logger = logging.getLogger("test.musicbrainz.linking")
+    ctrl._logged_hints = set()
     ctrl.mass = Mock()
     ctrl.mass.music.database.deferred_commit = MagicMock()
     ctrl.mass.music.tracks.update_item_in_library = AsyncMock()
+    ctrl.mass.music.tracks.set_external_ids = AsyncMock()
+    ctrl.mass.music.tracks.merge_recording_duplicates = AsyncMock(return_value=set())
     ctrl.mass.music.tracks.add_unclaimed_provider_mappings = AsyncMock()
 
     async def _tracklist(item_id: str, _instance: str) -> list[Track]:
@@ -532,6 +535,28 @@ async def test_release_tracks_keep_an_existing_recording_id() -> None:
     (updated,) = harness.updated_tracks()
     assert updated.mbid == OTHER_RECORDING_ID
     assert (ExternalID.ISRC, "GBSTK0700001") in updated.external_ids
+
+
+@pytest.mark.parametrize("source", [RecordingSource.RELEASE, RecordingSource.ISRC])
+async def test_release_tracks_replace_a_recording_only_a_release_gave(
+    source: RecordingSource,
+) -> None:
+    """A recording id another release gave yields to this release's, one found otherwise stays."""
+    db_tracks = [_library_track("t1", 1, mbid=OTHER_RECORDING_ID)]
+    db_tracks[0].metadata.recording_source = source
+    release = _release([_recording(RECORDING_ID, "Track 1", 237000)])
+    with _album_harness() as harness:
+        await harness.ctrl.link_album_tracks(_library_album(), db_tracks, release)
+
+    (updated,) = harness.updated_tracks()
+    if source == RecordingSource.RELEASE:
+        assert updated.mbid == RECORDING_ID
+        harness.tracks.set_external_ids.assert_awaited_once_with(
+            "t1", {(ExternalID.MB_RECORDING, RECORDING_ID)}
+        )
+    else:
+        assert updated.mbid == OTHER_RECORDING_ID
+        harness.tracks.set_external_ids.assert_not_awaited()
 
 
 async def test_release_tracks_are_matched_per_disc() -> None:

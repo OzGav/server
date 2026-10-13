@@ -14,6 +14,7 @@ from music_assistant_models.enums import (
     MediaType,
     Period,
     ProviderFeature,
+    RecordingSource,
 )
 from music_assistant_models.errors import (
     InvalidDataError,
@@ -33,7 +34,10 @@ from music_assistant.controllers.metadata.constants import (
     REFRESH_RETRY_INTERVAL,
 )
 from music_assistant.controllers.metadata.enrichment import MetadataEnrichmentMixin
-from music_assistant.controllers.music.helpers import fill_track_from_recording
+from music_assistant.controllers.music.helpers import (
+    fill_track_from_recording,
+    set_track_recording_id,
+)
 from music_assistant.controllers.music.listing_cache import Listing
 from music_assistant.providers.musicbrainz.models import (
     MusicBrainzAlias,
@@ -96,6 +100,7 @@ def _enrichment(musicbrainz: MagicMock | None = None) -> MetadataEnrichmentMixin
     for controller in (music.artists, music.albums, music.tracks):
         controller.update_item_in_library = AsyncMock()
         controller.link_musicbrainz_mappings = AsyncMock(return_value=[])
+    music.tracks.merge_recording_duplicates = AsyncMock(return_value=set())
     music.albums.get_library_album_tracks = AsyncMock(return_value=[])
     music.albums.link_album_tracks = AsyncMock()
     return enrichment
@@ -754,7 +759,9 @@ def _musicbrainz(
     """Return a MusicBrainz provider stub that answers the identity lookups as given."""
     musicbrainz = MagicMock()
     musicbrainz.resolve_release = AsyncMock(return_value=release)
-    musicbrainz.resolve_recording = AsyncMock(return_value=recording)
+    musicbrainz.resolve_recording = AsyncMock(
+        return_value=(recording, RecordingSource.ISRC) if recording else None
+    )
     musicbrainz.identify_artist = AsyncMock(return_value=None)
     musicbrainz.get_artist_details = AsyncMock(return_value=artist)
     return musicbrainz
@@ -1055,6 +1062,7 @@ async def test_track_identity_fills_recording_id_and_isrcs_and_links() -> None:
     await enrichment._update_track_metadata(track, force_refresh=True)
 
     assert track.mbid == RECORDING_ID
+    assert track.metadata.recording_source == RecordingSource.ISRC
     assert {value for kind, value in track.external_ids if kind == ExternalID.ISRC} == {
         "GBSTK0700001",
         "GBSTK0700002",
@@ -1122,18 +1130,35 @@ def test_fill_track_from_recording_reports_whether_the_track_gained_an_id() -> N
     """The recording id and valid ISRCs count as a change; nothing new or invalid does not."""
     recording = MusicBrainzRecording(id=RECORDING_ID, title="15 Step", isrcs=["GBSTK0700001"])
 
-    assert fill_track_from_recording(_track(), recording) is True
+    assert fill_track_from_recording(_track(), recording, RecordingSource.ISRC) is True
 
     known = _track({(ExternalID.MB_RECORDING, OTHER_MBID)})
-    assert fill_track_from_recording(known, recording) is True
+    assert fill_track_from_recording(known, recording, RecordingSource.ISRC) is True
     assert known.mbid == OTHER_MBID
 
     complete = _track({(ExternalID.MB_RECORDING, RECORDING_ID), (ExternalID.ISRC, "GBSTK0700001")})
-    assert fill_track_from_recording(complete, recording) is False
+    assert fill_track_from_recording(complete, recording, None) is False
 
     placeholder = MusicBrainzRecording(id=RECORDING_ID, title="15 Step", isrcs=["unknown"])
-    assert fill_track_from_recording(complete, placeholder) is False
+    assert fill_track_from_recording(complete, placeholder, None) is False
     assert (ExternalID.ISRC, "unknown") not in complete.external_ids
+
+
+def test_recording_source_follows_the_stored_recording_id() -> None:
+    """A name search source gives way to a reliable source of the same id, never of another."""
+    track = _track()
+    assert set_track_recording_id(track, RECORDING_ID, RecordingSource.SEARCH) is True
+    assert (track.mbid, track.metadata.recording_source) == (RECORDING_ID, RecordingSource.SEARCH)
+
+    assert set_track_recording_id(track, OTHER_MBID, RecordingSource.RELEASE) is False
+    assert (track.mbid, track.metadata.recording_source) == (RECORDING_ID, RecordingSource.SEARCH)
+
+    assert set_track_recording_id(track, RECORDING_ID.upper(), RecordingSource.RELEASE) is True
+    assert (track.mbid, track.metadata.recording_source) == (RECORDING_ID, RecordingSource.RELEASE)
+
+    assert set_track_recording_id(track, RECORDING_ID, RecordingSource.ISRC) is False
+    assert set_track_recording_id(track, RECORDING_ID, None) is False
+    assert (track.mbid, track.metadata.recording_source) == (RECORDING_ID, RecordingSource.RELEASE)
 
 
 @pytest.mark.asyncio

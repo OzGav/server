@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 import re
@@ -29,6 +30,7 @@ from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.constants import REFRESH_INTERVAL
 from music_assistant.controllers.metadata.controller import _works_to_enrich_query
 from music_assistant.controllers.metadata.work_enrichment import _is_named_by
+from music_assistant.providers.musicbrainz.api_client import _FRESH_READS
 from music_assistant.providers.musicbrainz.models import (
     MusicBrainzAlias,
     MusicBrainzArtist,
@@ -1337,3 +1339,30 @@ async def test_work_looked_up_again_drops_an_arrangement_link_musicbrainz_remove
     assert [x.item_id for x in reloaded.arrangement_of] == (
         [original.item_id] if still_listed else []
     )
+
+
+@pytest.mark.parametrize("by_hand", [True, False])
+async def test_only_a_work_refreshed_by_hand_is_read_past_the_cache(
+    mass: MusicAssistant, by_hand: bool
+) -> None:
+    """Refresh item on a work reads MusicBrainz fresh; the 90 day re-read reads through the cache."""
+    mb_work = MusicBrainzWork(id=str(uuid4()), title=f"Sonata {_token()}")
+    work = await _add_work(mass, mb_work.title, mbid=mb_work.id)
+    ctrl = _controller(mass, [mb_work])
+    fresh: list[bool] = []
+
+    async def _details(work_id: str) -> MusicBrainzWork | None:
+        state = _FRESH_READS.get()
+        fresh.append(state is not None and state[0] is asyncio.current_task())
+        return mb_work if work_id == mb_work.id else None
+
+    cast("AsyncMock", ctrl._musicbrainz_provider().get_work_details).side_effect = _details  # type: ignore[union-attr]
+    library_work = await mass.music.works.get_library_item(work.item_id)
+
+    if by_hand:
+        await ctrl.refresh_work_tree(library_work)
+    else:
+        assert await ctrl._reread_work_on_musicbrainz(library_work)
+
+    assert fresh
+    assert set(fresh) == {by_hand}

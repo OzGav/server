@@ -210,6 +210,20 @@ async def test_credit_of_a_provider_artist_adds_the_artist(
     assert await mass.music.artists.get_library_item(stored_lyricist.item_id)
 
 
+async def test_credit_without_instrument_is_stored_once(mass: MusicAssistant) -> None:
+    """The same credit without an instrument, given twice, is stored once at its first position."""
+    main = await _add_artist(mass, "Main")
+    composer = await _add_artist(mass, "Composer")
+    track = await _add_track(mass, [main], [Credit(artist=composer, role=ArtistRole.COMPOSER)])
+
+    await mass.music.tracks.add_credits(
+        int(track.item_id), [Credit(artist=composer, role=ArtistRole.COMPOSER, position=5)]
+    )
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert _credit_rows(stored) == [(composer.item_id, ArtistRole.COMPOSER, None, 0)]
+
+
 async def test_artists_win_over_main_artist_credits(mass: MusicAssistant) -> None:
     """The main artists come from the artists, not from main artist credits."""
     main = await _add_artist(mass, "Main")

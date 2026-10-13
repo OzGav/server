@@ -1813,7 +1813,7 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         return library_item
 
     @api_command("music/refresh_item", required_scope=Scope.LIBRARY_WRITE)
-    async def refresh_item(  # noqa: C901, PLR0912, PLR0915
+    async def refresh_item(  # noqa: PLR0912, PLR0915
         self,
         media_item: str | MediaItemType,
     ) -> MediaItemType | None:
@@ -1834,6 +1834,7 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
             return media_item
 
         library_id = media_item.item_id if media_item.provider == "library" else None
+        stored = media_item if library_id else None
 
         # cache in_library state before the provider fetch overwrites media_item
         in_library_cache: dict[tuple[str, str], bool] = {}
@@ -1905,25 +1906,14 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         library_item = await cast(
             "MediaControllerBase[MediaItemType]", ctrl
         ).update_item_in_library(library_id, media_item, overwrite=True)
-        if library_item.media_type == MediaType.ALBUM:
-            # update (local) album tracks
-            for album_track in await self.albums.tracks(
-                library_item.item_id, library_item.provider, True, limit=None
-            ):
-                for prov_mapping in album_track.provider_mappings:
-                    if not (prov := self._visible_provider_for(prov_mapping)):
-                        continue
-                    if not isinstance(prov, MusicProvider):
-                        continue
-                    if prov.is_streaming_provider:
-                        continue
-                    with suppress(MediaNotFoundError):
-                        prov_track = await prov.get_track(prov_mapping.item_id)
-                        await self.mass.music.tracks.update_item_in_library(
-                            album_track.item_id, prov_track
-                        )
+        old_work_ids = {stored.work.item_id} if isinstance(stored, Track) and stored.work else set()
+        if isinstance(library_item, Album):
+            old_work_ids = await self._refresh_album_tracks(library_item)
         await cast("MediaControllerBase[MediaItemType]", ctrl).match_providers(library_item)
-        await self.mass.metadata.update_metadata(library_item, force_refresh=True)
+        await self.mass.metadata.update_metadata(library_item, force_refresh=True, rebuild=True)
+        # a track whose source names another work now leaves the old one, maybe empty
+        for work_id in old_work_ids:
+            await self.mass.metadata.remove_work_if_empty(work_id)
         if isinstance(library_item, Artist):
             library_item = await self.artists.get_merged_library_item(library_item)
         # the item's listings (album tracks, ...) are assembled anew from here on, after
@@ -3038,6 +3028,33 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         for allowed_player_id in player_filter:
             sources.extend(provider.get_player_audio_sources(allowed_player_id) or [])
         return sources
+
+    async def _refresh_album_tracks(self, album: Album) -> set[str]:
+        """
+        Read the tracks of a refreshed library album again from their files.
+
+        A classical track replaces what is stored as a track refresh does. A track only on
+        streaming services is left as it is.
+
+        :param album: The library album.
+        :return: The library ids of the works the album's classical tracks were on.
+        """
+        old_work_ids: set[str] = set()
+        for album_track in await self.albums.tracks(
+            album.item_id, album.provider, True, limit=None
+        ):
+            if album_track.is_classical and album_track.work:
+                old_work_ids.add(album_track.work.item_id)
+            for mapping in album_track.provider_mappings:
+                prov = self._visible_provider_for(mapping)
+                if not isinstance(prov, MusicProvider) or prov.is_streaming_provider:
+                    continue
+                with suppress(MediaNotFoundError):
+                    prov_track = await prov.get_track(mapping.item_id)
+                    await self.tracks.update_item_in_library(
+                        album_track.item_id, prov_track, overwrite=album_track.is_classical
+                    )
+        return old_work_ids
 
     async def _link_genres_if_unmapped(self, item: MediaItemType) -> None:
         """Link a library item to the genres it carries, if it has no genre links yet."""

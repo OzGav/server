@@ -7,13 +7,19 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from mashumaro import DataClassDictMixin
-from music_assistant_models.enums import WorkType
+from music_assistant_models.enums import ArtistRole, WorkType
 
 from .constants import (
     ARRANGEMENT_RELATION_TYPES,
     CATALOG_SERIES_TYPE,
+    CHOIR_VOCALS_ATTRIBUTE,
+    GROUP_ARTIST_TYPES,
     KEY_ATTRIBUTE_TYPE,
     NO_LYRICS_LANGUAGE,
+    PARTICIPATION_ATTRIBUTES,
+    PERFORMER_ROLE_BY_ARTIST_TYPE,
+    PERFORMING_RELATION_ROLES,
+    SESSION_RELATION_TYPES,
     WORK_TYPE_MAPPING,
 )
 
@@ -140,6 +146,8 @@ class MusicBrainzRelation(DataClassDictMixin):
     attributes: list[str] = field(default_factory=list)
     attribute_values: dict[str, str] = field(default_factory=dict)
     ordering_key: int | None = None
+    # the name the target is credited as on this relation, empty when it is its own name
+    target_credit: str | None = None
 
     @property
     def begin_year(self) -> int | None:
@@ -150,6 +158,40 @@ class MusicBrainzRelation(DataClassDictMixin):
     def end_year(self) -> int | None:
         """Return the year the relation ended, if MusicBrainz knows it."""
         return release_year(self.end)
+
+    @property
+    def performing_role(self) -> ArtistRole | None:
+        """Return the role a recording relation credits its artist with performing, if any."""
+        if not self.artist:
+            return None
+        if role := PERFORMING_RELATION_ROLES.get(self.type):
+            return role
+        if self.type == "vocal":
+            if CHOIR_VOCALS_ATTRIBUTE in self.attributes:
+                return ArtistRole.CHOIR
+            return ArtistRole.SOLOIST
+        if self.type == "instrument":
+            if self.artist.type in GROUP_ARTIST_TYPES:
+                return ArtistRole.ENSEMBLE
+            return ArtistRole.SOLOIST
+        if self.type == "performer":
+            return PERFORMER_ROLE_BY_ARTIST_TYPE.get(self.artist.type or "", ArtistRole.PERFORMER)
+        return None
+
+    @property
+    def performing_instrument(self) -> str | None:
+        """
+        Return the instrument or voice a performing relation credits, as a credit names it.
+
+        A chorus master or concertmaster is credited with that task instead, and a choir, an
+        orchestra or a conductor with nothing.
+        """
+        if self.type in ("chorus master", "concertmaster"):
+            return self.type
+        if self.type not in ("instrument", "vocal") or self.performing_role == ArtistRole.CHOIR:
+            return None
+        names = [x for x in self.attributes if x not in PARTICIPATION_ATTRIBUTES]
+        return ", ".join(names) or None
 
 
 @dataclass
@@ -240,6 +282,31 @@ class MusicBrainzRecording(DataClassDictMixin):
             alt_data = cast("dict[str, Any]", alt_data)
         return MusicBrainzRecording.from_dict(alt_data)
 
+    @property
+    def performing_relations(self) -> list[MusicBrainzRelation]:
+        """
+        Return the relations crediting an artist with performing on the recording.
+
+        Each artist, relation type and set of attributes is listed once, also when MusicBrainz
+        repeats it for several recording sessions.
+        """
+        unique: dict[tuple[str, str, frozenset[str]], MusicBrainzRelation] = {}
+        for relation in self.relations or ():
+            if relation.artist and relation.performing_role:
+                key = (relation.artist.id, relation.type, frozenset(relation.attributes))
+                unique.setdefault(key, relation)
+        return list(unique.values())
+
+    @property
+    def recording_year(self) -> int | None:
+        """Return the year the recording was made, from its earliest dated session, if known."""
+        years = (
+            relation.begin_year
+            for relation in self.relations or ()
+            if relation.type in SESSION_RELATION_TYPES or relation.performing_role
+        )
+        return min((year for year in years if year), default=None)
+
 
 @dataclass
 class MusicBrainzTrack(DataClassDictMixin):
@@ -322,6 +389,15 @@ class MusicBrainzRelease(DataClassDictMixin):
         if TYPE_CHECKING:
             alt_data = cast("dict[str, Any]", alt_data)
         return MusicBrainzRelease.from_dict(alt_data)
+
+    def recordings_by_id(self) -> dict[str, MusicBrainzRecording]:
+        """Return the recordings on this release, keyed by their casefolded id."""
+        return {
+            track.recording.id.casefold(): track.recording
+            for medium in self.media
+            for track in medium.tracks
+            if track.recording
+        }
 
 
 @dataclass

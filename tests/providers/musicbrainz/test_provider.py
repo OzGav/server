@@ -16,6 +16,7 @@ from music_assistant_models.enums import (
     LinkType,
     MediaType,
     ProviderFeature,
+    RecordingSource,
     WorkType,
 )
 from music_assistant_models.errors import InvalidDataError, RateLimited
@@ -1802,10 +1803,9 @@ async def test_resolve_recording_by_musicbrainz_id_or_link() -> None:
     )
 
     assert by_id is not None
-
-    assert by_id.id == "rec-1"
+    assert (by_id[0].id, by_id[1]) == ("rec-1", None)
     assert by_link is not None
-    assert by_link.id == "rec-1"
+    assert (by_link[0].id, by_link[1]) == ("rec-1", RecordingSource.URL)
     assert _requested(get_data) == ["recording/rec-1", SPOTIFY_TRACK_URL, "recording/rec-1"]
 
 
@@ -1829,7 +1829,7 @@ async def test_resolve_recording_by_isrc_picks_the_matching_recording() -> None:
     )
 
     assert recording is not None
-    assert recording.id == "rec-radiohead"
+    assert (recording[0].id, recording[1]) == ("rec-radiohead", RecordingSource.ISRC)
     assert _requested(get_data) == [f"isrc/{ISRC}", "recording/rec-radiohead"]
 
 
@@ -1861,7 +1861,7 @@ async def test_resolve_recording_by_isrc_needs_a_credit_for_a_named_artist() -> 
     recording = await provider.resolve_recording(_track_item(artist=None, external_ids=isrc_only))
 
     assert recording is not None
-    assert recording.id == "rec-cover"
+    assert recording[0].id == "rec-cover"
 
 
 async def test_resolve_recording_falls_back_to_a_name_search() -> None:
@@ -1888,7 +1888,7 @@ async def test_resolve_recording_falls_back_to_a_name_search() -> None:
     recording = await provider.resolve_recording(_track_item())
 
     assert recording is not None
-    assert recording.id == "rec-1"
+    assert (recording[0].id, recording[1]) == ("rec-1", RecordingSource.SEARCH)
     assert _requested(get_data) == ["recording?query", "recording/rec-1"]
     assert await provider.resolve_recording(_track_item(album=None)) is None
 
@@ -2102,7 +2102,7 @@ def test_reverse_lookup_urls_take_one_canonical_url_per_provider_first() -> None
         }
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         SPOTIFY_ARTIST_URL,
         "https://www.deezer.com/artist/399",
         "https://open.spotify.com/artist/7eyQXxuf2nGj9d2367Gi5f",
@@ -2124,7 +2124,7 @@ def test_reverse_lookup_urls_include_the_mappings_own_public_links() -> None:
         }
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         "https://music.apple.com/gb/artist/657515",
         "https://radiohead.bandcamp.com/",
         "https://soundcloud.com/radiohead",
@@ -2140,18 +2140,18 @@ def test_reverse_lookup_urls_include_qobuz_artists_only() -> None:
         mappings={_mapping("qobuz", "ftrty0qq43i3b", "https://open.qobuz.com/album/ftrty0qq43i3b")}
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         "https://open.qobuz.com/artist/43840"
     ]
-    assert MusicbrainzProvider._reverse_lookup_urls(album) == []
+    assert MusicbrainzProvider.reverse_lookup_urls(album) == []
     assert (
-        MusicbrainzProvider._reverse_lookup_urls(
+        MusicbrainzProvider.reverse_lookup_urls(
             _artist_item(mappings={_mapping("qobuz", "Herbert von Karajan")})
         )
         == []
     )
     assert (
-        MusicbrainzProvider._reverse_lookup_urls(_artist_item(mappings={_mapping("qobuz", "311")}))
+        MusicbrainzProvider.reverse_lookup_urls(_artist_item(mappings={_mapping("qobuz", "311")}))
         == []
     )
 
@@ -2185,7 +2185,7 @@ def test_reverse_lookup_urls_are_capped_at_three() -> None:
         }
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         SPOTIFY_ARTIST_URL,
         "https://www.deezer.com/artist/399",
         "https://tidal.com/artist/64518",

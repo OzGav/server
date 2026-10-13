@@ -23,6 +23,7 @@ from music_assistant_models.enums import (
     MediaType,
     ProviderFeature,
     ProviderType,
+    RecordingSource,
 )
 from music_assistant_models.errors import (
     InvalidDataError,
@@ -419,7 +420,9 @@ class MetadataEnrichmentMixin:
         album.metadata.last_refresh = _refresh_timestamp(retry_soon)
         await self.mass.music.albums.update_item_in_library(album.item_id, album)
 
-    async def _update_track_metadata(self, track: Track, force_refresh: bool = False) -> None:
+    async def _update_track_metadata(
+        self, track: Track, force_refresh: bool = False, rebuild: bool = False
+    ) -> None:
         """Get/update rich metadata for a track."""
         # collect metadata from all (online) music + metadata providers
         # NOTE: we only do/allow this every REFRESH_INTERVAL
@@ -451,7 +454,7 @@ class MetadataEnrichmentMixin:
                 track.metadata.update(prov_item.metadata)
 
         # identify the track on MusicBrainz before the metadata providers need its id
-        retry_soon = await self._link_track_to_musicbrainz(track)
+        retry_soon = await self._link_track_to_musicbrainz(track, rebuild)
 
         # don't merge online genres on top of source-supplied ones
         prefer_local_genres = self.config.get_value(CONF_PREFER_LOCAL_GENRES) and bool(
@@ -790,22 +793,32 @@ class MetadataEnrichmentMixin:
         album.metadata.last_musicbrainz_lookup = int(time())
         return False
 
-    async def _link_track_to_musicbrainz(self, track: Track) -> bool:
+    async def _link_track_to_musicbrainz(self, track: Track, rebuild: bool = False) -> bool:
         """
         Identify a track on MusicBrainz, fill in its recording id and ISRCs and link it.
 
         :param track: The library track to link.
+        :param rebuild: Line a track found only by name, or not at all, up with its album's
+            release, as the album's own link does.
         :return: Whether the lookup failed temporarily, which makes the item due for a refresh
             again soon.
         """
         if not (musicbrainz := self._musicbrainz_provider()):
             return False
         try:
-            recording = await musicbrainz.resolve_recording(track)
-            if recording is None:
+            resolved = await musicbrainz.resolve_recording(track)
+            if (
+                rebuild
+                and (resolved is None or resolved[1] == RecordingSource.SEARCH)
+                and await self._link_track_by_album_release(musicbrainz, track)
+            ):
+                self.logger.debug("Track %s was lined up with its album's release", track.name)
+            elif resolved is None:
                 self.logger.debug("Track %s was not found on MusicBrainz", track.name)
             else:
-                fill_track_from_recording(track, recording)
+                recording, source = resolved
+                fill_track_from_recording(track, recording, source)
+                await self.mass.music.tracks.merge_recording_duplicates(track)
                 if self.link_providers_via_musicbrainz:
                     await self.mass.music.tracks.link_musicbrainz_mappings(
                         track, relation_urls(recording.relations)
@@ -828,6 +841,28 @@ class MetadataEnrichmentMixin:
             return False
         track.metadata.last_musicbrainz_lookup = int(time())
         return False
+
+    async def _link_track_by_album_release(
+        self, musicbrainz: MusicbrainzProvider, track: Track
+    ) -> bool:
+        """Line a library track's album up with its release, return whether the track got a recording."""
+        if not track.album:
+            return False
+        albums = self.mass.music.albums
+        album = await albums.get_library_item(track.album.item_id)
+        if not album.mbid:
+            return False
+        try:
+            release = await musicbrainz.get_release_details(album.mbid)
+        except InvalidDataError:
+            return False
+        db_tracks = await albums.get_library_album_tracks(album.item_id)
+        await albums.link_album_tracks(album, db_tracks, release, link_providers=False)
+        if not (linked := await self.mass.music.tracks.get_library_item(track.item_id)).mbid:
+            return False
+        track.mbid = linked.mbid
+        track.metadata.recording_source = linked.metadata.recording_source
+        return True
 
     async def _follow_merged_release(self, musicbrainz: MusicbrainzProvider, album: Album) -> None:
         """

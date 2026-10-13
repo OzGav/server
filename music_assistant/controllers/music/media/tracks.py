@@ -18,6 +18,7 @@ from music_assistant_models.enums import (
     MediaType,
     ProviderFeature,
     ProviderType,
+    RecordingSource,
     SortDirection,
     SortField,
 )
@@ -34,7 +35,6 @@ from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import (
     Album,
     Artist,
-    Credit,
     ItemMapping,
     ItemMappingSummary,
     ProviderMapping,
@@ -53,10 +53,12 @@ from music_assistant.constants import (
     DB_TABLE_WORK_ARTISTS,
     DB_TABLE_WORKS,
 )
+from music_assistant.controllers.music.classical import PERFORMING_ROLES
 from music_assistant.controllers.music.constants import SIMILAR_ITEMS_LIMIT
 from music_assistant.controllers.music.helpers import (
     provider_mappings_for_update,
     search_name_match_clause,
+    set_track_recording_id,
 )
 from music_assistant.controllers.music.listing import apply_listing, resolve_listing_sort
 from music_assistant.controllers.music.listing_cache import Listing
@@ -69,6 +71,7 @@ from music_assistant.helpers.compare import (
     compare_track_title,
     get_keep_remasters_apart,
     loose_compare_strings,
+    track_durations_agree,
 )
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.external_ids import is_valid_isrc, normalize_external_id
@@ -86,6 +89,8 @@ from .works import SUMMARY_WORK_FIELDS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from music_assistant_models.media_items import Credit
 
     from music_assistant import MusicAssistant
     from music_assistant.models.media_capabilities import MusicDiscoveryMixin
@@ -672,7 +677,7 @@ class TracksController(MediaControllerBase[Track]):
 
         :param item_id: Provider-native track ID.
         :param provider_instance_id_or_domain: Music provider instance ID or domain.
-        :param mbid: MusicBrainz recording ID.
+        :param mbid: MusicBrainz recording ID an AcoustID fingerprint lookup found.
         :param acoustid: AcoustID UUID.
         :param isrcs: ISRC codes.
         """
@@ -694,8 +699,7 @@ class TracksController(MediaControllerBase[Track]):
             return
 
         changed = False
-        if mbid and not track.mbid:
-            track.mbid = mbid
+        if mbid and set_track_recording_id(track, mbid, RecordingSource.ACOUSTID):
             changed = True
         if acoustid and not any(
             ext_id[0] == ExternalID.ACOUSTID and ext_id[1] == acoustid
@@ -710,7 +714,53 @@ class TracksController(MediaControllerBase[Track]):
         if not changed:
             return
 
+        await self.merge_recording_duplicates(track)
         await self.update_item_in_library(int(track.item_id), track)
+
+    async def merge_recording_duplicates(self, track: Track) -> set[str]:
+        """
+        Merge the other library tracks of a library track's MusicBrainz recording into it.
+
+        Only a track that adding it to the library now would join to this one and whose
+        duration agrees is merged, and neither track may carry a second recording id.
+
+        :param track: The library track, with the recording id it was given.
+        :return: The library ids of the tracks merged into it.
+        """
+        recording_ids = self._recording_ids(track)
+        if len(recording_ids) != 1:
+            return set()
+        merged: set[str] = set()
+        for other in await self.get_library_items_by_external_id(
+            recording_ids.pop(), ExternalID.MB_RECORDING, limit=None
+        ):
+            if (
+                int(other.item_id) == int(track.item_id)
+                or len(self._recording_ids(other)) != 1
+                or not track_durations_agree(other, track)
+                or not await self._confirm_library_candidate(other, track)
+            ):
+                continue
+            self.logger.debug(
+                "Merging track item id %s into item id %s: both are recording %s",
+                other.item_id,
+                track.item_id,
+                track.mbid,
+            )
+            merged_item = await self.merge_library_items(track.item_id, other.item_id)
+            track.provider_mappings.update(merged_item.provider_mappings)
+            merged.add(other.item_id)
+        return merged
+
+    async def add_credits(self, item_id: int, item_credits: Iterable[Credit]) -> None:
+        """
+        Add credits to a library track, keeping the credits it has.
+
+        :param item_id: Library id of the track.
+        :param item_credits: The credits to add; main artist credits are left out.
+        """
+        await self._set_credits(item_id, item_credits)
+        await self.mass.music.classification.update(track_ids=[item_id])
 
     async def credit_work_composers(self, work_id: int) -> None:
         """
@@ -1665,6 +1715,7 @@ class TracksController(MediaControllerBase[Track]):
         """Update Track record in the database, merging data."""
         db_id = int(item_id)  # ensure integer
         cur_item = await self.get_library_item(db_id)
+        self._mark_own_recording_id(update)
         if overwrite:
             await self._keep_held_placement(update, cur_item)
         metadata = update.metadata if overwrite else cur_item.metadata.update(update.metadata)
@@ -1682,6 +1733,17 @@ class TracksController(MediaControllerBase[Track]):
         replace_credits = bool(update_instances) and all(
             x.provider_instance in update_instances for x in cur_item.provider_mappings
         )
+        if overwrite:
+            # kept until the MusicBrainz link run has read the track's recording again
+            metadata.recording_year = metadata.recording_year or cur_item.metadata.recording_year
+        elif (
+            replace_credits
+            and any(x.role != ArtistRole.MAIN_ARTIST for x in update.credits)
+            and not any(x.role in PERFORMING_ROLES for x in update.credits)
+            and any(x.role in PERFORMING_ROLES for x in cur_item.credits)
+        ):
+            # the MusicBrainz link run credits the track artists with their roles again
+            metadata.last_musicbrainz_recording_lookup = None
         cur_item.external_ids.update(update.external_ids)
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
@@ -1972,6 +2034,21 @@ class TracksController(MediaControllerBase[Track]):
         update.movement_name = cur_item.movement_name
         update.external_ids.add((ExternalID.MB_WORK, work_id))
 
+    @staticmethod
+    def _mark_own_recording_id(item: Track) -> None:
+        """Mark the recording id a provider track carries, as a file's tags give it, as its own."""
+        if item.provider != "library" and item.mbid and not item.metadata.recording_source:
+            item.metadata.recording_source = RecordingSource.TAG
+
+    @staticmethod
+    def _recording_ids(track: Track) -> set[str]:
+        """Return the distinct MusicBrainz recording ids of a track."""
+        return {
+            normalize_external_id(ExternalID.MB_RECORDING, value)
+            for id_type, value in track.external_ids
+            if id_type == ExternalID.MB_RECORDING
+        }
+
     def _get_sort_sql(self, field: SortField, direction: SortDirection | None) -> str:
         """Return the ORDER BY clause for a sort field, ARTIST_NAME through the artists join."""
         if field == SortField.ARTIST_NAME:
@@ -2012,8 +2089,9 @@ class TracksController(MediaControllerBase[Track]):
     def _sync_details_query_parts(self) -> tuple[str, str, dict[str, Any]]:
         """Return extra (columns, joins, params) for the tracks sync-details query."""
         # the sync loop needs to know if the track has (valid) album and artist links
-        # to be able to backfill missing ones on existing library tracks
-        extra_columns = """
+        # to be able to backfill missing ones on existing library tracks, and which
+        # external ids it holds to store newly reported ones
+        extra_columns = f"""
             , EXISTS (
                 SELECT 1 FROM album_tracks
                 JOIN albums ON albums.item_id = album_tracks.album_id
@@ -2024,6 +2102,7 @@ class TracksController(MediaControllerBase[Track]):
                 JOIN artists ON artists.item_id = track_artists.artist_id
                 WHERE track_artists.track_id = tracks.item_id
             ) AS has_artists
+            , {self._external_ids_query()} AS external_ids
         """
         return extra_columns, "", {}
 
@@ -2035,6 +2114,10 @@ class TracksController(MediaControllerBase[Track]):
             provider_mappings=self._parse_sync_details_mappings(db_row),
             has_album=bool(db_row["has_album"]),
             has_artists=bool(db_row["has_artists"]),
+            external_ids={
+                (ExternalID(id_type), value)
+                for id_type, value in json_loads(db_row["external_ids"])
+            },
         )
 
     def _parse_summary_row(

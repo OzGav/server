@@ -19,9 +19,9 @@ MusicBrainz lists as its parts, such as the pieces of a set, and a part whose pa
 further up its MusicBrainz hierarchy moves under the level right above it.
 
 A work looked up for the first time takes its MusicBrainz name, in the user's language.
-A work refreshed by hand is looked up again as on its first lookup, taking MusicBrainz's
-current name, version, type, year, language, key, catalog numbers, parent, parts and
-arrangements; a work MusicBrainz merged into another takes the other's id.
+A work refreshed by hand, or by the 90 day re-read, is looked up again as on its first lookup,
+taking MusicBrainz's current name, version, type, year, language, key, catalog numbers,
+parent, parts and arrangements; a work MusicBrainz merged into another takes the other's id.
 """
 
 from __future__ import annotations

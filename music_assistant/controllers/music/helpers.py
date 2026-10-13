@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any, Final
 
-from music_assistant_models.enums import ExternalID, ImageType
+from music_assistant_models.enums import ExternalID, ImageType, RecordingSource
 from music_assistant_models.errors import InvalidProviderID, InvalidProviderURI
 from music_assistant_models.helpers import create_safe_string, get_global_cache_value
 from music_assistant_models.media_items import (
@@ -19,7 +19,11 @@ from music_assistant_models.media_items import (
 )
 from music_assistant_models.unique_list import UniqueList
 
-from music_assistant.constants import DB_TABLE_TRACK_ARTISTS, DB_TABLE_TRACK_CREDITS
+from music_assistant.constants import (
+    DB_TABLE_EXTERNAL_ID_LOOKUP,
+    DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
+)
 from music_assistant.helpers.external_ids import is_valid_isrc
 from music_assistant.helpers.uri import canonical_provider_url, discogs_id_from_url, parse_uri
 
@@ -65,6 +69,24 @@ def search_name_match_clause(
     return (
         f"{db_table}.item_id IN "
         f"(SELECT rowid FROM {db_table}_fts WHERE {db_table}_fts MATCH :{param_name})"
+    )
+
+
+def has_musicbrainz_id(item_id: str, media_type: MediaType, id_type: ExternalID) -> str:
+    """
+    Return a query part that is true for an item carrying the given MusicBrainz id.
+
+    :param item_id: SQL expression of the library item id, e.g. ``albums.item_id``.
+    :param media_type: Media type of the item.
+    :param id_type: The MusicBrainz id type the item has to carry.
+    """
+    # sqlite otherwise reads the lookup through the unique index, scanning a media type's ids
+    return (
+        f"EXISTS (SELECT 1 FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} "
+        f"INDEXED BY {DB_TABLE_EXTERNAL_ID_LOOKUP}_item_id_idx "
+        f"WHERE {DB_TABLE_EXTERNAL_ID_LOOKUP}.media_type = '{media_type.value}' "
+        f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.external_id_type = '{id_type.value}' "
+        f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.item_id = {item_id})"
     )
 
 
@@ -314,20 +336,49 @@ def discogs_external_id(
     return (ExternalID.DISCOGS, discogs_ids.pop())
 
 
-def fill_track_from_recording(track: Track, recording: MusicBrainzRecording) -> bool:
+def fill_track_from_recording(
+    track: Track, recording: MusicBrainzRecording, source: RecordingSource | None
+) -> bool:
     """
-    Fill a track's MusicBrainz recording id and ISRCs in from its recording.
+    Fill a track's MusicBrainz recording id, with its source, and ISRCs in from its recording.
 
-    A recording id the track already carries is kept.
+    A recording id the track already carries is kept, see :func:`set_track_recording_id`.
 
     :param track: The track to fill in.
     :param recording: The MusicBrainz recording the track is.
-    :return: Whether the track gained its recording id or an ISRC.
+    :param source: How the recording was found, None for the track's own recording id.
+    :return: Whether the track gained its recording id, a source for it or an ISRC.
     """
     known_ids = set(track.external_ids)
-    if not track.mbid:
-        track.mbid = recording.id
+    changed = set_track_recording_id(track, recording.id, source)
     for isrc in recording.isrcs or ():
         if is_valid_isrc(isrc):
             track.add_external_id(ExternalID.ISRC, isrc)
-    return track.external_ids != known_ids
+    return changed or track.external_ids != known_ids
+
+
+def set_track_recording_id(track: Track, recording_id: str, source: RecordingSource | None) -> bool:
+    """
+    Give a track a MusicBrainz recording id together with how it was found.
+
+    A recording id the track already carries is kept. The same id found again takes the
+    given source in place of a name search or an unknown source.
+
+    :param track: The track to fill in.
+    :param recording_id: The MusicBrainz recording id.
+    :param source: How the recording id was found, None when that is not known.
+    :return: Whether the track's recording id or its source changed.
+    """
+    if not track.mbid:
+        track.mbid = recording_id
+        track.metadata.recording_source = source
+        return True
+    stored = track.metadata.recording_source
+    if (
+        source in (None, stored)
+        or stored not in (None, RecordingSource.SEARCH)
+        or track.mbid.casefold() != recording_id.casefold()
+    ):
+        return False
+    track.metadata.recording_source = source
+    return True

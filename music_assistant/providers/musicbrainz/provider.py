@@ -17,6 +17,7 @@ from music_assistant_models.enums import (
     ExternalID,
     LinkType,
     MediaType,
+    RecordingSource,
 )
 from music_assistant_models.errors import InvalidDataError
 from music_assistant_models.media_items import MediaItemLink, MediaItemMetadata, UniqueList
@@ -220,7 +221,7 @@ class MusicbrainzProvider(MetadataProvider):
         if mbid := album.get_external_id(ExternalID.MB_ALBUM):
             with suppress(InvalidDataError):
                 return await self.get_release_details(mbid)
-        for url in self._reverse_lookup_urls(album):
+        for url in self.reverse_lookup_urls(album):
             if mbid := await self.get_mbid_by_url(url, MediaType.ALBUM):
                 with suppress(InvalidDataError):
                     return await self.get_release_details(mbid)
@@ -233,34 +234,36 @@ class MusicbrainzProvider(MetadataProvider):
             return await self._release_by_name(album, library_track_count)
         return None
 
-    async def resolve_recording(self, track: Track) -> MusicBrainzRecording | None:
+    async def resolve_recording(
+        self, track: Track
+    ) -> tuple[MusicBrainzRecording, RecordingSource | None] | None:
         """
-        Identify the MusicBrainz recording of a track.
+        Identify the MusicBrainz recording of a track, with how it was found.
 
         The track's own MusicBrainz recording id wins outright. Otherwise its streaming
         service links, its ISRCs and finally a name search are tried, in that order.
 
         :param track: The track to identify.
-        :return: The recording with ISRCs, artist credits, genres and URL relations, or
-            None if not found.
+        :return: The recording with ISRCs, artist credits, genres and URL relations and how
+            it was found, None for the track's own recording id, or None if not found.
         """
         if mbid := track.mbid:
             with suppress(InvalidDataError):
-                return await self.get_recording_details(mbid)
-        for url in self._reverse_lookup_urls(track):
+                return await self.get_recording_details(mbid), None
+        for url in self.reverse_lookup_urls(track):
             if mbid := await self.get_mbid_by_url(url, MediaType.TRACK):
                 with suppress(InvalidDataError):
-                    return await self.get_recording_details(mbid)
+                    return await self.get_recording_details(mbid), RecordingSource.URL
         for isrc in _external_ids(track, ExternalID.ISRC, is_valid_isrc)[:MAX_REF_ITEMS]:
             if recording := await self._recording_by_isrc(isrc, track):
-                return recording
+                return recording, RecordingSource.ISRC
         if track.album and track.artists:
             result = await self.search(
                 track.artists[0].name, track.album.name, track.name, track.version
             )
             if result:
                 with suppress(InvalidDataError):
-                    return await self.get_recording_details(result[2].id)
+                    return await self.get_recording_details(result[2].id), RecordingSource.SEARCH
         return None
 
     @staticmethod
@@ -456,6 +459,25 @@ class MusicbrainzProvider(MetadataProvider):
         msg = "Invalid MusicBrainz recording ID provided"
         raise InvalidDataError(msg)
 
+    async def get_recording_relations(self, recording_id: str) -> MusicBrainzRecording:
+        """
+        Get a Recording with the artists, works and places related to it.
+
+        :param recording_id: MusicBrainz recording id.
+        :raises InvalidDataError: When MusicBrainz does not know the recording.
+        """
+        if result := await self._api_client.get_data(
+            f"recording/{recording_id}?inc=artist-rels+work-rels+place-rels"
+        ):
+            if "id" not in result:
+                result["id"] = recording_id
+            try:
+                return MusicBrainzRecording.from_raw(result)
+            except MissingField as err:
+                raise InvalidDataError from err
+        msg = "Invalid MusicBrainz recording ID provided"
+        raise InvalidDataError(msg)
+
     async def get_recordings_by_isrc(self, isrc: str) -> list[MusicBrainzRecording]:
         """
         Get the recordings MusicBrainz has on file for an ISRC.
@@ -504,12 +526,22 @@ class MusicbrainzProvider(MetadataProvider):
         ]
         return min(years, default=None)
 
-    async def get_release_details(self, album_id: str) -> MusicBrainzRelease:
-        """Get Release/Album details by providing a MusicBrainz Album id."""
+    async def get_release_details(
+        self, album_id: str, with_performers: bool = False
+    ) -> MusicBrainzRelease:
+        """
+        Get Release/Album details by providing a MusicBrainz Album id.
+
+        :param album_id: The MusicBrainz release id.
+        :param with_performers: Also read the performers, works and places of its recordings,
+            with the relations of those works, such as the pieces of a scene.
+        """
         endpoint = (
             f"release/{album_id}?inc=artist-credits+aliases+labels+release-groups"
             "+recordings+isrcs+url-rels+genres"
         )
+        if with_performers:
+            endpoint += "+artist-rels+recording-level-rels+work-rels+work-level-rels+place-rels"
         if result := await self._api_client.get_data(endpoint):
             if "id" not in result:
                 result["id"] = album_id
@@ -832,6 +864,37 @@ class MusicbrainzProvider(MetadataProvider):
         return None
 
     @staticmethod
+    def reverse_lookup_urls(item: Artist | Album | Track) -> list[str]:
+        """
+        Return the streaming service URLs to reverse-look up an item by, a few at most.
+
+        The canonical URL of one mapping per provider comes first (so no single provider
+        crowds out the others), then the remaining mappings' own URLs.
+        """
+        mappings = sorted(
+            item.provider_mappings, key=lambda mapping: (mapping.provider_domain, mapping.item_id)
+        )
+        urls: list[str] = []
+        for domain in REVERSE_URL_DOMAINS:
+            if not (mapping := next((m for m in mappings if m.provider_domain == domain), None)):
+                continue
+            if domain == "qobuz" and not mapping.url:
+                # a performer without a Qobuz page has its name as id and no URL
+                continue
+            storefront = None
+            if domain == "apple_music" and mapping.url:
+                storefront = apple_storefront_from_url(mapping.url)
+            if url := canonical_provider_url(domain, item.media_type, mapping.item_id, storefront):
+                urls.append(url)
+                # the mapping's own URL is the same item in a form MusicBrainz may not store
+                mappings.remove(mapping)
+        for mapping in mappings:
+            url = mapping.url or ""
+            if is_public_catalog_url(url) and url not in urls:
+                urls.append(url)
+        return urls[:MAX_REVERSE_URL_LOOKUPS]
+
+    @staticmethod
     def _link_type_for_relation(relation: MusicBrainzRelation) -> LinkType | None:
         if link_type := URL_RELATION_TYPE_MAPPING.get(relation.type):
             return link_type
@@ -1038,7 +1101,7 @@ class MusicbrainzProvider(MetadataProvider):
             return artist.mbid, False
         if compare_strings(artist.name, VARIOUS_ARTISTS_NAME):
             return VARIOUS_ARTISTS_MBID, True
-        for url in self._reverse_lookup_urls(artist):
+        for url in self.reverse_lookup_urls(artist):
             if mbid := await self.get_mbid_by_url(url, MediaType.ARTIST):
                 return mbid, False
         # the artist credits of reference items MusicBrainz knows by id
@@ -1192,37 +1255,6 @@ class MusicbrainzProvider(MetadataProvider):
         with suppress(InvalidDataError):
             return await self.get_recording_details(chosen.id)
         return None
-
-    @staticmethod
-    def _reverse_lookup_urls(item: Artist | Album | Track) -> list[str]:
-        """
-        Return the streaming service URLs to reverse-look up an item by, a few at most.
-
-        The canonical URL of one mapping per provider comes first (so no single provider
-        crowds out the others), then the remaining mappings' own URLs.
-        """
-        mappings = sorted(
-            item.provider_mappings, key=lambda mapping: (mapping.provider_domain, mapping.item_id)
-        )
-        urls: list[str] = []
-        for domain in REVERSE_URL_DOMAINS:
-            if not (mapping := next((m for m in mappings if m.provider_domain == domain), None)):
-                continue
-            if domain == "qobuz" and not mapping.url:
-                # a performer without a Qobuz page has its name as id and no URL
-                continue
-            storefront = None
-            if domain == "apple_music" and mapping.url:
-                storefront = apple_storefront_from_url(mapping.url)
-            if url := canonical_provider_url(domain, item.media_type, mapping.item_id, storefront):
-                urls.append(url)
-                # the mapping's own URL is the same item in a form MusicBrainz may not store
-                mappings.remove(mapping)
-        for mapping in mappings:
-            url = mapping.url or ""
-            if is_public_catalog_url(url) and url not in urls:
-                urls.append(url)
-        return urls[:MAX_REVERSE_URL_LOOKUPS]
 
 
 def relation_urls(relations: Iterable[MusicBrainzRelation] | None) -> list[str]:

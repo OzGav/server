@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload
 from music_assistant_models.auth import Scope
 from music_assistant_models.enums import (
     AlbumType,
+    ArtistRole,
     ArtistType,
     EventType,
     ExternalID,
@@ -49,6 +50,7 @@ from music_assistant.constants import (
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACK_CREDITS,
+    DB_TABLE_TRACKS,
     DB_TABLE_WORK_ARTISTS,
     VARIOUS_ARTISTS_MBID,
     VARIOUS_ARTISTS_NAME,
@@ -56,6 +58,7 @@ from music_assistant.constants import (
 from music_assistant.controllers.music.constants import SIMILAR_ITEMS_LIMIT
 from music_assistant.controllers.music.helpers import (
     CREDITED_TRACK_ARTISTS,
+    has_musicbrainz_id,
     metadata_for_update,
     provider_mappings_for_update,
 )
@@ -1966,6 +1969,24 @@ class ArtistsController(MediaControllerBase[Artist]):
                 "artists must have the same role."
             )
             raise InvalidDataError(msg)
+
+    async def _merge_library_item_references(self, target_id: int, source_id: int) -> None:
+        """Have the link run read the performers of a merged artist's classical tracks again."""
+        # a track's performers were matched to its artists as they were when it was read, so
+        # an artist that lacked the MusicBrainz id the other one carries was missed
+        marker = f"json_extract({DB_TABLE_TRACKS}.metadata, '$.last_musicbrainz_recording_lookup')"
+        recording = has_musicbrainz_id(
+            f"{DB_TABLE_TRACKS}.item_id", MediaType.TRACK, ExternalID.MB_RECORDING
+        )
+        await self.mass.music.database.execute_write(
+            f"UPDATE {DB_TABLE_TRACKS} "
+            "SET metadata = json_remove(metadata, '$.last_musicbrainz_recording_lookup') "
+            f"WHERE is_classical = 1 AND json_valid(metadata) AND {marker} NOT NULL "
+            f"AND {recording} AND item_id IN (SELECT track_id FROM {DB_TABLE_TRACK_ARTISTS} "
+            "WHERE artist_id = :source_id UNION SELECT track_id FROM "
+            f"{DB_TABLE_TRACK_CREDITS} WHERE artist_id = :source_id AND role != :composer)",
+            {"source_id": source_id, "composer": ArtistRole.COMPOSER.value},
+        )
 
     async def _remove_music_artist_from_library(self, db_id: int, recursive: bool) -> None:
         # recursively also remove artist albums
