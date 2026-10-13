@@ -133,3 +133,6 @@ CATALOG_SERIES_TYPE = "Catalogue"
 
 # The work attribute type MusicBrainz gives the key of a work as, e.g. "C minor".
 KEY_ATTRIBUTE_TYPE = "Key"
+
+# The work relation types linking an original work (forward) to an arrangement of it (backward).
+ARRANGEMENT_RELATION_TYPES = frozenset({"arrangement", "orchestration"})

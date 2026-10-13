@@ -9,7 +9,8 @@ MusicBrainz names for a work without any are taken from the library's own artist
 credited on its tracks without a composer too.
 
 Library works that turn out to be the same MusicBrainz work are merged into the oldest one
-with tracks of its own.
+with tracks of its own. A work gets linked to the library works MusicBrainz names as its
+originals or arrangements.
 """
 
 from __future__ import annotations
@@ -85,6 +86,7 @@ class WorkEnrichmentMixin:
             new_composers = await self._get_library_composers(_composer_relations(hierarchy))
             work.composers = UniqueList(new_composers)
         await works.update_item_in_library(work.item_id, work)
+        await self._link_arrangements(int(work.item_id), hierarchy[0])
         identified = False
         if new_composers:
             await self.mass.music.tracks.credit_work_composers(int(work.item_id))
@@ -139,6 +141,25 @@ class WorkEnrichmentMixin:
         )
         survivor.metadata.last_musicbrainz_lookup = work.metadata.last_musicbrainz_lookup
         return survivor
+
+    async def _link_arrangements(self, work_id: int, mb_work: MusicBrainzWork) -> None:
+        """Link a work to the library works MusicBrainz names as its originals or arrangements."""
+        works = self.mass.music.works
+        for relation in mb_work.arrangement_of_relations:
+            if original_id := await self._get_library_work_id(relation):
+                await works.add_arrangement(work_id, original_id)
+        for relation in mb_work.arrangement_relations:
+            if arrangement_id := await self._get_library_work_id(relation):
+                await works.add_arrangement(arrangement_id, work_id)
+
+    async def _get_library_work_id(self, relation: MusicBrainzRelation) -> int | None:
+        """Return the id of the library work a MusicBrainz work relation points at, if any."""
+        if not relation.work:
+            return None
+        work = await self.mass.music.works.get_library_item_by_external_id(
+            relation.work.id, ExternalID.MB_WORK
+        )
+        return int(work.item_id) if work else None
 
     async def _track_work_ids(self, work_id: int) -> list[str]:
         """Return the MusicBrainz work ids the tracks of a library work carry."""
