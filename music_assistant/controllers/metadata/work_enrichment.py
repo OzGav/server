@@ -10,7 +10,9 @@ credited on its tracks without a composer too.
 
 Library works that turn out to be the same MusicBrainz work are merged into the oldest one
 with tracks of its own. A work gets linked to the library works MusicBrainz names as its
-originals or arrangements.
+originals or arrangements, and a part of a larger work, such as an aria, to the nearest work
+above it that MusicBrainz gives a type, such as an opera, which is added to the library
+without tracks when the library lacks it.
 """
 
 from __future__ import annotations
@@ -20,7 +22,8 @@ from typing import TYPE_CHECKING
 
 from music_assistant_models.enums import ExternalID, MediaType
 from music_assistant_models.helpers import create_safe_string
-from music_assistant_models.media_items import Artist, UniqueList
+from music_assistant_models.media_items import Artist, ItemMapping, UniqueList, Work
+from music_assistant_models.media_items.metadata import MediaItemMetadata
 
 from music_assistant.constants import (
     DB_TABLE_EXTERNAL_ID_LOOKUP,
@@ -35,7 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from music_assistant_models.enums import Period
-    from music_assistant_models.media_items import MediaItemType, Work
+    from music_assistant_models.media_items import MediaItemType
 
     from music_assistant import MusicAssistant
     from music_assistant.providers.musicbrainz.models import (
@@ -85,6 +88,9 @@ class WorkEnrichmentMixin:
         if not work.composers:
             new_composers = await self._get_library_composers(_composer_relations(hierarchy))
             work.composers = UniqueList(new_composers)
+        if not work.parent_work and (mb_parent := _nearest_typed_parent(hierarchy)):
+            parent = await self._get_or_add_parent_work(mb_parent, work)
+            work.parent_work = ItemMapping.from_item(parent)
         await works.update_item_in_library(work.item_id, work)
         await self._link_arrangements(int(work.item_id), hierarchy[0])
         identified = False
@@ -141,6 +147,27 @@ class WorkEnrichmentMixin:
         )
         survivor.metadata.last_musicbrainz_lookup = work.metadata.last_musicbrainz_lookup
         return survivor
+
+    async def _get_or_add_parent_work(self, mb_work: MusicBrainzWork, child: Work) -> Work:
+        """Return the library work of a child's parent MusicBrainz work, adding it if needed."""
+        works = self.mass.music.works
+        if holder := await works.get_library_item_by_external_id(mb_work.id, ExternalID.MB_WORK):
+            return holder
+        parent = Work(
+            item_id=mb_work.id,
+            provider="musicbrainz",
+            name=mb_work.title,
+            provider_mappings=set(),
+            # filled in right here, so the link run need not look it up again
+            metadata=MediaItemMetadata(last_musicbrainz_lookup=int(time())),
+            composers=UniqueList(
+                await self._get_library_composers(mb_work.composer_relations) or child.composers
+            ),
+        )
+        _fill_work_from_musicbrainz(parent, [mb_work])
+        added = await works.create_library_item(parent)
+        await self._link_arrangements(int(added.item_id), mb_work)
+        return added
 
     async def _link_arrangements(self, work_id: int, mb_work: MusicBrainzWork) -> None:
         """Link a work to the library works MusicBrainz names as its originals or arrangements."""
@@ -253,6 +280,11 @@ def _fill_work_from_musicbrainz(work: Work, hierarchy: Sequence[MusicBrainzWork]
     work.musical_key = work.musical_key or mb_work.musical_key
     if not work.catalog_numbers:
         work.catalog_numbers = mb_work.catalog_numbers
+
+
+def _nearest_typed_parent(hierarchy: Sequence[MusicBrainzWork]) -> MusicBrainzWork | None:
+    """Return the nearest work above a hierarchy's lowest level that MusicBrainz gives a type."""
+    return next((x for x in hierarchy[1:] if x.type), None)
 
 
 def _composer_relations(hierarchy: Sequence[MusicBrainzWork]) -> list[MusicBrainzRelation]:

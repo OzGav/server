@@ -473,6 +473,262 @@ async def test_arrangement_missing_from_the_library_is_not_added(mass: MusicAssi
 
 
 # --------------------------------------------------------------------------- #
+#  parent works                                                                #
+# --------------------------------------------------------------------------- #
+
+
+def _passion(token: str, mb_composer: MusicBrainzArtist) -> list[MusicBrainzWork]:
+    """Return a movement of a part of a passion, followed by the part and the passion."""
+    passion = MusicBrainzWork(
+        id=str(uuid4()),
+        title=f"St Matthew Passion {token}",
+        type="Oratorio",
+        relations=[MusicBrainzRelation(type="composer", direction="backward", artist=mb_composer)],
+    )
+    part = MusicBrainzWork(
+        id=str(uuid4()),
+        title=f"St Matthew Passion {token}: Teil I",
+        relations=[MusicBrainzRelation(type="parts", direction="backward", work=passion)],
+    )
+    movement = MusicBrainzWork(
+        id=str(uuid4()),
+        title=f"St Matthew Passion {token}: Teil I: 1. Kommt, ihr Töchter",
+        relations=[MusicBrainzRelation(type="parts", direction="backward", work=part)],
+    )
+    return [movement, part, passion]
+
+
+def _work_levels(*levels: tuple[str, str | None]) -> list[MusicBrainzWork]:
+    """Return MusicBrainz works of the given titles and types, each a part of the next."""
+    works: list[MusicBrainzWork] = []
+    for title, work_type in reversed(levels):
+        relations = (
+            [MusicBrainzRelation(type="parts", direction="backward", work=works[0])]
+            if works
+            else []
+        )
+        works.insert(
+            0, MusicBrainzWork(id=str(uuid4()), title=title, type=work_type, relations=relations)
+        )
+    return works
+
+
+async def test_excerpt_gets_the_nearest_typed_work_added_as_its_parent(
+    mass: MusicAssistant,
+) -> None:
+    """A part links to the nearest typed work above it, which is added without tracks."""
+    token = _token()
+    mb_composer = MusicBrainzArtist(
+        id=str(uuid4()), name=f"Bach {token}", sort_name=f"Bach {token}"
+    )
+    movement, part, passion = _passion(token, mb_composer)
+    composer = await _add_artist(mass, mb_composer.name, mb_composer.id)
+    name = f"Kommt, ihr Töchter {token}"
+    work = await _add_work(mass, name, mbid=movement.id)
+    track = await _add_track(mass, work)
+    ctrl = _controller(mass, [movement, part, passion])
+
+    stored = await _enrich(ctrl, work)
+
+    assert stored.name == name
+    assert stored.parent_work is not None
+    parent = await mass.music.works.get_library_item(stored.parent_work.item_id)
+    assert (parent.name, parent.mbid, parent.work_type) == (
+        passion.title,
+        passion.id,
+        WorkType.ORATORIO,
+    )
+    assert [x.item_id for x in parent.composers] == [composer.item_id]
+    assert parent.metadata.last_musicbrainz_lookup is not None
+    assert parent.parent_work is None
+    assert [x.item_id for x in parent.parts] == [work.item_id]
+    assert not await mass.music.works.get_library_items_by_external_id(
+        part.id, ExternalID.MB_WORK, limit=None
+    )
+    stored_track = await mass.music.tracks.get_library_item(track.item_id)
+    assert stored_track.work is not None
+    assert stored_track.work.item_id == work.item_id
+    # the parent is filled in already, so the link run does not look it up again
+    assert parent.item_id not in await _due_works(mass)
+
+
+async def test_nearest_typed_level_is_the_parent_rather_than_the_top(
+    mass: MusicAssistant,
+) -> None:
+    """An aria links to its opera, not to the set of operas above it."""
+    token = _token()
+    aria, opera, triptych = _work_levels(
+        (f"Gianni Schicchi {token}: O mio babbino caro", "Aria"),
+        (f"Gianni Schicchi {token}", "Opera"),
+        (f"Il trittico {token}", "Opera"),
+    )
+    work = await _add_work(mass, aria.title, mbid=aria.id)
+    ctrl = _controller(mass, [aria, opera, triptych])
+
+    stored = await _enrich(ctrl, work)
+
+    assert stored.parent_work is not None
+    parent = await mass.music.works.get_library_item(stored.parent_work.item_id)
+    assert (parent.name, parent.mbid) == (opera.title, opera.id)
+    assert not await mass.music.works.get_library_items_by_external_id(
+        triptych.id, ExternalID.MB_WORK, limit=None
+    )
+
+
+async def test_work_without_a_typed_level_above_gets_no_parent(mass: MusicAssistant) -> None:
+    """A sonata in an untyped set of sonatas gets no parent and no work is added."""
+    token = _token()
+    sonata, sonatas = _work_levels(
+        (f"Moonlight Sonata {token}", "Sonata"), (f"Two Piano Sonatas, op. 27 {token}", None)
+    )
+    work = await _add_work(mass, sonata.title, mbid=sonata.id)
+    ctrl = _controller(mass, [sonata, sonatas])
+    before = await _library_work_ids(mass)
+
+    stored = await _enrich(ctrl, work)
+
+    assert stored.parent_work is None
+    assert stored.mbid == sonata.id
+    assert await _library_work_ids(mass) == before
+
+
+async def test_added_parent_merges_into_a_newer_work_with_tracks(mass: MusicAssistant) -> None:
+    """An added parent without tracks merges into the newer work with tracks that is the same."""
+    token = _token()
+    aria, opera = _work_levels(
+        (f"Gianni Schicchi {token}: O mio babbino caro", "Aria"),
+        (f"Gianni Schicchi {token}", "Opera"),
+    )
+    excerpt = await _add_work(mass, aria.title, mbid=aria.id)
+    ctrl = _controller(mass, [aria, opera])
+    added_parent = (await _enrich(ctrl, excerpt)).parent_work
+    assert added_parent is not None
+    tagged_name = f"Schicchi {token}"
+    tagged = await _add_work(mass, tagged_name)
+    await _add_track(mass, tagged, [aria.id])
+
+    await ctrl.link_item_to_musicbrainz(await mass.music.works.get_library_item(tagged.item_id))
+
+    remaining = await _library_work_ids(mass)
+    assert remaining & {added_parent.item_id, tagged.item_id} == {tagged.item_id}
+    kept = await mass.music.works.get_library_item(tagged.item_id)
+    assert (kept.name, kept.mbid) == (tagged_name, opera.id)
+    stored_excerpt = await mass.music.works.get_library_item(excerpt.item_id)
+    assert stored_excerpt.parent_work is not None
+    assert stored_excerpt.parent_work.item_id == tagged.item_id
+
+
+async def test_parent_work_takes_no_composer_the_library_lacks(mass: MusicAssistant) -> None:
+    """A parent work added from MusicBrainz only gets composers the library already holds."""
+    token = _token()
+    mb_composer = MusicBrainzArtist(
+        id=str(uuid4()), name=f"Bach {token}", sort_name=f"Bach {token}"
+    )
+    hierarchy = _passion(token, mb_composer)
+    work = await _add_work(mass, f"Kommt {token}", mbid=hierarchy[0].id)
+    ctrl = _controller(mass, hierarchy)
+
+    stored = await _enrich(ctrl, work)
+
+    assert stored.parent_work is not None
+    parent = await mass.music.works.get_library_item(stored.parent_work.item_id)
+    assert parent.composers == []
+    assert not await mass.music.artists.get_library_items_by_query(search=token)
+
+
+async def test_parent_work_takes_the_composers_of_the_work_when_unmatched(
+    mass: MusicAssistant,
+) -> None:
+    """A parent whose MusicBrainz composers the library lacks gets the work's own composers."""
+    token = _token()
+    mb_composer = MusicBrainzArtist(
+        id=str(uuid4()), name=f"Bach {token}", sort_name=f"Bach {token}"
+    )
+    hierarchy = _passion(token, mb_composer)
+    composer = await _add_artist(mass, f"J. S. Bach {token}")
+    work = await _add_work(mass, f"Kommt {token}", [composer], mbid=hierarchy[0].id)
+    ctrl = _controller(mass, hierarchy)
+
+    stored = await _enrich(ctrl, work)
+
+    assert stored.parent_work is not None
+    parent = await mass.music.works.get_library_item(stored.parent_work.item_id)
+    assert [x.item_id for x in parent.composers] == [composer.item_id]
+
+
+async def test_library_work_holding_the_top_level_id_becomes_the_parent(
+    mass: MusicAssistant,
+) -> None:
+    """The library work that is the top-level MusicBrainz work is the parent, none is added."""
+    token = _token()
+    mb_composer = MusicBrainzArtist(
+        id=str(uuid4()), name=f"Bach {token}", sort_name=f"Bach {token}"
+    )
+    movement, part, passion = _passion(token, mb_composer)
+    holder = await _add_work(mass, f"Matthäus-Passion {token}", mbid=passion.id)
+    work = await _add_work(mass, f"Kommt {token}", mbid=movement.id)
+    ctrl = _controller(mass, [movement, part, passion])
+    before = await _library_work_ids(mass)
+
+    stored = await _enrich(ctrl, work)
+
+    assert stored.parent_work is not None
+    assert stored.parent_work.item_id == holder.item_id
+    assert await _library_work_ids(mass) == before
+
+
+async def test_parent_work_the_work_has_is_kept(mass: MusicAssistant) -> None:
+    """A work that already has a parent work keeps it and adds none."""
+    token = _token()
+    mb_composer = MusicBrainzArtist(
+        id=str(uuid4()), name=f"Bach {token}", sort_name=f"Bach {token}"
+    )
+    hierarchy = _passion(token, mb_composer)
+    tagged_parent = await _add_work(mass, f"Passion {token}")
+    work = await _add_work(
+        mass,
+        f"Kommt {token}",
+        mbid=hierarchy[0].id,
+        parent_work=ItemMapping.from_item(tagged_parent),
+    )
+    ctrl = _controller(mass, hierarchy)
+    before = await _library_work_ids(mass)
+
+    stored = await _enrich(ctrl, work)
+
+    assert stored.parent_work is not None
+    assert stored.parent_work.item_id == tagged_parent.item_id
+    assert await _library_work_ids(mass) == before
+
+
+async def test_enriching_again_changes_nothing(mass: MusicAssistant) -> None:
+    """A work enriched a second time gets no second parent and no second arrangement link."""
+    token = _token()
+    mb_composer = MusicBrainzArtist(
+        id=str(uuid4()), name=f"Bach {token}", sort_name=f"Bach {token}"
+    )
+    movement, part, passion = _passion(token, mb_composer)
+    original = await _add_work(mass, f"Chorale {token}", mbid=str(uuid4()))
+    movement.relations.append(
+        MusicBrainzRelation(
+            type="arrangement",
+            direction="backward",
+            work=MusicBrainzWork(id=str(original.mbid), title=original.name),
+        )
+    )
+    work = await _add_work(mass, f"Kommt {token}", mbid=movement.id)
+    ctrl = _controller(mass, [movement, part, passion])
+
+    first = await _enrich(ctrl, work)
+    works_after_first = await _library_work_ids(mass)
+    second = await _enrich(ctrl, work)
+
+    assert await _library_work_ids(mass) == works_after_first
+    assert second.parent_work == first.parent_work
+    assert [x.item_id for x in second.arrangement_of] == [original.item_id]
+
+
+# --------------------------------------------------------------------------- #
 #  composers                                                                   #
 # --------------------------------------------------------------------------- #
 
