@@ -20,6 +20,7 @@ from music_assistant_models.media_items import (
 
 from music_assistant.constants import DB_TABLE_TRACK_ARTISTS
 from music_assistant.mass import MusicAssistant
+from music_assistant.models.music_provider import MusicProvider
 
 PROVIDER_INSTANCE = "credits_instance"
 OTHER_PROVIDER_INSTANCE = "other_credits_instance"
@@ -309,6 +310,29 @@ async def test_update_from_the_only_provider_replaces_credits(mass: MusicAssista
     assert _credit_rows(stored) == [
         (main.item_id, ArtistRole.MAIN_ARTIST, None, 0),
         (new_composer.item_id, ArtistRole.COMPOSER, None, 0),
+    ]
+
+
+async def test_update_from_the_only_streaming_provider_adds_credits(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A merging update from a streaming service, which names only some credits, keeps them."""
+    main = await _add_artist(mass, "Streamed Main")
+    composer = await _add_artist(mass, "Streamed Composer")
+    conductor = await _add_artist(mass, "Streamed Conductor")
+    track = await _add_track(mass, [main], [Credit(artist=conductor, role=ArtistRole.CONDUCTOR)])
+    streaming = Mock(spec=MusicProvider, is_streaming_provider=True)
+    monkeypatch.setattr(mass, "get_provider", Mock(return_value=streaming))
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.credits = [Credit(artist=composer, role=ArtistRole.COMPOSER)]
+
+    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+
+    assert _credit_rows(stored) == [
+        (main.item_id, ArtistRole.MAIN_ARTIST, None, 0),
+        (composer.item_id, ArtistRole.COMPOSER, None, 0),
+        (conductor.item_id, ArtistRole.CONDUCTOR, None, 0),
     ]
 
 

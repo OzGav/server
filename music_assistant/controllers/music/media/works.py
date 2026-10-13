@@ -36,6 +36,7 @@ from music_assistant.controllers.music.helpers import search_name_match_clause
 from music_assistant.controllers.music.sorting import get_listing_default_direction
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import json_loads, serialize_to_json
+from music_assistant.helpers.work_titles import parse_catalog_numbers
 
 from .base import SUMMARY_ARTIST_FIELDS, SUPPRESS_MEDIA_ITEM_UPDATES, MediaControllerBase
 
@@ -345,6 +346,43 @@ class WorksController(MediaControllerBase[Work]):
         ):
             return int(library_work.item_id)
         return None
+
+    async def get_or_add_library_work_id(self, work: Work | ItemMapping) -> int | None:
+        """
+        Return the library id of a track's work, adding a work a provider describes if needed.
+
+        A work given as a full Work is added together with the work it is a part of, matched
+        to the library works by name and composer so the tracks of one work share it.
+
+        :param work: The work a track names.
+        """
+        if (work_id := await self.get_library_work_id(work)) or not isinstance(work, Work):
+            return work_id
+        # matched on the library artists, as a provider may name a composer differently
+        work.composers = UniqueList(
+            [
+                ItemMapping(
+                    media_type=MediaType.ARTIST,
+                    item_id=str(await self._get_library_artist_id(x)),
+                    provider="library",
+                    name=x.name,
+                )
+                for x in work.composers
+            ]
+        )
+        if work.parent_work and not await self.get_library_work_id(work.parent_work):
+            parent = await self.add_item_to_library(
+                Work(
+                    item_id=work.parent_work.item_id,
+                    provider=work.parent_work.provider,
+                    name=work.parent_work.name,
+                    provider_mappings=set(),
+                    composers=UniqueList(work.composers),
+                    catalog_numbers=parse_catalog_numbers(work.parent_work.name),
+                )
+            )
+            work.parent_work = ItemMapping.from_item(parent)
+        return int((await self.add_item_to_library(work)).item_id)
 
     async def _add_library_item(self, item: Work, overwrite_existing: bool = False) -> int:
         """Add a new work record to the database."""

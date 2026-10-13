@@ -45,7 +45,7 @@ from music_assistant.controllers.music.helpers import (
     fill_track_from_recording,
 )
 from music_assistant.helpers.compare import compare_strings
-from music_assistant.helpers.external_ids import is_valid_barcode
+from music_assistant.helpers.external_ids import is_valid_barcode, is_valid_isrc
 from music_assistant.models.music_provider import MusicProvider
 from music_assistant.providers.musicbrainz.models import release_year
 from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider, relation_urls
@@ -334,6 +334,8 @@ class MetadataEnrichmentMixin:
                     album.year = prov_item.year
                 if album.album_type == AlbumType.UNKNOWN:
                     album.album_type = prov_item.album_type
+                # an album added through one of its tracks is tagged once its full listing is read
+                album.classical_tag = album.classical_tag or prov_item.classical_tag
 
         # identify the album on MusicBrainz before the metadata providers need its id
         retry_soon = await self._link_album_to_musicbrainz(album)
@@ -417,6 +419,10 @@ class MetadataEnrichmentMixin:
                     prov_mapping.item_id, prov_mapping.provider_instance
                 )
                 track.metadata.update(prov_item.metadata)
+                # a provider's full track carries the ISRCs its album listing may leave out
+                for id_type, value in prov_item.external_ids:
+                    if id_type == ExternalID.ISRC and is_valid_isrc(value):
+                        track.add_external_id(ExternalID.ISRC, value)
 
         # identify the track on MusicBrainz before the metadata providers need its id
         retry_soon = await self._link_track_to_musicbrainz(track)

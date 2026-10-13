@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from difflib import SequenceMatcher
 from enum import Enum, IntEnum
 from functools import lru_cache
-from typing import Final
+from typing import Final, Protocol
 
 from music_assistant_models.enums import ExternalID, MediaType, PlaylistMatchPolicy
 from music_assistant_models.helpers import create_safe_string
@@ -122,6 +122,18 @@ class TrackMatchConfidence(IntEnum):
     LOOSE = 1
     LIKELY = 2
     EXACT = 3
+
+
+class NamedArtist(Protocol):
+    """An artist with a name and a sort name, such as a library or MusicBrainz artist."""
+
+    @property
+    def name(self) -> str:
+        """Return the name of the artist."""
+
+    @property
+    def sort_name(self) -> str | None:
+        """Return the sort name of the artist."""
 
 
 # EXACT needs release-level evidence; looser policies accept recording-level matches.
@@ -1025,6 +1037,27 @@ def compare_strings(str1: str, str2: str, strict: bool = True) -> bool:
     return SequenceMatcher(a=str1_lower, b=str2_lower).ratio() > required_accuracy
 
 
+def is_named_in(name: str, full_name: str) -> bool:
+    """
+    Return whether every word of a name is in a fuller name, case, accents and hyphens aside.
+
+    :param name: A name such as "Chopin" or "Vaughan-Williams".
+    :param full_name: A fuller name such as "Frédéric Chopin" or "Ralph Vaughan Williams".
+    """
+    words = _name_words(name)
+    return bool(words) and words <= _name_words(full_name)
+
+
+def is_named_by(name: str, artist: NamedArtist) -> bool:
+    """
+    Return whether every word of a name is in an artist's name or sort name.
+
+    :param name: A name such as "Chopin".
+    :param artist: The artist, such as a library or MusicBrainz artist.
+    """
+    return is_named_in(name, artist.name) or is_named_in(name, artist.sort_name or "")
+
+
 def compare_version(base_version: str, compare_version: str) -> bool:
     """Compare version string."""
     return _normalize_version_tokens(base_version) == _normalize_version_tokens(compare_version)
@@ -1123,6 +1156,11 @@ def _compare_album_version(base_version: str, compare_version: str) -> AlbumMatc
         # vs. "Deluxe 2022 Remaster"): an ambiguous packaging difference a tracklist can resolve
         return AlbumMatchEvidence.INSUFFICIENT
     return AlbumMatchEvidence.NO_MATCH
+
+
+def _name_words(name: str) -> set[str]:
+    """Return the words of a name, with the parts of a hyphenated name as words of their own."""
+    return set(create_safe_string(name.replace("-", " ")).split())
 
 
 def _compare_safe_strings(base: str, compare: str) -> bool:
