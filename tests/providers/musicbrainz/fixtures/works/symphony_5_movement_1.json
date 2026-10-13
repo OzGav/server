@@ -1,0 +1,107 @@
+{
+  "attributes": [
+    {
+      "type": "Key",
+      "value-id": "d3d0b554-d3f4-3995-b995-5113f3771295",
+      "value": "C minor",
+      "type-id": "7526c19d-3be4-3420-b6cc-9fb6e49fa1a9"
+    }
+  ],
+  "id": "b6f9ecc3-24d1-38ed-b8a0-091f7cd0c6b2",
+  "disambiguation": "",
+  "language": "zxx",
+  "relations": [
+    {
+      "attributes": [],
+      "ended": true,
+      "begin": "1804",
+      "attribute-values": {},
+      "attribute-ids": {},
+      "end": "1808",
+      "artist": {
+        "type": "Person",
+        "name": "Ludwig van Beethoven",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+        "country": "DE",
+        "sort-name": "Beethoven, Ludwig van",
+        "disambiguation": "German composer",
+        "id": "1f9df192-a621-4f54-8850-2c5373b7eac9"
+      },
+      "source-credit": "",
+      "direction": "backward",
+      "target-type": "artist",
+      "type": "composer",
+      "target-credit": "",
+      "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f"
+    },
+    {
+      "target-credit": "",
+      "type": "arrangement",
+      "target-type": "work",
+      "work": {
+        "type": null,
+        "title": "Symphony no. 5 in C minor, S. 464 no. 5: I. Allegro con brio",
+        "languages": [
+          "zxx"
+        ],
+        "type-id": null,
+        "iswcs": [],
+        "id": "91851de6-c168-3707-8b96-20c6bf2fdb11",
+        "disambiguation": "for piano solo, Liszt",
+        "attributes": [],
+        "language": "zxx"
+      },
+      "type-id": "51975ed8-bbfa-486b-9f28-5947f4370299",
+      "end": null,
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "ended": false,
+      "direction": "forward",
+      "source-credit": ""
+    },
+    {
+      "direction": "backward",
+      "attribute-ids": {
+        "movement": "1d05bc4b-9884-4c9f-9f69-616f119047f3"
+      },
+      "ended": false,
+      "work": {
+        "id": "d03bff61-26fc-301b-98ac-4d8e85771cbc",
+        "disambiguation": "",
+        "attributes": [],
+        "language": "zxx",
+        "type": "Symphony",
+        "title": "Symphony no. 5 in C minor, op. 67",
+        "languages": [
+          "zxx"
+        ],
+        "type-id": "174314aa-0aa4-30cf-96a6-50b281d8d208",
+        "iswcs": [
+          "T-902.570.042-9",
+          "T-932.416.993-9"
+        ]
+      },
+      "type": "parts",
+      "source-credit": "",
+      "end": null,
+      "attribute-values": {},
+      "attributes": [
+        "movement"
+      ],
+      "begin": null,
+      "type-id": "ca8d3642-ce5f-49f8-91f2-125d72524e6a",
+      "target-credit": "",
+      "target-type": "work",
+      "ordering-key": 1
+    }
+  ],
+  "title": "Symphony no. 5 in C minor, op. 67: I. Allegro con brio",
+  "languages": [
+    "zxx"
+  ],
+  "type": null,
+  "iswcs": [],
+  "type-id": null
+}

@@ -10,6 +10,7 @@ from music_assistant_models.enums import ArtistRole, Period
 from music_assistant.helpers.tags import AudioTags
 from music_assistant.providers.filesystem_local.helpers import (
     TrackWork,
+    parse_catalog_numbers,
     parse_track_work,
     performer_credit_role,
     period_from_genres,
@@ -233,3 +234,46 @@ def test_work_tag_ignores_the_track_title() -> None:
     """With a work tag the track title does not name the work."""
     work = parse_track_work(_tags(title="Symphony No. 9: 4. Presto", work=["Symphony No. 5"]))
     assert work == TrackWork("Symphony No. 5")
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Symphony no. 5 in C minor, op. 67", ["op. 67"]),
+        ('Concerto in E major, op. 8 no. 1, RV 269 "La primavera"', ["op. 8 no. 1", "RV 269"]),
+        ("Concerto in C major for Flute, Harp & Orchestra, K. 297c/299", ["K. 297c/299"]),
+        ("Concerto for Violin & Oboe in C minor, BWV 1060R", ["BWV 1060R"]),
+        ("Excerpt from Die Walküre, WWV 86B: Akt III, Scene I, Walkürenritt", ["WWV 86B"]),
+        ("Romeo and Juliet: Suite no. 2, op. 64ter", ["op. 64ter"]),
+        ("Symphonie pour orgue n° 5 en fa mineur, op. 42 n° 1", ["op. 42 n° 1"]),
+        ('Bagatelle for Piano in A minor, WoO 59 "Für Elise": Poco moto', ["WoO 59"]),
+        ("Préludes, Livre I, L. 117, CD 125", ["L. 117", "CD 125"]),
+        ("Canon and Gigue in D major, P. 37, T. 337", ["P. 37", "T. 337"]),
+        ("Round O, ZT. 684", ["ZT. 684"]),
+        ("Te Deum, H. 146: Prélude", ["H. 146"]),  # codespell:ignore
+        (
+            "Concerto, settimo libro de madrigali, con altri generi di canti: "
+            "O come sei gentile, SV 120",
+            ["SV 120"],
+        ),
+        ("Dardanus, RCT 35 : Acte III, Scène 3.", ["RCT 35"]),
+        ("Keyboard Suite in D minor, HWV 447", ["HWV 447"]),
+        ('Kantate, BWV 147 "Herz und Mund und Tat und Leben": Teil II', ["BWV 147"]),
+        ("Walzer, op. 39: Nr. 15 As-dur", ["op. 39"]),
+        ('Symfonie č. 9 e moll, op. 95 "Z Nového světa"', ["op. 95"]),
+        ('Symphony no. 1 in D major "Titan"', []),
+        ("Five Mystical Songs", []),
+        ("Antarctica", []),
+        ("Messe solennelle en la majeur, op. 12 ", ["op. 12"]),
+        ("Winterreise, op. 89, D. 911", ["op. 89", "D. 911"]),
+        ("Piano Sonata in E-flat major, Hob. XVI:52", ["Hob. XVI:52"]),
+        ("Serenade no. 13 in G major, KV 525", ["KV 525"]),
+        ("Overture in D major, TWV 55:D18", ["TWV 55:D18"]),
+        ("Membra Jesu nostri, BuxWV 75", ["BuxWV 75"]),
+        ("Années de pèlerinage, S. 160", ["S. 160"]),
+        ("Dido and Aeneas, Z. 626", ["Z. 626"]),
+    ],
+)
+def test_parse_catalog_numbers(title: str, expected: list[str]) -> None:
+    """Catalog numbers are read off a work title as written, single letters only after a comma."""
+    assert parse_catalog_numbers(title) == expected

@@ -26,7 +26,7 @@ from music_assistant_models.errors import (
     MusicAssistantError,
     ProviderUnavailableError,
 )
-from music_assistant_models.helpers import create_safe_string
+from music_assistant_models.helpers import create_safe_string, create_sort_name
 from music_assistant_models.media_items import (
     Album,
     Artist,
@@ -1171,6 +1171,34 @@ class ArtistsController(MediaControllerBase[Artist]):
                 await self.add_provider_mappings(db_artist.item_id, match)
                 cur_provider_domains.add(provider.domain)
 
+    async def merge_library_artists_by_mbid(self, artist_id: int, mbid: str) -> int:
+        """
+        Merge the library artists carrying the given MusicBrainz artist id into the oldest.
+
+        Artists that cannot be merged, such as an author and a singer, are left apart.
+
+        :param artist_id: Library id of an artist carrying the MusicBrainz id.
+        :param mbid: The MusicBrainz artist id.
+        :return: The library id the given artist is found under after the merge.
+        """
+        same_mbid = await self.get_library_items_by_external_id(
+            mbid, ExternalID.MB_ARTIST, limit=None
+        )
+        # the oldest library artist keeps its name and absorbs the other spellings
+        # TODO consider MusicBrainz's name (the main alias in MA's language, kept over later
+        # file reads) as the source of truth for artist names
+        target_id, *source_ids = sorted({artist_id, *(int(x.item_id) for x in same_mbid)})
+        for source_id in source_ids:
+            try:
+                await self.merge_library_items(target_id, source_id)
+            except MediaNotFoundError:
+                continue  # already merged by a concurrent add
+            except InvalidDataError as err:
+                self.logger.debug("Not merging artists with MusicBrainz ID %s: %s", mbid, err)
+                if source_id == artist_id:
+                    return artist_id
+        return target_id
+
     def artist_from_item_mapping(self, item: ItemMapping) -> Artist:
         """Create an Artist object from an ItemMapping object."""
         # a library item mapping references an item already in the library, which has no
@@ -1382,6 +1410,14 @@ class ArtistsController(MediaControllerBase[Artist]):
 
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
+        # a classical artist's sort name made from its name gives way to a real one
+        if (
+            cur_item.is_classical
+            and update.sort_name
+            and cur_item.sort_name == create_sort_name(cur_item.name)
+            and update.sort_name != create_sort_name(update.name)
+        ):
+            sort_name = update.sort_name
         # a source without a period keeps the stored one, as only composers carry one
         period = (
             (update.period or cur_item.period) if overwrite else cur_item.period or update.period

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from music_assistant_models.enums import ProviderType
@@ -31,6 +31,7 @@ TOTAL_TRACKS = NUM_ARTISTS * NUM_ALBUMS * NUM_TRACKS
 @pytest.fixture
 async def music(mass_minimal: MusicAssistant) -> AsyncGenerator[MusicController]:
     """Return a music controller with initialized database on the minimal mass instance."""
+    mass_minimal.metadata = MagicMock(set_composer_periods=AsyncMock())
     controller = MusicController(mass_minimal)
     mass_minimal.music = controller
     await controller._setup_database()

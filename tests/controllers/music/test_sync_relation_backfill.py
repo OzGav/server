@@ -52,6 +52,7 @@ async def music(mass_minimal: MusicAssistant) -> AsyncGenerator[MusicController]
     """Return a music controller with initialized database on the minimal mass instance."""
     mass_minimal.metadata = MagicMock()
     mass_minimal.metadata.invalidate_image_cache = AsyncMock()
+    mass_minimal.metadata.set_composer_periods = AsyncMock()
     controller = MusicController(mass_minimal)
     mass_minimal.music = controller
     await controller._setup_database()

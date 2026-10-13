@@ -1,0 +1,116 @@
+{
+  "title": "Winterreise, op. 89, D. 911: I. Gute Nacht",
+  "attributes": [],
+  "disambiguation": "",
+  "language": "deu",
+  "relations": [
+    {
+      "source-credit": "",
+      "begin": "1827-02",
+      "target-type": "artist",
+      "type": "composer",
+      "artist": {
+        "disambiguation": "composer",
+        "country": "AT",
+        "type": "Person",
+        "name": "Franz Schubert",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+        "id": "f91e3a88-24ee-4563-8963-fab73d2765ed",
+        "sort-name": "Schubert, Franz"
+      },
+      "end": "1827-02",
+      "attributes": [],
+      "attribute-ids": {},
+      "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+      "attribute-values": {},
+      "ended": true,
+      "direction": "backward",
+      "target-credit": ""
+    },
+    {
+      "target-type": "artist",
+      "begin": null,
+      "source-credit": "",
+      "type": "lyricist",
+      "attributes": [],
+      "artist": {
+        "id": "93023238-9560-4b39-8253-c3c2d178badf",
+        "sort-name": "Müller, Wilhelm",
+        "name": "Wilhelm Müller",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+        "country": "DE",
+        "disambiguation": "German poet"
+      },
+      "end": null,
+      "type-id": "3e48faba-ec01-47fd-8e89-30e81161661c",
+      "attribute-values": {},
+      "ended": false,
+      "direction": "backward",
+      "target-credit": "",
+      "attribute-ids": {}
+    },
+    {
+      "attributes": [],
+      "work": {
+        "languages": [
+          "zxx"
+        ],
+        "language": "zxx",
+        "id": "1b968431-a997-4791-9bcb-e577c0236b4e",
+        "iswcs": [],
+        "type": null,
+        "type-id": null,
+        "title": "Gute Nacht, D. 911 Nr. 1",
+        "disambiguation": "for flute and piano, Böhm",
+        "attributes": []
+      },
+      "end": null,
+      "direction": "forward",
+      "target-credit": "",
+      "type-id": "51975ed8-bbfa-486b-9f28-5947f4370299",
+      "attribute-values": {},
+      "ended": false,
+      "attribute-ids": {},
+      "target-type": "work",
+      "source-credit": "",
+      "begin": null,
+      "type": "arrangement"
+    },
+    {
+      "attributes": [],
+      "end": null,
+      "work": {
+        "attributes": [],
+        "disambiguation": "",
+        "title": "Winterreise, op. 89, D. 911",
+        "type-id": "0f24ce27-96cc-3746-a16c-e6617d7a80f3",
+        "type": "Song-cycle",
+        "iswcs": [],
+        "id": "16a894eb-3164-4e69-b2e3-d0b1db71c2a8",
+        "language": "deu",
+        "languages": [
+          "deu"
+        ]
+      },
+      "target-credit": "",
+      "ordering-key": 1,
+      "direction": "backward",
+      "type-id": "ca8d3642-ce5f-49f8-91f2-125d72524e6a",
+      "attribute-values": {},
+      "ended": false,
+      "attribute-ids": {},
+      "target-type": "work",
+      "begin": null,
+      "source-credit": "",
+      "type": "parts"
+    }
+  ],
+  "id": "485e9c1b-8b7f-32cd-8511-83f0259088e8",
+  "iswcs": [],
+  "languages": [
+    "deu"
+  ],
+  "type-id": "f061270a-2fd6-32f1-a641-f0f8676d14e6",
+  "type": "Song"
+}

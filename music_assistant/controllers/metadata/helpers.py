@@ -9,7 +9,33 @@ from __future__ import annotations
 
 import pathlib
 
-from .constants import _IMAGEPROXY_CONTENT_TYPES
+from music_assistant_models.enums import Period
+
+from music_assistant.helpers.datetime import utc
+
+from .constants import (
+    _IMAGEPROXY_CONTENT_TYPES,
+    COMPOSER_PERIOD_START_YEARS,
+    COMPOSER_WORKING_LIFE_END_OFFSET,
+    COMPOSER_WORKING_LIFE_START_AGE,
+)
+
+
+def composer_period(birth_year: int, death_year: int | None) -> Period:
+    """
+    Return the classical period of a composer, judged by the middle of their working life.
+
+    :param birth_year: The year the composer was born.
+    :param death_year: The year the composer died, None for a living composer.
+    """
+    start = birth_year + COMPOSER_WORKING_LIFE_START_AGE
+    # a living composer is still working
+    end = death_year - COMPOSER_WORKING_LIFE_END_OFFSET if death_year else utc().year
+    midpoint = (start + end) // 2
+    return next(
+        (period for year, period in reversed(COMPOSER_PERIOD_START_YEARS) if midpoint >= year),
+        Period.MEDIEVAL,
+    )
 
 
 def _detect_image_format(path: str) -> str:

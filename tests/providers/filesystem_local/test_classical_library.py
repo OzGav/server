@@ -353,6 +353,25 @@ async def test_numbered_movement_title_links_the_parent_work(
     assert [x.name for x in work.composers] == [f"Composer {token}"]
 
 
+async def test_work_takes_the_catalog_numbers_of_its_title(
+    provider: LocalFileSystemProvider, mass: MusicAssistant
+) -> None:
+    """The catalog numbers in the work part of a work title land on the work."""
+    token = _token()
+    path = f"{token}/Album/01.flac"
+    tags = _tags(
+        path,
+        album=f"Album {token}",
+        work=[f"{token} Concerto in E major, op. 8 no. 1, RV 269: I. Allegro"],
+    )
+
+    track = await _add_track(provider, path, tags)
+
+    assert track.work is not None
+    work = await mass.music.works.get_library_item(track.work.item_id)
+    assert work.catalog_numbers == ["op. 8 no. 1", "RV 269"]
+
+
 async def test_movement_tags_link_the_general_work_and_keep_the_movement_id(
     provider: LocalFileSystemProvider, mass: MusicAssistant
 ) -> None:
