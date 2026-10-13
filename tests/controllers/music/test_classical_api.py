@@ -57,6 +57,8 @@ from music_assistant.controllers.music.classical import (
     _group_performances,
     _Performance,
     _performer_row,
+    _refined_roles,
+    _shown_credits,
     _title_work_type,
     _with_title_work_type,
     _WorkTrack,
@@ -183,13 +185,8 @@ async def test_performers(library: _Library) -> None:
             1,
             1,
         ),
-        (
-            "Gardiner Singers",
-            ArtistRole.CHOIR,
-            [ArtistRole.CHOIR, ArtistRole.PERFORMER],
-            1,
-            1,
-        ),
+        # the performer credits take the one specific role held elsewhere
+        ("Gardiner Singers", ArtistRole.CHOIR, [ArtistRole.CHOIR], 1, 1),
         ("Herbert von Karajan", ArtistRole.CONDUCTOR, [ArtistRole.CONDUCTOR], 3, 3),
         ("Leonard Bernstein", ArtistRole.CONDUCTOR, [ArtistRole.CONDUCTOR], 2, 3),
         ("Wiener Philharmoniker", ArtistRole.ORCHESTRA, [ArtistRole.ORCHESTRA], 3, 4),
@@ -206,7 +203,7 @@ async def test_performers(library: _Library) -> None:
         (ArtistRole.ORCHESTRA, ["Berliner Philharmoniker", "Wiener Philharmoniker"]),
         (ArtistRole.SOLOIST, ["Daniel Barenboim"]),
         (ArtistRole.CHOIR, ["Gardiner Singers"]),
-        (ArtistRole.PERFORMER, ["Gardiner Singers"]),
+        (ArtistRole.PERFORMER, []),
         (ArtistRole.ENSEMBLE, []),
         (ArtistRole.COMPOSER, []),
     ],
@@ -363,6 +360,7 @@ async def test_works(library: _Library) -> None:
     ]
     assert rows[0].work.catalog_numbers == ["Op. 55"]
     assert [x.name for x in rows[0].work.composers] == ["Ludwig van Beethoven"]
+    assert all(x.part_names == [] for x in rows)
 
 
 @pytest.mark.parametrize(
@@ -725,18 +723,32 @@ def restricted_mass_fixture(music_mass_class: MusicAssistant) -> MusicAssistant:
 
 
 class TestListingVisibility:
-    """The classical listings only show the library tracks the calling user sees."""
+    """The classical listings and probe only count the library tracks the calling user sees."""
 
     async def test_listings_skip_tracks_the_user_does_not_see(
         self, restricted_mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Hidden and not in library tracks add no composer, performer, work or recording."""
+        """
+        Hidden and not in library tracks add no composer, performer, work or recording.
+
+        Nor do they make the probe find classical content or give their artists a row.
+        """
         mass = restricted_mass
-        visible = await _add_mapped_track(mass, "Visible", _mapping())
-        composer = next(x.artist for x in visible.credits if x.role == ArtistRole.COMPOSER)
+        classical = mass.music.classical
         hidden = await _add_mapped_track(mass, "Hidden", _mapping(HIDDEN_INSTANCE))
         assert hidden.work is not None
         await _add_mapped_track(mass, "Not In Library", _mapping(in_library=False))
+        hidden_composer, hidden_conductor = (
+            _credited(hidden, role) for role in (ArtistRole.COMPOSER, ArtistRole.CONDUCTOR)
+        )
+        probe_for_everyone = await mass.music.has_classical_content()
+        assert len(await classical.composers(artist_id=hidden_composer.item_id)) == 1
+        assert len(await classical.performers(artist_id=hidden_conductor.item_id)) == 1
+        with monkeypatch.context() as listener:
+            listener.setattr(GET_CURRENT_USER, lambda: LISTENER)
+            probe_for_listener = await mass.music.has_classical_content()
+        visible = await _add_mapped_track(mass, "Visible", _mapping())
+        composer = _credited(visible, ArtistRole.COMPOSER)
         for name, mapping in (
             ("Visible Other", _mapping()),
             ("Hidden Other", _mapping(HIDDEN_INSTANCE)),
@@ -744,7 +756,6 @@ class TestListingVisibility:
         ):
             await _add_mapped_track(mass, name, mapping, composer=composer, work=False)
         monkeypatch.setattr(GET_CURRENT_USER, lambda: LISTENER)
-        classical = mass.music.classical
 
         composers = await classical.composers()
         performers = await classical.performers()
@@ -752,14 +763,15 @@ class TestListingVisibility:
         hidden_recordings = await classical.recordings(hidden.work.item_id)
         other_tracks = await classical.other_tracks(composer.item_id, as_composer=True)
 
+        assert probe_for_everyone
+        assert not probe_for_listener
         assert [x.artist.name for x in composers] == ["Composer Visible"]
-        assert [x.artist.name for x in performers] == [
-            "Conductor Visible",
-            "Conductor Visible Other",
-        ]
+        assert [x.artist.name for x in performers] == ["Conductor Visible"]
         assert [x.work.name for x in works] == ["Work Visible"]
         assert hidden_recordings == []
         assert [x.name for x in other_tracks] == ["Visible Other"]
+        assert await classical.composers(artist_id=hidden_composer.item_id) == []
+        assert await classical.performers(artist_id=hidden_conductor.item_id) == []
 
 
 class TestFanartVisibility:
@@ -819,6 +831,334 @@ class TestArtistFilter:
         assert [(x.artist.name, x.main_role) for x in performers] == [
             ("Conductor Performed", ArtistRole.CONDUCTOR)
         ]
+
+
+class TestArtistsOfWorks:
+    """The composers and performers listings only hold artists of a work."""
+
+    async def test_artists_without_a_work_are_left_out(
+        self, restricted_mass: MusicAssistant
+    ) -> None:
+        """An artist credited only on tracks without a work gets no row in any filter."""
+        mass = restricted_mass
+        await _add_mapped_track(mass, "Work", _mapping())
+        workless = await _add_mapped_track(mass, "Workless", _mapping(), work=False)
+        composer, conductor = (
+            _credited(workless, role) for role in (ArtistRole.COMPOSER, ArtistRole.CONDUCTOR)
+        )
+        classical = mass.music.classical
+
+        composers = await classical.composers()
+        performers = await classical.performers()
+
+        assert [(x.artist.name, x.work_count) for x in composers] == [("Composer Work", 1)]
+        assert await classical.composers(sort_field=SortField.WORK_COUNT) == composers
+        assert await classical.composers(search="workless") == []
+        assert await classical.composers(artist_id=composer.item_id) == []
+        assert [(x.artist.name, x.recording_count) for x in performers] == [("Conductor Work", 1)]
+        assert await classical.performers(role=ArtistRole.CONDUCTOR) == performers
+        assert await classical.performers(sort_field=SortField.RECORDING_COUNT) == performers
+        assert await classical.performers(search="workless") == []
+        assert await classical.performers(artist_id=conductor.item_id) == []
+
+
+class TestRefinedPerformerRoles:
+    """Every classical result shows and filters on the refined performer roles."""
+
+    async def test_roles_from_the_name(self, restricted_mass: MusicAssistant) -> None:
+        """A generic or wrong ensemble role shows as the role the name tells, everywhere."""
+        lib = _Library(mass=restricted_mass)
+        for name in ("Composer", "BBC Symphony Orchestra", "Quatuor SUK"):
+            lib.artists[name] = await _add_named_artist(lib.mass, name)
+        composer, orchestra, quartet = lib.artists.values()
+        await _add_work(lib, "Quartet", "Composer")
+        movement = await lib.mass.music.tracks.add_item_to_library(
+            Track(
+                item_id="0",
+                provider="library",
+                name="Movement",
+                provider_mappings={_mapping()},
+                artists=UniqueList([orchestra]),
+                credits=[
+                    Credit(artist=composer, role=ArtistRole.COMPOSER),
+                    Credit(artist=orchestra, role=ArtistRole.PERFORMER),
+                    Credit(artist=quartet, role=ArtistRole.ORCHESTRA),
+                ],
+                work=ItemMapping.from_item(lib.works["Quartet"]),
+                movement_number=1,
+                classical_tag=True,
+            )
+        )
+        classical = lib.mass.music.classical
+
+        rows = await classical.performers()
+        (recording,) = await classical.recordings(lib.work_id("Quartet"))
+        by_performer = await classical.recordings(performer_id=orchestra.item_id)
+
+        assert [(x.artist.name, x.main_role, x.roles) for x in rows] == [
+            ("BBC Symphony Orchestra", ArtistRole.ORCHESTRA, [ArtistRole.ORCHESTRA]),
+            ("Quatuor SUK", ArtistRole.ENSEMBLE, [ArtistRole.ENSEMBLE]),
+        ]
+        orchestras = await classical.performers(role=ArtistRole.ORCHESTRA)
+        assert [x.artist.name for x in orchestras] == ["BBC Symphony Orchestra"]
+        ensembles = await classical.performers(role=ArtistRole.ENSEMBLE)
+        assert [x.artist.name for x in ensembles] == ["Quatuor SUK"]
+        assert await classical.performers(role=ArtistRole.PERFORMER) == []
+        quartet_credits = [
+            ("BBC Symphony Orchestra", ArtistRole.ORCHESTRA),
+            ("Quatuor SUK", ArtistRole.ENSEMBLE),
+        ]
+        assert [(x.artist.name, x.role) for x in recording.credits] == quartet_credits
+        assert {
+            (x.artist.name, x.role)
+            for x in recording.tracks[0].credits
+            if x.role != ArtistRole.COMPOSER
+        } == set(quartet_credits)
+        assert [x.credits for x in by_performer] == [recording.credits]
+        stored = await lib.mass.music.tracks.get_library_item(movement.item_id)
+        assert ("BBC Symphony Orchestra", ArtistRole.PERFORMER) in {
+            (x.artist.name, x.role) for x in stored.credits
+        }
+
+
+async def test_other_tracks_show_refined_roles(library: _Library) -> None:
+    """The performer role on other tracks shows the one specific role held elsewhere."""
+    tracks = await library.mass.music.classical.other_tracks(library.artist_id("gardiner"))
+
+    assert {
+        x.role for track in tracks for x in track.credits if x.artist.name == "Gardiner Singers"
+    } == {ArtistRole.CHOIR}
+
+
+@pytest.mark.parametrize(
+    ("name", "stored", "expected"),
+    [
+        (
+            "Mariss Jansons",
+            {ArtistRole.PERFORMER: 2, ArtistRole.CONDUCTOR: 5},
+            {ArtistRole.CONDUCTOR: 7},
+        ),
+        ("BBC Symphony Orchestra", {ArtistRole.PERFORMER: 3}, {ArtistRole.ORCHESTRA: 3}),
+        (
+            "Chœurs de la Maîtrise Notre-Dame de Paris",
+            {ArtistRole.ORCHESTRA: 1},
+            {ArtistRole.CHOIR: 1},
+        ),
+        (
+            "Moscow Radio Choir",
+            {ArtistRole.ORCHESTRA: 1, ArtistRole.PERFORMER: 1},
+            {ArtistRole.CHOIR: 2},
+        ),
+        ("Quatuor SUK", {ArtistRole.ORCHESTRA: 1}, {ArtistRole.ENSEMBLE: 1}),
+        ("Wiener Philharmoniker", {ArtistRole.ORCHESTRA: 1}, {ArtistRole.ORCHESTRA: 1}),
+        ("RIAS Kammerchor", {ArtistRole.ENSEMBLE: 1}, {ArtistRole.CHOIR: 1}),
+        ("Staats- und Domchor Berlin", {ArtistRole.ENSEMBLE: 1}, {ArtistRole.CHOIR: 1}),
+        (
+            "Soloists of the Royal Opera House Orchestra, Covent Garden",
+            {ArtistRole.PERFORMER: 1},
+            {ArtistRole.PERFORMER: 1},
+        ),
+        ("The Tallis Scholars", {ArtistRole.PERFORMER: 1}, {ArtistRole.PERFORMER: 1}),
+        # a name with choir and orchestra words tells neither
+        (
+            "Chorus and Orchestra of the Opera",
+            {ArtistRole.PERFORMER: 1},
+            {ArtistRole.PERFORMER: 1},
+        ),
+        ("Choir and Orchestra", {ArtistRole.ORCHESTRA: 1}, {ArtistRole.ORCHESTRA: 1}),
+        # several specific roles held elsewhere leave the name to tell the role
+        (
+            "Daniel Barenboim",
+            {ArtistRole.PERFORMER: 1, ArtistRole.CONDUCTOR: 1, ArtistRole.SOLOIST: 1},
+            {ArtistRole.PERFORMER: 1, ArtistRole.CONDUCTOR: 1, ArtistRole.SOLOIST: 1},
+        ),
+        (
+            "Academy Sinfonia",
+            {ArtistRole.PERFORMER: 1, ArtistRole.CONDUCTOR: 1, ArtistRole.SOLOIST: 1},
+            {ArtistRole.ORCHESTRA: 1, ArtistRole.CONDUCTOR: 1, ArtistRole.SOLOIST: 1},
+        ),
+        # a word ending in orchester counts as orchestra, no other word ending does
+        ("Gewandhausorchester Leipzig", {ArtistRole.PERFORMER: 1}, {ArtistRole.ORCHESTRA: 1}),
+        ("Rundfunkchor Berlin", {ArtistRole.PERFORMER: 1}, {ArtistRole.CHOIR: 1}),
+        # words only count whole
+        ("Triolet Lane", {ArtistRole.PERFORMER: 1}, {ArtistRole.PERFORMER: 1}),
+    ],
+)
+def test_refined_roles(
+    name: str, stored: dict[ArtistRole, int], expected: dict[ArtistRole, int]
+) -> None:
+    """The generic performer role and a wrong orchestra role are refined, never guessed."""
+    assert _refined_roles(name, Counter(stored)) == Counter(expected)
+
+
+@pytest.mark.parametrize(
+    ("roles", "refinements", "expected"),
+    [
+        # the main artist of one track counts as performer, refined to their soloist role
+        (
+            [(ArtistRole.PERFORMER, None), (ArtistRole.SOLOIST, "tenor")],
+            {ArtistRole.PERFORMER: ArtistRole.SOLOIST},
+            [(ArtistRole.SOLOIST, "tenor")],
+        ),
+        (
+            [
+                (ArtistRole.SOLOIST, None),
+                (ArtistRole.PERFORMER, None),
+                (ArtistRole.SOLOIST, "tenor"),
+            ],
+            {},
+            [(ArtistRole.SOLOIST, "tenor")],
+        ),
+        # a chorus master who conducts elsewhere is not shown as conductor for that task
+        (
+            [(ArtistRole.PERFORMER, "chorus master"), (ArtistRole.PERFORMER, None)],
+            {ArtistRole.PERFORMER: ArtistRole.CONDUCTOR},
+            [(ArtistRole.PERFORMER, "chorus master"), (ArtistRole.CONDUCTOR, None)],
+        ),
+    ],
+)
+def test_shown_credits(
+    roles: list[tuple[ArtistRole, str | None]],
+    refinements: dict[ArtistRole, ArtistRole],
+    expected: list[tuple[ArtistRole, str | None]],
+) -> None:
+    """
+    A performer credited generally and as soloist with an instrument shows once, as the soloist.
+
+    A credit naming a task, such as chorus master, keeps its role.
+    """
+    artist = ItemMapping(media_type=MediaType.ARTIST, item_id="7", provider="library", name="A")
+    track_credits = [Credit(artist=artist, role=role, instrument=x) for role, x in roles]
+
+    shown = _shown_credits(track_credits, {7: refinements})
+
+    assert [(x.role, x.instrument) for x in shown] == expected
+
+
+@pytest.fixture(scope="class", name="parts_library")
+async def parts_library_fixture(music_mass_class: MusicAssistant) -> _Library:
+    """Return a class-scoped library of two operas whose arias are parts of them."""
+    lib = await _new_library(music_mass_class, ("delibes", "bizet", "sutherland", "callas"))
+    await _add_work(lib, "Lakme", "delibes")
+    await _add_work(lib, "Flower Duet", "delibes", parent="Lakme")
+    await _add_work(lib, "Bell Song", "delibes", parent="Lakme")
+    # an opera without composers is filtered by those of its arias
+    await _add_work(lib, "Carmen", None)
+    await _add_work(lib, "Habanera", "bizet", parent="Carmen")
+    for key, work, soloist in (
+        ("Overture", "Lakme", "callas"),
+        ("Duet Sutherland", "Flower Duet", "sutherland"),
+        ("Duet Callas", "Flower Duet", "callas"),
+        ("Bell Sutherland", "Bell Song", "sutherland"),
+        ("Habanera Callas", "Habanera", "callas"),
+    ):
+        await _add_track(lib, key, work, soloist, role=ArtistRole.SOLOIST)
+    return lib
+
+
+class TestPartsOfWorks:
+    """The parts of a work, such as arias, are listed through the work they belong to."""
+
+    async def test_parts_count_in_their_work_row(self, parts_library: _Library) -> None:
+        """Only the operas are rows, each counting the recordings of its arias."""
+        rows = await parts_library.mass.music.classical.works()
+
+        assert {(x.work.name, x.recording_count) for x in rows} == {("Lakme", 4), ("Carmen", 1)}
+
+    @pytest.mark.parametrize(("composer", "expected"), [("delibes", "Lakme"), ("bizet", "Carmen")])
+    async def test_composer_filter_falls_back_to_the_parts(
+        self, parts_library: _Library, composer: str, expected: str
+    ) -> None:
+        """A work matches its own composers, or those of its parts when it has none."""
+        rows = await parts_library.mass.music.classical.works(
+            composer_id=parts_library.artist_id(composer)
+        )
+
+        assert [x.work.name for x in rows] == [expected]
+
+    async def test_performer_filter_matches_through_the_parts(
+        self, parts_library: _Library
+    ) -> None:
+        """A work matches a performer of one of its parts and counts only their recordings."""
+        rows = await parts_library.mass.music.classical.works(
+            performer_id=parts_library.artist_id("sutherland")
+        )
+
+        assert [(x.work.name, x.recording_count) for x in rows] == [("Lakme", 2)]
+
+    @pytest.mark.parametrize(("search", "expected"), [("habanera", "Carmen"), ("lakme", "Lakme")])
+    async def test_search_finds_the_work_of_a_part(
+        self, parts_library: _Library, search: str, expected: str
+    ) -> None:
+        """A search matching a part finds the work it belongs to."""
+        rows = await parts_library.mass.music.classical.works(search=search)
+
+        assert [x.work.name for x in rows] == [expected]
+
+    async def test_recordings_include_those_of_the_parts(self, parts_library: _Library) -> None:
+        """The recordings of a work are its own, then its parts', each with its own work."""
+        recordings = await parts_library.mass.music.classical.recordings(
+            parts_library.work_id("Lakme")
+        )
+
+        assert [x.work.name for x in recordings] == [
+            "Lakme",
+            "Bell Song",
+            "Flower Duet",
+            "Flower Duet",
+        ]
+
+    @pytest.mark.parametrize(
+        ("composer", "performer", "expected"),
+        [
+            (None, None, {"Lakme": ["Bell Song", "Flower Duet"], "Carmen": ["Habanera"]}),
+            ("delibes", None, {"Lakme": ["Bell Song", "Flower Duet"]}),
+            # all parts are named, also those the performer is not on
+            (None, "callas", {"Lakme": ["Bell Song", "Flower Duet"], "Carmen": ["Habanera"]}),
+        ],
+    )
+    async def test_rows_carry_their_part_names(
+        self,
+        parts_library: _Library,
+        composer: str | None,
+        performer: str | None,
+        expected: dict[str, list[str]],
+    ) -> None:
+        """A work row names all its parts in the library, ordered by name."""
+        rows = await parts_library.mass.music.classical.works(
+            composer_id=parts_library.artist_id(composer) if composer else None,
+            performer_id=parts_library.artist_id(performer) if performer else None,
+        )
+
+        assert {x.work.name: x.part_names for x in rows} == expected
+
+    async def test_recordings_carry_the_parent_work(self, parts_library: _Library) -> None:
+        """The recordings of a part carry the work it is a part of, the work's own carry none."""
+        recordings = await parts_library.mass.music.classical.recordings(
+            parts_library.work_id("Lakme")
+        )
+
+        assert [
+            (x.work.name, x.parent_work.name if x.parent_work else None) for x in recordings
+        ] == [
+            ("Lakme", None),
+            ("Bell Song", "Lakme"),
+            ("Flower Duet", "Lakme"),
+            ("Flower Duet", "Lakme"),
+        ]
+        [habanera] = await parts_library.mass.music.classical.recordings(
+            parts_library.work_id("Habanera")
+        )
+        assert habanera.parent_work is not None
+        assert habanera.parent_work.item_id == parts_library.work_id("Carmen")
+
+    async def test_composer_counts_a_work_with_parts_once(self, parts_library: _Library) -> None:
+        """A composer's work count holds the opera once, its recordings those of the arias."""
+        [row] = await parts_library.mass.music.classical.composers(
+            artist_id=parts_library.artist_id("delibes")
+        )
+
+        assert (row.work_count, row.recording_count) == (1, 4)
 
 
 @pytest.fixture(scope="class", name="main_artist_library")

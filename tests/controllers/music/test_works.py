@@ -241,7 +241,7 @@ async def test_work_summary(mass: MusicAssistant) -> None:
     parent = await _add_work(mass, f"Summary Parent {_token()}", [composer])
     original = await _add_work(mass, f"Summary Original {_token()}", [composer])
     token = _token()
-    await _add_work(
+    work = await _add_work(
         mass,
         f"Summary Work {token}",
         [composer],
@@ -252,7 +252,12 @@ async def test_work_summary(mass: MusicAssistant) -> None:
         arrangement_of=UniqueList([ItemMapping.from_item(original)]),
     )
 
-    [summary] = await mass.music.works.library_items(search=token)
+    # a part is listed through its parent, so its summary is fetched on its own
+    [summary] = await mass.music.works.get_library_items_by_query(
+        extra_query_parts=["works.item_id = :item_id"],
+        extra_query_params={"item_id": int(work.item_id)},
+        summary=True,
+    )
 
     assert isinstance(summary, WorkSummary)
     assert _ids(summary.composers) == [composer.item_id]
@@ -682,6 +687,37 @@ def _track_work_ids(track: Track) -> set[str]:
     return {value for id_type, value in track.external_ids if id_type == ExternalID.MB_WORK}
 
 
+async def test_track_overwrite_naming_its_movement_keeps_its_place(mass: MusicAssistant) -> None:
+    """An overwrite naming the movement a track performs keeps its work, number and name."""
+    act, _first, second = await _add_act(mass)
+    track = await _add_track(mass, act, movement_number=2, movement_name="No. 2")
+    before = await _library_work_ids(mass)
+
+    stored = await _overwrite_with_tag_work(mass, track, second.upper())
+
+    assert stored.work is not None
+    assert stored.work.item_id == act.item_id
+    assert (stored.movement_number, stored.movement_name) == (2, "No. 2")
+    assert await _library_work_ids(mass) == before
+    assert {x.casefold() for x in _track_work_ids(stored)} == {second}
+
+
+async def test_track_overwrite_naming_its_own_work_takes_the_movement_of_the_update(
+    mass: MusicAssistant,
+) -> None:
+    """An overwrite naming the track's own work keeps it there with the update's movement."""
+    act, _first, _second = await _add_act(mass)
+    track = await _add_track(mass, act, movement_number=2, movement_name="No. 2")
+    assert act.mbid is not None
+
+    stored = await _overwrite_with_tag_work(mass, track, act.mbid)
+
+    assert stored.work is not None
+    assert stored.work.item_id == act.item_id
+    assert (stored.movement_number, stored.movement_name) == (5, "Tag name")
+    assert not _track_work_ids(stored)
+
+
 async def test_track_of_a_work_gets_its_composers(mass: MusicAssistant) -> None:
     """A track of a work credits the work's composers in order, unless it credits its own."""
     first = await _add_artist(mass, "First")
@@ -824,7 +860,7 @@ async def test_cleanup_removes_works_without_tracks(mass: MusicAssistant) -> Non
 
     await mass.music._cleanup_database()
 
-    remaining = {x.item_id for x in await mass.music.works.library_items(limit=100000)}
+    remaining = await _library_work_ids(mass)
     assert {played.item_id, parent.item_id, child.item_id} <= remaining
     assert {source.item_id, arrangement.item_id} <= remaining
     assert empty.item_id not in remaining
@@ -915,12 +951,10 @@ async def test_merge_moves_everything_onto_the_oldest_work(mass: MusicAssistant)
         DB_TABLE_WORK_ARTISTS, {"work_id": int(target.item_id), "role": "lyricist"}
     )
     assert [row["artist_id"] for row in rows] == [int(lyricist.item_id)]
+    assert _ids(merged.parts) == [child.item_id]
     assert _ids(merged.arrangements) == [arranged.item_id]
     assert _ids(merged.arrangement_of) == [original.item_id]
     assert favorite is True
-    stored_child = await mass.music.works.get_library_item(child.item_id)
-    assert stored_child.parent_work is not None
-    assert stored_child.parent_work.item_id == target.item_id
     stored_track = await mass.music.tracks.get_library_item(track.item_id)
     assert stored_track.work is not None
     assert stored_track.work.item_id == target.item_id
@@ -1012,14 +1046,14 @@ async def test_merge_by_musicbrainz_id_keeps_the_oldest_with_tracks(
 
 
 # --------------------------------------------------------------------------- #
-#  related works                                                               #
+#  related works and parts                                                     #
 # --------------------------------------------------------------------------- #
 
 
 async def test_full_work_lists_its_related_works_with_their_composers(
     mass: MusicAssistant,
 ) -> None:
-    """The full work carries its originals and arrangements, each with its composers."""
+    """The full work carries its originals, arrangements and parts, each with its composers."""
     composer = await _add_artist(mass, "Mussorgsky")
     arranger = await _add_artist(mass, "Ravel")
     original = await _add_work(mass, f"Pictures {_token()}", [composer])
@@ -1029,6 +1063,9 @@ async def test_full_work_lists_its_related_works_with_their_composers(
         [arranger],
         arrangement_of=UniqueList([ItemMapping.from_item(original)]),
     )
+    part = await _add_work(
+        mass, f"Promenade {_token()}", [composer], parent_work=ItemMapping.from_item(original)
+    )
 
     stored = await mass.music.get_item(
         MediaType.WORK, original.item_id, "library", allow_update_metadata=False
@@ -1037,5 +1074,27 @@ async def test_full_work_lists_its_related_works_with_their_composers(
 
     assert isinstance(stored, Work)
     assert _linked(stored.arrangements) == [(arrangement.item_id, [arranger.item_id])]
+    assert _linked(stored.parts) == [(part.item_id, [composer.item_id])]
     assert _linked(stored_arrangement.arrangement_of) == [(original.item_id, [composer.item_id])]
-    assert all(isinstance(x, Work) for x in stored.arrangements)
+    assert all(isinstance(x, Work) for x in (*stored.arrangements, *stored.parts))
+
+
+async def test_parts_are_listed_through_their_work(mass: MusicAssistant) -> None:
+    """
+    A part is no row of its own; its work is listed and found by a search for the part.
+
+    A work whose parts have no tracks in the library is not listed.
+    """
+    token = _token()
+    opera = await _add_work(mass, f"Opera {token}")
+    aria = await _add_work(mass, f"Aria {token}", parent_work=ItemMapping.from_item(opera))
+    await _add_track(mass, aria)
+    lone = await _add_work(mass, f"Lone {token}")
+    unheard = await _add_work(mass, f"Unheard opera {token}")
+    await _add_work(mass, f"Unheard aria {token}", parent_work=ItemMapping.from_item(unheard))
+
+    listed = await mass.music.works.library_items(search=token)
+    by_part = await mass.music.works.library_items(search=f"Aria {token}")
+
+    assert sorted(_ids(listed)) == sorted([opera.item_id, lone.item_id])
+    assert _ids(by_part) == [opera.item_id]
