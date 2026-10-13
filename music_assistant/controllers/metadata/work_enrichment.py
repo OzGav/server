@@ -7,6 +7,9 @@ and composers. Every library work is a MusicBrainz work, found through its own
 MusicBrainz id. The composers MusicBrainz names for a work without any are taken from the
 library's own artists, and are credited on its tracks without a composer too.
 
+Library works that turn out to be the same MusicBrainz work are merged into the one holding
+the most tracks.
+
 A work looked up for the first time takes its MusicBrainz name, in the user's language, and
 lists the catalog numbers its name gives first.
 A work refreshed by hand is looked up again as on its first lookup, taking MusicBrainz's
@@ -127,14 +130,14 @@ class WorkEnrichmentMixin:
         given = work
         # MusicBrainz answers a merged work's old id with the work it was merged into
         await self._follow_merged_id(work, hierarchy[0].id)
+        # the caller reads the outcome off the work it passed in, which a merge may remove
         _fill_work_from_musicbrainz(work, hierarchy, reload)
+        if survivor := await self._merge_duplicate_works(work, hierarchy[0].id):
+            work = survivor
+            _fill_work_from_musicbrainz(work, hierarchy, reload)
         new_composers: list[Artist] = []
         if not work.composers:
-            new_composers = [
-                artist
-                for relation in _composer_relations(hierarchy)
-                if relation.artist and (artist := await self._get_library_composer(relation.artist))
-            ]
+            new_composers = await self._get_library_composers(_composer_relations(hierarchy))
             work.composers = UniqueList(new_composers)
         await works.update_from_musicbrainz(work, replace=reload)
         if first_lookup:
@@ -175,6 +178,16 @@ class WorkEnrichmentMixin:
             hierarchy.append(parent_work)
         return hierarchy
 
+    async def _merge_duplicate_works(self, work: Work, mbid: str) -> Work | None:
+        """Merge the library works that are a given MusicBrainz work, return the survivor if any."""
+        works = self.mass.music.works
+        holders = await works.get_library_items_by_external_id(mbid, ExternalID.MB_WORK, limit=None)
+        if all(x.item_id == work.item_id for x in holders):
+            return None
+        return await works.get_library_item(
+            await works.merge_library_works_by_mbid(int(work.item_id), mbid)
+        )
+
     async def _take_musicbrainz_name(
         self, work: Work, mb_work: MusicBrainzWork, reload: bool = False
     ) -> None:
@@ -193,6 +206,16 @@ class WorkEnrichmentMixin:
             named,
             _catalog_numbers(mb_work, named) or parse_catalog_numbers(named),
         )
+
+    async def _get_library_composers(
+        self, mb_composers: Sequence[MusicBrainzRelation]
+    ) -> list[Artist]:
+        """Return the library artists of MusicBrainz composers, leaving out those it lacks."""
+        return [
+            artist
+            for relation in mb_composers
+            if relation.artist and (artist := await self._get_library_composer(relation.artist))
+        ]
 
     async def _get_library_composer(self, mb_artist: MusicBrainzArtist) -> Artist | None:
         """Return the library artist of a MusicBrainz composer, None when the library has none."""

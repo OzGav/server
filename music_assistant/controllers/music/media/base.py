@@ -3524,31 +3524,11 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             finally:
                 source_item.provider_mappings = source_mappings
 
-            await self.mass.music.database.execute_write(
-                f"""
-                UPDATE {self.db_table}
-                SET play_count = CASE item_id
-                    WHEN :target_id THEN :merged_play_count
-                    WHEN :source_id THEN 0
-                END
-                WHERE item_id IN (:target_id, :source_id)
-                """,
-                {
-                    "target_id": target_id,
-                    "source_id": source_id,
-                    "merged_play_count": int(target_row["play_count"] or 0)
-                    + int(source_row["play_count"] or 0),
-                },
-            )
+            await self._merge_play_statistics(target_row, source_row)
             await self.mass.music.database.update(
                 self.db_table,
                 {"item_id": target_id},
-                {
-                    "last_played": max(
-                        int(target_row["last_played"] or 0), int(source_row["last_played"] or 0)
-                    ),
-                    "timestamp_added": min(timestamps_added) if timestamps_added else 0,
-                },
+                {"timestamp_added": min(timestamps_added) if timestamps_added else 0},
             )
             await self._merge_genre_mappings(target_id, source_id)
             await self._merge_library_item_references(target_id, source_id)
@@ -3659,6 +3639,36 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             self.mass.signal_event(EventType.MEDIA_ITEM_DELETED, source_item.uri, source_item)
             self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, merged_item.uri, merged_item)
         return merged_item
+
+    async def _merge_play_statistics(
+        self, target_row: Mapping[str, Any], source_row: Mapping[str, Any]
+    ) -> None:
+        """Add the play count of a merged item to the target's and keep the latest play."""
+        await self.mass.music.database.execute_write(
+            f"""
+            UPDATE {self.db_table}
+            SET play_count = CASE item_id
+                WHEN :target_id THEN :merged_play_count
+                WHEN :source_id THEN 0
+            END
+            WHERE item_id IN (:target_id, :source_id)
+            """,
+            {
+                "target_id": target_row["item_id"],
+                "source_id": source_row["item_id"],
+                "merged_play_count": int(target_row["play_count"] or 0)
+                + int(source_row["play_count"] or 0),
+            },
+        )
+        await self.mass.music.database.update(
+            self.db_table,
+            {"item_id": target_row["item_id"]},
+            {
+                "last_played": max(
+                    int(target_row["last_played"] or 0), int(source_row["last_played"] or 0)
+                )
+            },
+        )
 
     async def _validate_library_item_merge(self, target: ItemCls, source: ItemCls) -> None:
         """Validate that the target and source items can be merged."""
@@ -3822,6 +3832,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                 (DB_TABLE_TRACK_ARTISTS, "track_id"),
                 (DB_TABLE_TRACK_CREDITS, "track_id"),
             )
+        if self.media_type == MediaType.WORK:
+            return ((DB_TABLE_WORK_ARTISTS, "work_id"),)
         return ()
 
     async def _merge_library_item_references(self, target_id: int, source_id: int) -> None:
