@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from music_assistant_models.enums import AlbumType, LinkType, MediaType, ProviderFeature
+from music_assistant_models.enums import AlbumType, LinkType, MediaType, ProviderFeature, WorkType
 
 LUCENE_SPECIAL = r'([+\-&|!(){}\[\]\^"~*?:\\\/])'
 
@@ -99,3 +99,37 @@ PRIMARY_TYPE_MAPPING: dict[str, AlbumType] = {
     "Single": AlbumType.SINGLE,
     "EP": AlbumType.EP,
 }
+
+# MusicBrainz work types to work types; any other type (e.g. "Song") is WorkType.OTHER.
+WORK_TYPE_MAPPING: dict[str, WorkType] = {
+    "Aria": WorkType.ARIA,
+    "Ballet": WorkType.BALLET,
+    "Cantata": WorkType.CANTATA,
+    "Concerto": WorkType.CONCERTO,
+    "Étude": WorkType.ETUDE,
+    "Incidental music": WorkType.INCIDENTAL_MUSIC,
+    "Madrigal": WorkType.MADRIGAL,
+    "Mass": WorkType.MASS,
+    "Motet": WorkType.MOTET,
+    "Opera": WorkType.OPERA,
+    "Operetta": WorkType.OPERETTA,
+    "Oratorio": WorkType.ORATORIO,
+    "Overture": WorkType.OVERTURE,
+    "Partita": WorkType.PARTITA,
+    "Quartet": WorkType.QUARTET,
+    "Sonata": WorkType.SONATA,
+    "Song-cycle": WorkType.SONG_CYCLE,
+    "Suite": WorkType.SUITE,
+    "Symphonic poem": WorkType.SYMPHONIC_POEM,
+    "Symphony": WorkType.SYMPHONY,
+    "Zarzuela": WorkType.ZARZUELA,
+}
+
+# The language MusicBrainz gives a work without lyrics.
+NO_LYRICS_LANGUAGE = "zxx"
+
+# The series type MusicBrainz files catalog numbers (BWV, opus, Deutsch, ...) under.
+CATALOG_SERIES_TYPE = "Catalogue"
+
+# The work attribute type MusicBrainz gives the key of a work as, e.g. "C minor".
+KEY_ATTRIBUTE_TYPE = "Key"

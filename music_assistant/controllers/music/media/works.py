@@ -143,11 +143,20 @@ class WorksController(MediaControllerBase[Work]):
         :param recursive: Unused for works, kept for base-class compatibility.
         """
         db_id = int(item_id)  # ensure integer
+        track_rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT item_id FROM {DB_TABLE_TRACKS} WHERE work_id = :db_id",
+            {"db_id": db_id},
+            limit=0,
+        )
         await super().remove_item_from_library(db_id)
         # the movement fields stay on the tracks as they describe the recording
         await self.mass.music.database.execute_write(
             f"UPDATE {DB_TABLE_TRACKS} SET work_id = NULL WHERE work_id = :db_id",
             {"db_id": db_id},
+        )
+        # the work's type may have been what made its tracks classical
+        await self.mass.music.classification.update(
+            track_ids=[int(row["item_id"]) for row in track_rows]
         )
         await self.mass.music.database.execute_write(
             f"UPDATE {DB_TABLE_WORKS} SET parent_work_id = NULL WHERE parent_work_id = :db_id",
@@ -286,12 +295,15 @@ class WorksController(MediaControllerBase[Work]):
         new_parent_id = (
             await self.get_library_work_id(update.parent_work) if update.parent_work else None
         )
+        work_type = _merge_value(cur_item.work_type, update.work_type, overwrite)
         # like the composers, a source without a value keeps the stored one
         if overwrite:
             catalog_numbers = update.catalog_numbers or cur_item.catalog_numbers
             parent_work_id = new_parent_id or cur_parent_id
         else:
-            catalog_numbers = list(dict.fromkeys(cur_item.catalog_numbers + update.catalog_numbers))
+            catalog_numbers = _unique_catalog_numbers(
+                cur_item.catalog_numbers + update.catalog_numbers
+            )
             parent_work_id = cur_parent_id or new_parent_id
         await self.mass.music.database.update(
             self.db_table,
@@ -303,7 +315,7 @@ class WorksController(MediaControllerBase[Work]):
                 "catalog_numbers": serialize_to_json(catalog_numbers),
                 "catalog_sort": _catalog_sort_key(catalog_numbers),
                 "name_sort": _natural_sort_key(create_safe_string(name, True, True)),
-                "work_type": _merge_value(cur_item.work_type, update.work_type, overwrite),
+                "work_type": work_type,
                 "composition_year": _merge_value(
                     cur_item.composition_year, update.composition_year, overwrite
                 ),
@@ -324,6 +336,8 @@ class WorksController(MediaControllerBase[Work]):
         composers = update.composers if overwrite else cur_item.composers + update.composers
         await self._set_composers(db_id, composers, overwrite=overwrite)
         await self._set_arrangements(db_id, update.arrangement_of, overwrite=overwrite)
+        if work_type != cur_item.work_type:
+            await self.mass.music.classification.update_item(self.media_type, db_id)
         self.logger.debug("updated %s in database: (id %s)", update.name, db_id)
 
     async def _set_composers(
@@ -437,6 +451,15 @@ class WorksController(MediaControllerBase[Work]):
 def _catalog_sort_key(catalog_numbers: list[str]) -> str | None:
     """Return the natural sort key of the first catalogue number, None when there is none."""
     return _natural_sort_key(catalog_numbers[0].casefold()) if catalog_numbers else None
+
+
+def _unique_catalog_numbers(catalog_numbers: list[str]) -> list[str]:
+    """Return the catalog numbers without repeats, keeping the first spelling of each."""
+    # spellings differing only in case, dots or spacing ("Op. 67", "op.67") are one number
+    unique: dict[str, str] = {}
+    for number in catalog_numbers:
+        unique.setdefault(re.sub(r"[.\s]", "", number.casefold()), number)
+    return list(unique.values())
 
 
 def _natural_sort_key(value: str) -> str:

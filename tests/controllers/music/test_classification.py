@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
-from music_assistant_models.enums import AlbumType, ArtistRole, MediaType
+from music_assistant_models.enums import AlbumType, ArtistRole, MediaType, WorkType
 from music_assistant_models.media_items import (
     Album,
     Artist,
@@ -24,6 +24,7 @@ from music_assistant.constants import (
     DB_TABLE_ARTISTS,
     DB_TABLE_GENRES,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORKS,
 )
 from music_assistant.mass import MusicAssistant
 
@@ -127,7 +128,7 @@ async def _add_track(
     )
 
 
-async def _add_work(mass: MusicAssistant) -> Work:
+async def _add_work(mass: MusicAssistant, work_type: WorkType | None = None) -> Work:
     """Add a work to the library."""
     return await mass.music.works.add_item_to_library(
         Work(
@@ -135,6 +136,7 @@ async def _add_work(mass: MusicAssistant) -> Work:
             provider="works_source",
             name=f"Work {_token()}",
             provider_mappings=set(),
+            work_type=work_type,
         )
     )
 
@@ -180,6 +182,81 @@ async def test_track_with_work_is_not_classical_by_that_alone(mass: MusicAssista
     track = await _add_track(mass, work=ItemMapping.from_item(work))
 
     assert not await _is_classical(mass, track)
+
+
+@pytest.mark.parametrize(
+    ("work_type", "expected"), [(WorkType.SYMPHONY, True), (WorkType.OTHER, False)]
+)
+async def test_track_of_a_typed_work_is_classical(
+    mass: MusicAssistant, work_type: WorkType, expected: bool
+) -> None:
+    """A track linked to a work of a classical type is classical, one of type other is not."""
+    work = await _add_work(mass, work_type)
+    track = await _add_track(mass, work=ItemMapping.from_item(work))
+
+    assert await _is_classical(mass, track) is expected
+
+
+async def test_album_majority_counts_tracks_of_typed_works(mass: MusicAssistant) -> None:
+    """Tracks classical by the type of their work count toward their album's majority."""
+    work = ItemMapping.from_item(await _add_work(mass, WorkType.CONCERTO))
+    album = await _add_album(mass)
+    await _add_track(mass, album, 1, work=work)
+    await _add_track(mass, album, 2, work=work)
+    plain = await _add_track(mass, album, 3)
+
+    assert await _is_classical(mass, album)
+    assert await _is_classical(mass, plain)
+
+
+async def test_work_type_change_reclassifies_its_tracks(mass: MusicAssistant) -> None:
+    """Giving a work a classical type through an update makes its tracks and artists classical."""
+    work = await _add_work(mass)
+    track = await _add_track(mass, work=ItemMapping.from_item(work))
+    assert not await _is_classical(mass, track)
+
+    await mass.music.works.update_item_in_library(
+        work.item_id,
+        Work(
+            item_id=work.item_id,
+            provider="library",
+            name=work.name,
+            provider_mappings=set(),
+            work_type=WorkType.SYMPHONY,
+        ),
+    )
+
+    assert await _is_classical(mass, track)
+    assert await _is_classical(mass, track.artists[0])  # type: ignore[arg-type]
+
+
+async def test_removing_a_typed_work_reclassifies_its_tracks(mass: MusicAssistant) -> None:
+    """Tracks classical only by the type of their work stop being classical with it."""
+    work = await _add_work(mass, WorkType.SYMPHONY)
+    track = await _add_track(mass, work=ItemMapping.from_item(work))
+    assert await _is_classical(mass, track)
+
+    await mass.music.works.remove_item_from_library(work.item_id)
+
+    assert not await _is_classical(mass, track)
+
+
+async def test_update_item_of_a_work_reclassifies_its_tracks(mass: MusicAssistant) -> None:
+    """A changed work recomputes the classical flags of the tracks linked to it."""
+    work = await _add_work(mass)
+    track = await _add_track(mass, work=ItemMapping.from_item(work))
+    other_work = await _add_work(mass)
+    other = await _add_track(mass, work=ItemMapping.from_item(other_work))
+    # a type written straight to the database, past the classification of a work update
+    await mass.music.database.execute_write(
+        f"UPDATE {DB_TABLE_WORKS} SET work_type = :work_type WHERE item_id IN (:work, :other)",
+        {"work_type": WorkType.MASS.value, "work": work.item_id, "other": other_work.item_id},
+    )
+
+    await mass.music.classification.update_item(MediaType.WORK, int(work.item_id))
+
+    assert await _is_classical(mass, track)
+    assert not await _is_classical(mass, other)
 
 
 async def test_track_in_classical_genre_is_classical(mass: MusicAssistant) -> None:

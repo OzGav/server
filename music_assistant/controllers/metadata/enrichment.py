@@ -15,7 +15,14 @@ from time import time
 from typing import TYPE_CHECKING, cast
 
 import aiohttp
-from music_assistant_models.enums import AlbumType, ExternalID, MediaType, ProviderFeature
+from music_assistant_models.enums import (
+    AlbumType,
+    ArtistEntityType,
+    ArtistRole,
+    ExternalID,
+    MediaType,
+    ProviderFeature,
+)
 from music_assistant_models.errors import (
     MediaNotFoundError,
     MusicAssistantError,
@@ -26,7 +33,13 @@ from music_assistant_models.errors import (
 from music_assistant_models.helpers import get_global_cache_value
 from music_assistant_models.media_items import Album, Artist, MediaItemImage, Track
 
-from music_assistant.constants import VARIOUS_ARTISTS_MBID, VARIOUS_ARTISTS_NAME
+from music_assistant.constants import (
+    DB_TABLE_ARTISTS,
+    DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_WORK_ARTISTS,
+    VARIOUS_ARTISTS_MBID,
+    VARIOUS_ARTISTS_NAME,
+)
 from music_assistant.controllers.music.helpers import (
     discogs_external_id,
     fill_track_from_recording,
@@ -34,6 +47,7 @@ from music_assistant.controllers.music.helpers import (
 from music_assistant.helpers.compare import compare_strings
 from music_assistant.helpers.external_ids import is_valid_barcode
 from music_assistant.models.music_provider import MusicProvider
+from music_assistant.providers.musicbrainz.models import release_year
 from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider, relation_urls
 
 from .constants import (
@@ -42,12 +56,14 @@ from .constants import (
     REFRESH_INTERVAL,
     REFRESH_RETRY_INTERVAL,
 )
+from .helpers import composer_period
 
 if TYPE_CHECKING:
     import logging
     from collections.abc import Iterable, Sequence
 
     from music_assistant_models.config_entries import CoreConfig
+    from music_assistant_models.enums import Period
     from music_assistant_models.media_items import Audiobook, Playlist, Podcast
     from music_assistant_models.unique_list import UniqueList
 
@@ -210,6 +226,9 @@ class MetadataEnrichmentMixin:
                 description_candidates, prev_description, prev_description_language
             )
         )
+        # a period from the tags or genres is kept
+        if not artist.period and (period := await self._composer_period(artist)):
+            artist.period = period
 
         # update final item in library database
         # set timestamp, used to determine when this function was last called
@@ -758,6 +777,30 @@ class MetadataEnrichmentMixin:
             ref_tracks_str,
         )
         return None
+
+    async def _composer_period(self, artist: Artist) -> Period | None:
+        """Return the period of a classical composer from their life span, else None."""
+        life_span = artist.metadata.life_span
+        if (
+            artist.metadata.artist_entity_type != ArtistEntityType.PERSON
+            or not life_span
+            or not (birth_year := release_year(life_span.begin))
+        ):
+            return None
+        death_year = release_year(life_span.end)
+        if life_span.ended and not death_year:
+            return None  # died in an unknown year, so their working life is unknown too
+        credited = "WHERE artist_id = :artist_id AND role = :composer"
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT is_classical = 1 AND (EXISTS (SELECT 1 FROM {DB_TABLE_TRACK_ARTISTS} "
+            f"{credited}) OR EXISTS (SELECT 1 FROM {DB_TABLE_WORK_ARTISTS} {credited})) "
+            f"AS is_classical_composer FROM {DB_TABLE_ARTISTS} WHERE item_id = :artist_id",
+            {"artist_id": int(artist.item_id), "composer": ArtistRole.COMPOSER.value},
+            limit=0,
+        )
+        if not rows or not rows[0]["is_classical_composer"]:
+            return None
+        return composer_period(birth_year, death_year)
 
 
 def _fill_album_from_release(
