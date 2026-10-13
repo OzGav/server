@@ -2686,6 +2686,29 @@ def test_work_parent_relation_is_the_backward_parts_relation() -> None:
     assert _work("symphony_5").parent_relation is None
 
 
+def test_work_arrangement_relations_point_at_its_arrangements() -> None:
+    """The forward arrangement relations of an original name its arrangements."""
+    work = _work("symphony_5")
+
+    assert [x.work.id for x in work.arrangement_relations if x.work] == [
+        "f47df2ea-0671-4466-88f8-38a9d936989b"
+    ]
+    assert work.arrangement_of_relations == []
+
+
+@pytest.mark.parametrize("relation_type", ["arrangement", "orchestration"])
+def test_work_arrangement_of_relations_point_at_its_originals(relation_type: str) -> None:
+    """The backward arrangement and orchestration relations of a work name its originals."""
+    data = _work_lookup("symphony_5_movement_1")
+    original = {"id": SYMPHONY_5_MBID, "title": "Symphony no. 5 in C minor, op. 67"}
+    data["relations"].append({"type": relation_type, "direction": "backward", "work": original})
+    work = MusicBrainzWork.from_raw(data)
+
+    assert [x.work.id for x in work.arrangement_of_relations if x.work] == [SYMPHONY_5_MBID]
+    # the arrangement of the movement itself stays a forward relation
+    assert len(work.arrangement_relations) == 1
+
+
 def test_work_composer_relations_carry_the_composer_and_years() -> None:
     """Only composer relations count, each with its composer and its years."""
     composers = _work("st_matthew_passion").composer_relations

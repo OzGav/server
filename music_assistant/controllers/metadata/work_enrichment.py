@@ -8,7 +8,8 @@ MusicBrainz id. The composers MusicBrainz names for a work without any are taken
 library's own artists, and are credited on its tracks without a composer too.
 
 Library works that turn out to be the same MusicBrainz work are merged into the one holding
-the most tracks.
+the most tracks. A work gets linked to the library works MusicBrainz names as its
+originals or arrangements.
 
 A work looked up for the first time takes its MusicBrainz name, in the user's language.
 A work refreshed by hand is looked up again as on its first lookup, taking MusicBrainz's
@@ -28,6 +29,7 @@ from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import Artist, UniqueList, Work
 
 from music_assistant.constants import (
+    DB_TABLE_WORK_ARRANGEMENTS,
     DB_TABLE_WORKS,
 )
 from music_assistant.providers.musicbrainz.api_client import fresh_reads
@@ -145,6 +147,7 @@ class WorkEnrichmentMixin:
         await self._store_work(work, reload)
         if first_lookup:
             await self._take_musicbrainz_name(work, hierarchy[0], reload)
+        await self._link_arrangements(int(work.item_id), hierarchy[0], replace=reload)
         if new_composers:
             await self.mass.music.tracks.credit_work_composers(int(work.item_id))
         else:
@@ -216,6 +219,39 @@ class WorkEnrichmentMixin:
         return await works.get_library_item(
             await works.merge_library_works_by_mbid(int(work.item_id), mbid)
         )
+
+    async def _link_arrangements(
+        self, work_id: int, mb_work: MusicBrainzWork, replace: bool = False
+    ) -> None:
+        """
+        Link a work to the library works MusicBrainz names as its originals or arrangements.
+
+        :param work_id: Library id of the work.
+        :param mb_work: Its MusicBrainz work, with its work relations.
+        :param replace: Drop the links of the work MusicBrainz no longer names.
+        """
+        works = self.mass.music.works
+        if replace:
+            await self.mass.music.database.execute_write(
+                f"DELETE FROM {DB_TABLE_WORK_ARRANGEMENTS} "
+                "WHERE work_id = :work_id OR source_work_id = :work_id",
+                {"work_id": work_id},
+            )
+        for relation in mb_work.arrangement_of_relations:
+            if original_id := await self._get_library_work_id(relation):
+                await works.add_arrangement(work_id, original_id)
+        for relation in mb_work.arrangement_relations:
+            if arrangement_id := await self._get_library_work_id(relation):
+                await works.add_arrangement(arrangement_id, work_id)
+
+    async def _get_library_work_id(self, relation: MusicBrainzRelation) -> int | None:
+        """Return the id of the library work a MusicBrainz work relation points at, if any."""
+        if not relation.work:
+            return None
+        work = await self.mass.music.works.get_library_item_by_external_id(
+            relation.work.id, ExternalID.MB_WORK
+        )
+        return int(work.item_id) if work else None
 
     async def _take_musicbrainz_name(
         self, work: Work, mb_work: MusicBrainzWork, reload: bool = False
