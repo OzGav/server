@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from mashumaro import DataClassDictMixin
+from music_assistant_models.enums import WorkType
+
+from .constants import (
+    CATALOG_SERIES_TYPE,
+    KEY_ATTRIBUTE_TYPE,
+    NO_LYRICS_LANGUAGE,
+    WORK_TYPE_MAPPING,
+)
+
+# a colon, comma or full stop between the segments of a work title
+_TITLE_SEPARATOR = re.compile(r"\s*[:,.]")
+# a colon, or the full stop after a Roman number such as an act's, and the space after it,
+# closing a shared start of two titles
+_ENDING_SEPARATOR = re.compile(r"(?::|\b[IVXL]+\.)\s+$")
 
 
 def replace_hyphens(
@@ -29,6 +44,31 @@ def release_year(date: str | None) -> int | None:
     :return: The year, or None if the date is absent or unparsable.
     """
     return int(year) if date and (year := date[:4]).isdigit() else None
+
+
+def part_name(title: str, parent_title: str) -> str:
+    """Return the title of a part without the start it shares with the title of its work, if any."""
+    shared = next(
+        (
+            index
+            for index, (char, parent_char) in enumerate(zip(title, parent_title, strict=False))
+            if char.casefold() != parent_char.casefold()
+        ),
+        min(len(title), len(parent_title)),
+    )
+    # a start shared with only part of the work's title ends where both titles go on with a
+    # separator, as "L'Arlésienne Suite no. 1" does in "L'Arlésienne Suite no. 1: III.
+    # Adagietto" and "L'Arlésienne Suite no. 1, op. 23bis", or right after one, as "Carmina
+    # Burana: " in "Carmina Burana: II. In Taberna" and "Carmina Burana: Cantiones profanæ ..."
+    if not shared or (
+        shared < len(parent_title)
+        and not (
+            _TITLE_SEPARATOR.match(title, shared) and _TITLE_SEPARATOR.match(parent_title, shared)
+        )
+        and not _ENDING_SEPARATOR.search(title[:shared])
+    ):
+        return title
+    return title[shared:].lstrip(" :,.-") or title
 
 
 @dataclass
@@ -71,14 +111,44 @@ class MusicBrainzUrl(DataClassDictMixin):
 
 
 @dataclass
+class MusicBrainzSeries(DataClassDictMixin):
+    """Model for a (basic) Series object embedded in a MusicBrainz relation."""
+
+    id: str
+    name: str
+
+    # optional fields
+    type: str | None = None
+
+
+@dataclass
 class MusicBrainzRelation(DataClassDictMixin):
     """Model for a Relation object from MusicBrainz."""
 
     type: str
 
-    # optional - only populated on url-rels (work-rels and friends have other targets)
+    # optional - only the target matching the relation's target type is populated
     url: MusicBrainzUrl | None = None
+    artist: MusicBrainzArtist | None = None
+    work: MusicBrainzWork | None = None
+    series: MusicBrainzSeries | None = None
+    direction: str | None = None
+    begin: str | None = None
+    end: str | None = None
     ended: bool = False
+    attributes: list[str] = field(default_factory=list)
+    attribute_values: dict[str, str] = field(default_factory=dict)
+    ordering_key: int | None = None
+
+    @property
+    def begin_year(self) -> int | None:
+        """Return the year the relation began, if MusicBrainz knows it."""
+        return release_year(self.begin)
+
+    @property
+    def end_year(self) -> int | None:
+        """Return the year the relation ended, if MusicBrainz knows it."""
+        return release_year(self.end)
 
 
 @dataclass
@@ -251,6 +321,119 @@ class MusicBrainzRelease(DataClassDictMixin):
         if TYPE_CHECKING:
             alt_data = cast("dict[str, Any]", alt_data)
         return MusicBrainzRelease.from_dict(alt_data)
+
+
+@dataclass
+class MusicBrainzWorkAttribute(DataClassDictMixin):
+    """Model for a work attribute from MusicBrainz, such as the key a work is in."""
+
+    type: str
+    value: str
+
+
+@dataclass
+class MusicBrainzWork(DataClassDictMixin):
+    """Model for a (basic) Work object from MusicBrainz."""
+
+    id: str
+    title: str
+
+    # optional fields
+    type: str | None = None
+    disambiguation: str | None = None
+    languages: list[str] = field(default_factory=list)
+    attributes: list[MusicBrainzWorkAttribute] = field(default_factory=list)
+    relations: list[MusicBrainzRelation] = field(default_factory=list)
+    aliases: list[MusicBrainzAlias] = field(default_factory=list)
+
+    @classmethod
+    def from_raw(cls, data: Any) -> MusicBrainzWork:
+        """Instantiate object from raw api data."""
+        alt_data = replace_hyphens(data)
+        if TYPE_CHECKING:
+            alt_data = cast("dict[str, Any]", alt_data)
+        return MusicBrainzWork.from_dict(alt_data)
+
+    @property
+    def work_type(self) -> WorkType | None:
+        """Return the type of the work, or None if MusicBrainz has no type for it."""
+        if not self.type:
+            return None
+        return WORK_TYPE_MAPPING.get(self.type, WorkType.OTHER)
+
+    @property
+    def language(self) -> str | None:
+        """Return the (first) language of the work's lyrics, or None if it has no lyrics."""
+        if not self.languages or self.languages[0] == NO_LYRICS_LANGUAGE:
+            return None
+        return self.languages[0]
+
+    @property
+    def parent_relation(self) -> MusicBrainzRelation | None:
+        """
+        Return the relation to the work this work is a part of, if any.
+
+        The relation carries the parent as its ``work`` and the position of this part
+        within the parent as its ``ordering_key``. Of a part of several works, such as of
+        a work and of an edition of it, the first one MusicBrainz lists is returned.
+        """
+        return next(iter(self.parent_relations), None)
+
+    @property
+    def parent_relations(self) -> list[MusicBrainzRelation]:
+        """Return the relations to the works this work is a part of, as MusicBrainz lists them."""
+        return [
+            relation
+            for relation in self.relations
+            if relation.type == "parts" and relation.direction == "backward" and relation.work
+        ]
+
+    @property
+    def composer_relations(self) -> list[MusicBrainzRelation]:
+        """
+        Return the composer relations of the work, each carrying the composer as ``artist``.
+
+        Additional composers, such as one who completed the work, and placeholder artists,
+        such as [traditional], are left out.
+        """
+        return [
+            relation
+            for relation in self.relations
+            if relation.type == "composer"
+            and relation.artist
+            # MusicBrainz names its special purpose artists in square brackets
+            and not (relation.artist.name.startswith("[") and relation.artist.name.endswith("]"))
+            and "additional" not in relation.attributes
+        ]
+
+    @property
+    def composition_year(self) -> int | None:
+        """Return the year the work was composed (or completed), if MusicBrainz knows it."""
+        years = (relation.end_year or relation.begin_year for relation in self.composer_relations)
+        return next((year for year in years if year), None)
+
+    @property
+    def musical_key(self) -> str | None:
+        """Return the key the work is in, e.g. "C minor", if MusicBrainz knows it."""
+        return next(
+            (
+                attribute.value
+                for attribute in self.attributes
+                if attribute.type == KEY_ATTRIBUTE_TYPE
+            ),
+            None,
+        )
+
+    @property
+    def catalog_numbers(self) -> list[str]:
+        """Return the catalog numbers of the work as MusicBrainz writes them, e.g. "BWV 244"."""
+        return [
+            number
+            for relation in self.relations
+            if relation.series
+            and relation.series.type == CATALOG_SERIES_TYPE
+            and (number := relation.attribute_values.get("number"))
+        ]
 
 
 @dataclass

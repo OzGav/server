@@ -1,11 +1,15 @@
 """Tests for the pure helper functions of the Metadata Controller."""
 
 import pytest
+from music_assistant_models.enums import Period
 
 from music_assistant.controllers.metadata.helpers import (
     _detect_image_format,
     _normalize_imageproxy_format,
+    composer_period,
+    musicbrainz_work_name,
 )
+from music_assistant.providers.musicbrainz.models import MusicBrainzAlias, MusicBrainzWork
 
 
 class TestDetectImageFormat:
@@ -41,3 +45,75 @@ class TestNormalizeImageproxyFormat:
     def test_invalid(self, value: str | None) -> None:
         """Unknown or empty formats return None."""
         assert _normalize_imageproxy_format(value) is None
+
+
+@pytest.mark.parametrize(
+    ("birth_year", "death_year", "expected"),
+    [
+        (1098, 1179, Period.MEDIEVAL),  # Hildegard von Bingen
+        (1525, 1594, Period.RENAISSANCE),  # Palestrina
+        (1685, 1759, Period.BAROQUE),  # Händel
+        (1685, 1750, Period.BAROQUE),  # Bach
+        (1756, 1791, Period.CLASSICAL),  # Mozart
+        (1732, 1809, Period.CLASSICAL),  # Haydn
+        (1770, 1827, Period.CLASSICAL),  # Beethoven
+        (1797, 1828, Period.ROMANTIC),  # Schubert
+        (1833, 1897, Period.ROMANTIC),  # Brahms
+        (1860, 1911, Period.ROMANTIC),  # Mahler
+        (1874, 1951, Period.MODERN),  # Schoenberg
+        (1935, None, Period.CONTEMPORARY),  # Pärt, alive
+    ],
+)
+def test_composer_period(birth_year: int, death_year: int | None, expected: Period) -> None:
+    """A composer's period follows from the middle of their working life."""
+    assert composer_period(birth_year, death_year) == expected
+
+
+@pytest.mark.parametrize(
+    ("language", "aliases", "expected"),
+    [
+        ("de", [("24 Präludien", "de"), ("24 Preludes", "en")], "24 Präludien"),
+        ("nl", [("24 Präludien", "de"), ("24 Preludes", "en")], "24 Preludes"),
+        ("en", [], "24 Préludes, op. 28"),
+    ],
+)
+def test_work_name_prefers_the_language_then_english_then_the_title(
+    language: str, aliases: list[tuple[str, str]], expected: str
+) -> None:
+    """A work is named by its primary alias in the language, else in English, else its title."""
+    work = MusicBrainzWork(
+        id="1",
+        title="24 Préludes, op. 28",
+        aliases=[MusicBrainzAlias(name, name, locale, None, True) for name, locale in aliases],
+    )
+
+    assert musicbrainz_work_name(work, language) == expected
+
+
+@pytest.mark.parametrize(
+    ("aliases", "expected"),
+    [
+        (
+            [
+                ("Щелкунчик", "ru", "Work name"),
+                ("Nussknacker", None, "Search hint"),
+                ("Casse-Noisette", "fr", "Work name"),
+                ("The Nutcracker", "en", "Work name"),
+            ],
+            "The Nutcracker",
+        ),
+        ([("Casse-Noisette", "fr", "Work name")], "Casse-Noisette"),
+        ([("Nussknacker", None, "Search hint"), ("Щелкунчик", "ru", None)], "Щелкунчик, op. 71"),
+    ],
+)
+def test_work_name_of_a_non_latin_title_falls_back_to_a_latin_alias(
+    aliases: list[tuple[str, str | None, str | None]], expected: str
+) -> None:
+    """A title not in Latin script gives way to a Latin alias, English first, else stays."""
+    work = MusicBrainzWork(
+        id="1",
+        title="Щелкунчик, op. 71",
+        aliases=[MusicBrainzAlias(name, name, locale, kind) for name, locale, kind in aliases],
+    )
+
+    assert musicbrainz_work_name(work, "nl") == expected

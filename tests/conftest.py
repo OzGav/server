@@ -289,6 +289,7 @@ async def _music_mass_context(
         mass_instance.metadata = MagicMock()
         mass_instance.metadata.schedule_update_metadata = MagicMock()
         mass_instance.metadata.invalidate_image_cache = AsyncMock()
+        mass_instance.metadata.set_composer_periods = AsyncMock()
         mass_instance.webserver = MagicMock()
         mass_instance.webserver.auth.list_users = AsyncMock(return_value=[])
 

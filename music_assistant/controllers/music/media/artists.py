@@ -11,6 +11,7 @@ from music_assistant_models.auth import Scope
 from music_assistant_models.enums import (
     AlbumType,
     ArtistType,
+    EventType,
     ExternalID,
     ImageType,
     ListingType,
@@ -26,7 +27,7 @@ from music_assistant_models.errors import (
     MusicAssistantError,
     ProviderUnavailableError,
 )
-from music_assistant_models.helpers import create_safe_string
+from music_assistant_models.helpers import create_safe_string, create_sort_name
 from music_assistant_models.media_items import (
     Album,
     Artist,
@@ -1680,6 +1681,27 @@ class ArtistsController(MediaControllerBase[Artist]):
                 await self.merge_library_items(target_id, source_id)
         return target_id
 
+    async def set_library_artist_name(self, item_id: int, name: str, sort_name: str) -> None:
+        """
+        Give a library artist a new name and sort name.
+
+        :param item_id: Library id of the artist.
+        :param name: The new name.
+        :param sort_name: The new sort name.
+        """
+        await self.mass.music.database.update(
+            self.db_table,
+            {"item_id": item_id},
+            {
+                "name": name,
+                "sort_name": sort_name,
+                "search_name": create_safe_string(name, True, True),
+                "search_sort_name": create_safe_string(sort_name, True, True),
+            },
+        )
+        library_item = await self.get_library_item(item_id)
+        self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+
     def artist_from_item_mapping(self, item: ItemMapping) -> Artist:
         """Create an Artist object from an ItemMapping object."""
         # a library item mapping references an item already in the library, which has no
@@ -1895,6 +1917,14 @@ class ArtistsController(MediaControllerBase[Artist]):
 
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
+        # a classical artist's sort name made from its name gives way to a real one
+        if (
+            cur_item.is_classical
+            and update.sort_name
+            and cur_item.sort_name == create_sort_name(cur_item.name)
+            and update.sort_name != create_sort_name(update.name)
+        ):
+            sort_name = update.sort_name
         # a source without a period keeps the stored one, as only composers carry one
         period = (
             (update.period or cur_item.period) if overwrite else cur_item.period or update.period

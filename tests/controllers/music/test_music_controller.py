@@ -26,6 +26,7 @@ from music_assistant.mass import MusicAssistant
 @pytest.fixture
 async def music(mass_minimal: MusicAssistant) -> AsyncGenerator[MusicController]:
     """Return a music controller attached to the minimal mass instance."""
+    mass_minimal.metadata = MagicMock(set_composer_periods=AsyncMock())
     controller = MusicController(mass_minimal)
     mass_minimal.music = controller
     yield controller

@@ -66,6 +66,19 @@ _ROMAN_NUMERALS = (
     "XX",
 )
 
+# catalog prefixes such as "BWV" or "op.", the single letter ones (Köchel, Deutsch, ...)
+# only after a comma so "Symphony no. 5 in D minor" or "Livre I" never count
+_CATALOG_PREFIXES = (
+    "BWV|BuxWV|CD|FP|GWV|Hob|HWV|Kk|KV|MWV|[Oo]pus|[Oo]p|RCT|RV|SV|Sz|TrV|TWV|WAB|WoO|WWV|ZT"
+)
+_SINGLE_LETTER_CATALOG_PREFIXES = "DHKLPSTZ"
+# a catalog number such as "op. 8 no. 1", "K. 297c/299", "Hob. XVI:52" or "TWV 51:D7"
+_CATALOG_NUMBER = re.compile(
+    rf"(?:(?<=, )[{_SINGLE_LETTER_CATALOG_PREFIXES}]|\b(?:{_CATALOG_PREFIXES}))\.?\s?"
+    r"(?:[IVXL]+:|\d+:[A-Z]?)?\d+[A-Za-z]*(?:/\d+[A-Za-z]*)?"
+    r"(?:\s(?:[Nn]o\.|[Nn]r\.|[Nn]°)\s?\d+)?"
+)
+
 # a person leading a choir, credited as a performer rather than as a choir
 _CHOIR_LEADER_ROLE = re.compile(r"\b(choir\s?master|chorus\s(master|director))\b", re.IGNORECASE)
 # the credit roles a performer credit's role or instrument text names, matched on whole words
@@ -421,6 +434,15 @@ def parse_track_work(tags: AudioTags) -> TrackWork | None:
     if track_work := _split_movement_title(works[index]):
         return track_work
     return TrackWork(works[index], paired_ids[index])
+
+
+def parse_catalog_numbers(title: str) -> list[str]:
+    """
+    Return the catalog numbers a work title names, written as the title writes them.
+
+    :param title: The title of a work, such as "Symphony no. 5 in C minor, op. 67".
+    """
+    return list(dict.fromkeys(match.group() for match in _CATALOG_NUMBER.finditer(title)))
 
 
 def is_placeholder_artist(name: str) -> bool:

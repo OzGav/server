@@ -6,14 +6,16 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from music_assistant_models.enums import ProviderType
+from music_assistant_models.enums import ArtistRole, ProviderType
 
 from music_assistant.constants import (
     CONF_LOG_LEVEL,
     DB_TABLE_ALBUM_TRACKS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
 )
 from music_assistant.controllers.music import MusicController
+from music_assistant.controllers.music.media.base import TrackSyncDetails
 from music_assistant.models.music_provider import MusicProvider
 from music_assistant.providers.test import (
     CONF_KEY_NUM_ALBUMS,
@@ -52,6 +54,7 @@ async def music(mass_minimal: MusicAssistant) -> AsyncGenerator[MusicController]
     """Return a music controller with initialized database on the minimal mass instance."""
     mass_minimal.metadata = MagicMock()
     mass_minimal.metadata.invalidate_image_cache = AsyncMock()
+    mass_minimal.metadata.set_composer_periods = AsyncMock()
     controller = MusicController(mass_minimal)
     mass_minimal.music = controller
     await controller._setup_database()
@@ -107,6 +110,28 @@ async def test_sync_backfills_missing_track_artists(
 
     await provider._sync_library_tracks()
 
+    assert await _relation_count(music, DB_TABLE_TRACK_ARTISTS, track_id) > 0
+
+
+async def test_sync_backfills_track_artists_of_a_track_with_only_a_composer_credit(
+    music: MusicController, provider: FakeMusicProvider
+) -> None:
+    """A composer credit does not count as an artist link, so the sync repairs the track."""
+    track_id = min(await provider._sync_library_tracks())
+    (row,) = await music.database.get_rows(DB_TABLE_TRACK_ARTISTS, {"track_id": track_id})
+    artist_id = row["artist_id"]
+    await music.database.delete(DB_TABLE_TRACK_ARTISTS, {"track_id": track_id})
+    await music.database.insert(
+        DB_TABLE_TRACK_CREDITS,
+        {"track_id": track_id, "artist_id": artist_id, "role": ArtistRole.COMPOSER.value},
+    )
+    track = await music.tracks.get_library_item(track_id)
+
+    details = await music.tracks.get_library_item_sync_details(track.provider_mappings)
+
+    assert isinstance(details, TrackSyncDetails)
+    assert not details.has_artists
+    await provider._sync_library_tracks()
     assert await _relation_count(music, DB_TABLE_TRACK_ARTISTS, track_id) > 0
 
 

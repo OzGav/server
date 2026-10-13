@@ -1826,7 +1826,10 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         media_type = media_item.media_type
         ctrl = self.get_controller(media_type)
 
-        # genres and works are library-only items with no provider mappings, nothing to refresh
+        # genres and works are library-only items with no provider mappings; a work is read
+        # again from MusicBrainz, together with the other works of its tree
+        if media_type == MediaType.WORK and media_item.provider == "library":
+            return await self.mass.metadata.refresh_work_tree(cast("Work", media_item))
         if media_type in (MediaType.GENRE, MediaType.WORK):
             return media_item
 

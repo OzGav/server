@@ -120,7 +120,14 @@ async def library(music_mass_module: MusicAssistant) -> _Library:
 
 async def test_commands_are_registered(library: _Library) -> None:
     """Every classical command is served to library readers."""
-    for command in ("composers", "performers", "works", "recordings", "other_tracks"):
+    for command in (
+        "composers",
+        "performers",
+        "works",
+        "recordings",
+        "other_tracks",
+        "link_progress",
+    ):
         handler = library.mass.command_handlers[f"music/classical/{command}"]
         assert handler.required_scope == Scope.LIBRARY_READ
 

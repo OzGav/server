@@ -65,12 +65,13 @@ from .models import (
     MusicBrainzRelease,
     MusicBrainzReleaseGroup,
     MusicBrainzTag,
+    MusicBrainzWork,
     release_year,
 )
 from .recommendations import MusicBrainzRecommendationManager
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Hashable, Iterable, Sequence
 
     from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.media_items import (
@@ -125,6 +126,8 @@ class MusicbrainzProvider(MetadataProvider):
         self.cache = self.mass.cache
         self._api_client = MusicBrainzAPIClient(self.mass)
         self._recommendations = MusicBrainzRecommendationManager(self)
+        # the items a hint on fixing them on MusicBrainz was logged for, so each is logged once
+        self._logged_hints: set[Hashable] = set()
 
     async def loaded_in_mass(self) -> None:
         """Call after the provider has been loaded."""
@@ -190,7 +193,10 @@ class MusicbrainzProvider(MetadataProvider):
         return None
 
     async def resolve_release(
-        self, album: Album, library_track_count: int | None = None
+        self,
+        album: Album,
+        library_track_count: int | None = None,
+        on_barcode_mismatch: Callable[[str, MusicBrainzRelease], None] | None = None,
     ) -> MusicBrainzRelease | None:
         """
         Identify the exact MusicBrainz release (edition) of an album.
@@ -206,6 +212,8 @@ class MusicbrainzProvider(MetadataProvider):
         :param library_track_count: Number of tracks the album has in the library, to tell
             the editions of a release group apart. Without it an album is never searched
             by name.
+        :param on_barcode_mismatch: Called with a barcode and the release MusicBrainz has under
+            it when that release is not the album, by its title or first artist.
         :return: The release with tracklist, labels and URL relations, or None if no single
             release could be identified.
         """
@@ -217,7 +225,7 @@ class MusicbrainzProvider(MetadataProvider):
                 with suppress(InvalidDataError):
                     return await self.get_release_details(mbid)
         for barcode in _external_ids(album, ExternalID.BARCODE, is_valid_barcode)[:MAX_REF_ITEMS]:
-            if release := await self._release_by_barcode(barcode, album):
+            if release := await self._release_by_barcode(barcode, album, on_barcode_mismatch):
                 return release
         if release_group_id := album.get_external_id(ExternalID.MB_RELEASEGROUP):
             return await self._release_by_release_group(release_group_id, library_track_count)
@@ -649,6 +657,24 @@ class MusicbrainzProvider(MetadataProvider):
         msg = "Invalid MusicBrainz ReleaseGroup ID provided"
         raise InvalidDataError(msg)
 
+    async def get_work_details(self, work_id: str) -> MusicBrainzWork | None:
+        """
+        Get a Work with its aliases and artist, work and series relations by its MusicBrainz id.
+
+        :param work_id: MusicBrainz Work id.
+        :return: The work, or None if MusicBrainz does not know it.
+        :raises InvalidDataError: If MusicBrainz returns a malformed work.
+        """
+        endpoint = f"work/{work_id}?inc=aliases+artist-rels+work-rels+series-rels"
+        if not (result := await self._api_client.get_data(endpoint)):
+            return None
+        if "id" not in result:
+            result["id"] = work_id
+        try:
+            return MusicBrainzWork.from_raw(result)
+        except MissingField as err:
+            raise InvalidDataError from err
+
     async def get_artist_details_by_album(
         self, artistname: str, ref_album: Album
     ) -> MusicBrainzArtist | None:
@@ -1046,7 +1072,12 @@ class MusicbrainzProvider(MetadataProvider):
                 return result[0].id, True
         return None
 
-    async def _release_by_barcode(self, barcode: str, album: Album) -> MusicBrainzRelease | None:
+    async def _release_by_barcode(
+        self,
+        barcode: str,
+        album: Album,
+        on_mismatch: Callable[[str, MusicBrainzRelease], None] | None = None,
+    ) -> MusicBrainzRelease | None:
         """Return the release carrying a barcode that is the given album, if any."""
         try:
             candidates = await self.get_releases_by_barcode(barcode)
@@ -1055,11 +1086,15 @@ class MusicbrainzProvider(MetadataProvider):
         # regional variants of one product share its barcode; the official worldwide
         # digital one is the edition the streaming services carry
         candidates.sort(key=_edition_rank)
+        mismatch: MusicBrainzRelease | None = None
         for candidate in candidates[:MAX_BARCODE_DETAIL_FETCHES]:
             with suppress(InvalidDataError):
                 release = await self.get_release_details(candidate.id)
                 if release_matches_album(release, album):
                     return release
+                mismatch = mismatch or release
+        if mismatch and on_mismatch:
+            on_mismatch(barcode, mismatch)
         return None
 
     async def _release_by_release_group(

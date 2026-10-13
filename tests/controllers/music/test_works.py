@@ -149,6 +149,11 @@ async def _add_track(
     )
 
 
+def _composer_ids(track: Track) -> list[str]:
+    """Return the item ids of the composers credited on a track, in order."""
+    return [x.artist.item_id for x in track.credits if x.role == ArtistRole.COMPOSER]
+
+
 def _ids(items: Iterable[MediaItem | ItemMapping]) -> list[str]:
     """Return the item ids of the given items, in order."""
     return [x.item_id for x in items]
@@ -291,6 +296,22 @@ async def test_works_match_on_musicbrainz_id(mass: MusicAssistant, same_id: bool
         again = await _add_work(mass, name, [composer], mbid=_mbid())
 
     assert (again.item_id == work.item_id) is same_id
+
+
+async def test_catalog_numbers_differing_only_in_spelling_are_kept_once(
+    mass: MusicAssistant,
+) -> None:
+    """Catalog numbers differing in case, dots or spacing count once, in their first spelling."""
+    composer = await _add_artist(mass, "Composer")
+    name = f"Serenade No. 13 {_token()}"
+    mbid = _mbid()
+    await _add_work(mass, name, [composer], mbid=mbid, catalog_numbers=["K.525", "op. 67"])
+
+    again = await _add_work(
+        mass, name, [composer], mbid=mbid, catalog_numbers=["K. 525", "Op. 67", "KV 525"]
+    )
+
+    assert again.catalog_numbers == ["K.525", "op. 67", "KV 525"]
 
 
 async def test_update_with_overwrite_keeps_composers_without_new_ones(
@@ -619,6 +640,57 @@ async def _overwrite_with_tag_work(mass: MusicAssistant, track: Track, mbid: str
 def _track_work_ids(track: Track) -> set[str]:
     """Return the MusicBrainz work ids a track carries."""
     return {value for id_type, value in track.external_ids if id_type == ExternalID.MB_WORK}
+
+
+async def test_track_of_a_work_gets_its_composers(mass: MusicAssistant) -> None:
+    """A track of a work credits the work's composers in order, unless it credits its own."""
+    first = await _add_artist(mass, "First")
+    second = await _add_artist(mass, "Second")
+    own = await _add_artist(mass, "Own")
+    work = await _add_work(mass, f"Work {_token()}", [first, second])
+
+    bare = await _add_track(mass, work)
+    credited = await _add_track(
+        mass, work, item_credits=[Credit(artist=own, role=ArtistRole.COMPOSER)]
+    )
+    workless = await _add_track(mass)
+
+    assert _composer_ids(bare) == [first.item_id, second.item_id]
+    assert [x.position for x in bare.credits if x.role == ArtistRole.COMPOSER] == [0, 1]
+    assert _composer_ids(credited) == [own.item_id]
+    assert _composer_ids(workless) == []
+
+
+async def test_reread_track_keeps_its_work_composers(mass: MusicAssistant) -> None:
+    """A track read again from its only provider, which replaces its credits, keeps them."""
+    composer = await _add_artist(mass, "Composer")
+    conductor = await _add_artist(mass, "Conductor")
+    work = await _add_work(mass, f"Work {_token()}", [composer])
+    track = await _add_track(mass, work)
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.credits = [Credit(artist=conductor, role=ArtistRole.CONDUCTOR)]
+
+    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+
+    assert _composer_ids(stored) == [composer.item_id]
+    assert [x.artist.item_id for x in stored.credits if x.role == ArtistRole.CONDUCTOR] == [
+        conductor.item_id
+    ]
+
+
+async def test_new_work_composers_reach_its_tracks(mass: MusicAssistant) -> None:
+    """Composers added to a work later are credited on its tracks and classified with them."""
+    composer = await _add_artist(mass, "Composer")
+    work = await _add_work(mass, f"Work {_token()}", work_type=WorkType.SYMPHONY)
+    track = await _add_track(mass, work)
+    await mass.music.works.update_item_in_library(work.item_id, _work(work.name, [composer]))
+
+    await mass.music.tracks.credit_work_composers(int(work.item_id))
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert _composer_ids(stored) == [composer.item_id]
+    assert (await mass.music.artists.get_library_item(composer.item_id)).is_classical
 
 
 async def test_removing_a_work_unlinks_it(mass: MusicAssistant) -> None:

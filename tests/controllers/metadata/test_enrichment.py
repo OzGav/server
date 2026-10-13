@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
-from music_assistant_models.enums import AlbumType, ExternalID, MediaType, ProviderFeature
+from music_assistant_models.enums import (
+    AlbumType,
+    ArtistEntityType,
+    ExternalID,
+    MediaType,
+    Period,
+    ProviderFeature,
+)
 from music_assistant_models.errors import (
+    InvalidDataError,
     MediaNotFoundError,
     ProviderUnavailableError,
     RateLimited,
@@ -16,7 +24,7 @@ from music_assistant_models.errors import (
     RetriesExhausted,
 )
 from music_assistant_models.media_items import Album, Artist, ProviderMapping, Track
-from music_assistant_models.media_items.metadata import MediaItemMetadata
+from music_assistant_models.media_items.metadata import LifeSpan, MediaItemMetadata
 
 from music_assistant.constants import VARIOUS_ARTISTS_MBID
 from music_assistant.controllers.metadata.constants import (
@@ -28,7 +36,9 @@ from music_assistant.controllers.metadata.enrichment import MetadataEnrichmentMi
 from music_assistant.controllers.music.helpers import fill_track_from_recording
 from music_assistant.controllers.music.listing_cache import Listing
 from music_assistant.providers.musicbrainz.models import (
+    MusicBrainzAlias,
     MusicBrainzArtist,
+    MusicBrainzLifeSpan,
     MusicBrainzRecording,
     MusicBrainzRelation,
     MusicBrainzRelease,
@@ -69,6 +79,7 @@ def _enrichment(musicbrainz: MagicMock | None = None) -> MetadataEnrichmentMixin
     """
     enrichment = MetadataEnrichmentMixin()
     enrichment.logger = MagicMock()
+    enrichment._logged_hints = set()
     enrichment.mass = MagicMock()
     enrichment.config = MagicMock()
     enrichment.config.get_value = _online_metadata_only
@@ -353,6 +364,7 @@ def _enrichment_with_musicbrainz(
     """
     enrichment = MetadataEnrichmentMixin()
     enrichment.logger = MagicMock()
+    enrichment._logged_hints = set()
     enrichment.mass = MagicMock()
     enrichment.mass.music.artists.albums = AsyncMock(return_value=albums)
     enrichment.mass.music.artists.tracks = AsyncMock(return_value=tracks)
@@ -757,21 +769,31 @@ def _logged_musicbrainz_unavailable(enrichment: MetadataEnrichmentMixin) -> bool
 
 
 def _album(external_ids: set[tuple[ExternalID, str]] | None = None, **kwargs: Any) -> Album:
-    """Return a library album without provider mappings."""
+    """Return a library album, without provider mappings unless given."""
+    kwargs.setdefault("provider_mappings", set())
     return Album(
         item_id="1",
         provider="library",
         name="In Rainbows",
-        provider_mappings=set(),
         external_ids=external_ids or set(),
         **kwargs,
+    )
+
+
+def _library_mapping(in_library: bool = True) -> ProviderMapping:
+    """Return a mapping of an album on a local file source, added to the library or not."""
+    return ProviderMapping(
+        item_id="in-rainbows",
+        provider_domain="filesystem",
+        provider_instance="files",
+        in_library=in_library,
     )
 
 
 @pytest.mark.asyncio
 async def test_album_identity_fills_the_blanks_and_keeps_existing_values() -> None:
     """MusicBrainz fills in what the album lacks; ids, year and type it has are kept."""
-    enrichment = _enrichment(_musicbrainz(release=_release()))
+    enrichment = _enrichment(_musicbrainz(release=_release(id=OTHER_MBID)))
     album = _album(
         {(ExternalID.MB_ALBUM, OTHER_MBID), (ExternalID.BARCODE, "0000000000000")},
         year=2001,
@@ -788,6 +810,48 @@ async def test_album_identity_fills_the_blanks_and_keeps_existing_values() -> No
     assert album.get_external_id(ExternalID.DISCOGS) == "1119453"
     assert album.metadata.last_musicbrainz_lookup is not None
     _mass(enrichment).music.albums.update_item_in_library.assert_awaited_once_with("1", album)
+
+
+@pytest.mark.asyncio
+async def test_album_identity_follows_a_release_merged_on_musicbrainz() -> None:
+    """An album whose release id MusicBrainz answers with another release takes that id."""
+    musicbrainz = _musicbrainz(release=_release())
+    # the album's own id leads to the release it was merged into
+    musicbrainz.get_release_details = AsyncMock(return_value=_release())
+    enrichment = _enrichment(musicbrainz)
+    controller = _mass(enrichment).music.get_controller.return_value
+    controller.set_external_ids = AsyncMock()
+    album = _album({(ExternalID.MB_ALBUM, OTHER_MBID)})
+    # a sync stored a Discogs id on the album while it was looked up
+    discogs = (ExternalID.DISCOGS, "4321")
+    controller.get_library_item = AsyncMock(
+        return_value=_album({(ExternalID.MB_ALBUM, OTHER_MBID), discogs})
+    )
+
+    await enrichment._update_album_metadata(album, force_refresh=True)
+
+    assert album.mbid == RELEASE_ID
+    # stored right away with only the MusicBrainz id swapped, keeping what was added meanwhile
+    controller.set_external_ids.assert_awaited_once_with(
+        "1", {(ExternalID.MB_ALBUM, RELEASE_ID), discogs}
+    )
+    assert (ExternalID.MB_ALBUM, OTHER_MBID) not in album.external_ids
+
+
+@pytest.mark.asyncio
+async def test_album_keeps_a_release_musicbrainz_does_not_answer_for() -> None:
+    """An album keeps a release id MusicBrainz does not answer for, which its mirror may lack."""
+    musicbrainz = _musicbrainz(release=_release())
+    musicbrainz.get_release_details = AsyncMock(side_effect=InvalidDataError)
+    enrichment = _enrichment(musicbrainz)
+    set_ids = AsyncMock()
+    _mass(enrichment).music.get_controller.return_value.set_external_ids = set_ids
+    album = _album({(ExternalID.MB_ALBUM, OTHER_MBID)})
+
+    await enrichment._update_album_metadata(album, force_refresh=True)
+
+    assert album.mbid == OTHER_MBID
+    set_ids.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -858,7 +922,9 @@ async def test_album_identity_tells_musicbrainz_the_library_track_count() -> Non
 
     await enrichment._update_album_metadata(album, force_refresh=True)
 
-    musicbrainz.resolve_release.assert_awaited_once_with(album, library_track_count=3)
+    musicbrainz.resolve_release.assert_awaited_once_with(
+        album, library_track_count=3, on_barcode_mismatch=ANY
+    )
 
 
 @pytest.mark.asyncio
@@ -1284,3 +1350,199 @@ async def test_track_identity_with_linking_disabled_fills_ids_but_links_nothing(
     assert (ExternalID.ISRC, "GBSTK0700001") in track.external_ids
     assert track.metadata.last_musicbrainz_lookup is not None
     _mass(enrichment).music.tracks.link_musicbrainz_mappings.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("is_classical", "expected"), [(True, "Copland, Aaron"), (False, None)])
+async def test_artist_identity_offers_musicbrainz_sort_name_for_classical_artists(
+    is_classical: bool, expected: str | None
+) -> None:
+    """A classical artist is offered the sort name MusicBrainz knows; other artists are not."""
+    details = MusicBrainzArtist(id=OTHER_MBID, name="Aaron Copland", sort_name="Copland, Aaron")
+    enrichment = _enrichment(_musicbrainz(artist=details))
+    # a classical artist the library holds as no composer
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": 0}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Aaron Copland",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        is_classical=is_classical,
+    )
+    default_sort_name = artist.sort_name
+
+    await enrichment._link_artist_to_musicbrainz(artist)
+
+    assert artist.sort_name == (expected or default_sort_name)
+
+
+def _rubinstein() -> MusicBrainzArtist:
+    """Return a composer whose MusicBrainz main name is in Cyrillic script."""
+    return MusicBrainzArtist(
+        id=OTHER_MBID,
+        name="Антон Григорьевич Рубинштейн",
+        sort_name="Рубинштейн, Антон Григорьевич",
+        aliases=[
+            MusicBrainzAlias("Anton Rubinstein", "Rubinstein, Anton", locale="en", primary=True)
+        ],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replace", [False, True])
+async def test_artist_identity_replaces_life_span_and_period_on_a_refresh_only(
+    replace: bool,
+) -> None:
+    """Update metadata fills an artist's life span; a refresh takes MusicBrainz's and its period."""
+    musicbrainz = _musicbrainz(
+        artist=MusicBrainzArtist(
+            id=OTHER_MBID,
+            name="Johann Sebastian Bach",
+            sort_name="Bach, Johann Sebastian",
+            type="Person",
+            life_span=MusicBrainzLifeSpan(begin="1685-03-21", end="1750-07-28", ended=True),
+        )
+    )
+    enrichment = _enrichment(musicbrainz)
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": 1}]
+    )
+    wrong = LifeSpan(begin="1835", end="1899", ended=True)
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Johann Sebastian Bach",
+        sort_name="Bach, Johann Sebastian",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        metadata=MediaItemMetadata(artist_entity_type=ArtistEntityType.PERSON, life_span=wrong),
+        period=Period.ROMANTIC,
+        is_classical=True,
+    )
+
+    await enrichment._link_artist_to_musicbrainz(artist, replace)
+
+    if replace:
+        assert artist.metadata.life_span == LifeSpan(
+            begin="1685-03-21", end="1750-07-28", ended=True
+        )
+        assert artist.period == Period.BAROQUE
+    else:
+        assert artist.metadata.life_span == wrong
+        assert artist.period == Period.ROMANTIC
+
+
+@pytest.mark.asyncio
+async def test_artist_merged_on_musicbrainz_takes_the_new_id_and_joins_its_holders() -> None:
+    """An artist whose id MusicBrainz answers with another artist takes that id and merges."""
+    musicbrainz = _musicbrainz(
+        artist=MusicBrainzArtist(id=MBID, name="Gidon Kremer", sort_name="Kremer, Gidon")
+    )
+    enrichment = _enrichment(musicbrainz)
+    music = _mass(enrichment).music
+    music.get_controller.return_value.set_external_ids = AsyncMock()
+    music.artists.merge_library_artists_by_mbid = AsyncMock(return_value=1)
+    music.database.get_rows_from_query = AsyncMock(return_value=[{"is_classical_composer": 0}])
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Gidon Kremer",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+    )
+    music.get_controller.return_value.get_library_item = AsyncMock(
+        return_value=Artist.from_dict(artist.to_dict())
+    )
+
+    await enrichment._update_artist_metadata(artist, force_refresh=True)
+
+    assert artist.external_ids == {(ExternalID.MB_ARTIST, MBID)}
+    music.get_controller.return_value.set_external_ids.assert_awaited_once_with(
+        "1", {(ExternalID.MB_ARTIST, MBID)}
+    )
+    music.artists.merge_library_artists_by_mbid.assert_awaited_once_with(1, MBID)
+
+
+# --------------------------------------------------------------------------- #
+#  composer periods                                                            #
+# --------------------------------------------------------------------------- #
+
+
+async def _refresh_composer(
+    life_span: LifeSpan,
+    *,
+    entity_type: ArtistEntityType = ArtistEntityType.PERSON,
+    is_classical_composer: bool = True,
+    period: Period | None = None,
+) -> Artist:
+    """Refresh an artist whose metadata provider reports the given life span and return it."""
+    # is_classical_composer is whether the library holds the artist as a classical composer
+    enrichment = _enrichment()
+    provider = _metadata_provider("musicbrainz", ProviderFeature.ARTIST_METADATA)
+    provider.get_artist_metadata = AsyncMock(
+        return_value=MediaItemMetadata(artist_entity_type=entity_type, life_span=life_span)
+    )
+    enrichment.providers = [provider]  # type: ignore[misc]
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": int(is_classical_composer)}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Johann Sebastian Bach",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, "24f1766e-9635-4d58-a4d4-9413f9f98a4c")},
+        period=period,
+    )
+    await enrichment._update_artist_metadata(artist, force_refresh=True)
+    _mass(enrichment).music.artists.update_item_in_library.assert_awaited_once_with("1", artist)
+    return artist
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("life_span", "expected"),
+    [
+        (LifeSpan(begin="1685-03-21", end="1750-07-28", ended=True), Period.BAROQUE),
+        (LifeSpan(begin="1450", ended=True), None),
+        (LifeSpan(end="1750", ended=True), None),
+    ],
+)
+async def test_artist_refresh_gives_a_composer_the_period_of_their_life_span(
+    life_span: LifeSpan, expected: Period | None
+) -> None:
+    """A composer gets a period from their dates; without a birth or known death year, none."""
+    artist = await _refresh_composer(life_span)
+
+    assert artist.period == expected
+
+
+@pytest.mark.asyncio
+async def test_artist_refresh_keeps_the_period_of_the_tags() -> None:
+    """A period the artist already has, such as one from the genre tags, is kept."""
+    artist = await _refresh_composer(
+        LifeSpan(begin="1685", end="1750", ended=True), period=Period.ROMANTIC
+    )
+
+    assert artist.period == Period.ROMANTIC
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entity_type", "is_classical_composer"),
+    [(ArtistEntityType.GROUP, True), (ArtistEntityType.PERSON, False)],
+)
+async def test_artist_refresh_gives_no_period_to_other_artists(
+    entity_type: ArtistEntityType, is_classical_composer: bool
+) -> None:
+    """A group, or a person the library does not hold as a classical composer, gets no period."""
+    artist = await _refresh_composer(
+        LifeSpan(begin="1685", end="1750", ended=True),
+        entity_type=entity_type,
+        is_classical_composer=is_classical_composer,
+    )
+
+    assert artist.period is None

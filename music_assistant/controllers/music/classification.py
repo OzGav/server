@@ -4,13 +4,14 @@ Classical classification for the Music controller.
 Every library track, album and artist carries a stored is_classical flag, derived by the
 server from these rules:
 
-- a track is classical when it is tagged classical, is mapped to the curated classical genre
-  or is on a classical album
+- a track is classical when it is tagged classical, is mapped to the curated classical genre,
+  belongs to a work of a classical type (a symphony, a mass, ...) or is on a classical album
 - an album is classical when it is tagged classical, is mapped to the curated classical genre
-  or when more than half of its tracks are classical by their own tag or genre
+  or when more than half of its tracks are classical by their own tag, genre or work type
 - an artist is classical when it holds any credit on a classical track
 
-The flags are kept current as the library changes.
+The flags are kept current as the library changes, and a classical composer without a period
+gets the period of its stored life dates.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Final
 
-from music_assistant_models.enums import MediaType
+from music_assistant_models.enums import MediaType, WorkType
 
 from music_assistant.constants import (
     DB_TABLE_ALBUM_TRACKS,
@@ -28,6 +29,7 @@ from music_assistant.constants import (
     DB_TABLE_GENRE_MEDIA_ITEM_MAPPING,
     DB_TABLE_GENRES,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORKS,
 )
 from music_assistant.controllers.music.helpers import CREDITED_TRACK_ARTISTS
 
@@ -59,8 +61,10 @@ def _has_classical_genre(item: str, media_type: MediaType) -> str:
 
 
 def _track_is_classical_by_own_signal(track: str) -> str:
-    """Return the condition that a track is classical by its own tag or genre."""
-    return f"""({track}.classical_tag = 1 OR {_has_classical_genre(track, MediaType.TRACK)})"""
+    """Return the condition that a track is classical by its own tag, genre or work type."""
+    return f"""({track}.classical_tag = 1 OR {_has_classical_genre(track, MediaType.TRACK)}
+        OR EXISTS (SELECT 1 FROM {DB_TABLE_WORKS} w WHERE w.item_id = {track}.work_id
+        AND w.work_type IS NOT NULL AND w.work_type != '{WorkType.OTHER.value}'))"""
 
 
 # album tracks only count by their own signals, as their album inheritance depends on this flag
@@ -124,6 +128,7 @@ class ClassicalClassifier:
         await self._write_flags(DB_TABLE_ALBUMS, ALBUM_IS_CLASSICAL, album_ids)
         await self._write_flags(DB_TABLE_TRACKS, TRACK_IS_CLASSICAL, track_ids)
         await self._write_flags(DB_TABLE_ARTISTS, ARTIST_IS_CLASSICAL, artist_ids)
+        await self.mass.metadata.set_composer_periods(artist_ids)
 
     async def update_item(self, media_type: MediaType, item_id: int) -> None:
         """
@@ -138,6 +143,10 @@ class ClassicalClassifier:
             await self.update(album_ids=[item_id])
         elif media_type == MediaType.ARTIST:
             await self.update(artist_ids=[item_id])
+        elif media_type == MediaType.WORK:
+            await self.update(
+                track_ids=await self._get_ids(DB_TABLE_TRACKS, "item_id", "work_id", {item_id})
+            )
         elif media_type == MediaType.GENRE:
             await self.update_all()
 
@@ -146,6 +155,7 @@ class ClassicalClassifier:
         await self._write_flags(DB_TABLE_ALBUMS, ALBUM_IS_CLASSICAL)
         await self._write_flags(DB_TABLE_TRACKS, TRACK_IS_CLASSICAL)
         await self._write_flags(DB_TABLE_ARTISTS, ARTIST_IS_CLASSICAL)
+        await self.mass.metadata.set_composer_periods()
 
     @asynccontextmanager
     async def track_removal(self, track_id: int) -> AsyncGenerator[None]:
