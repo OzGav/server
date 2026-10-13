@@ -255,6 +255,12 @@ async def _enrich_removed(ctrl: MetaDataController, work: Work) -> Work:
     return library_work
 
 
+async def _library_work_ids(mass: MusicAssistant) -> set[str]:
+    """Return the ids of every work stored in the library."""
+    rows = await mass.music.database.get_rows_from_query("SELECT item_id FROM works", limit=0)
+    return {str(row["item_id"]) for row in rows}
+
+
 def _composers(track: Track) -> list[str]:
     """Return the names of the composers credited on a track."""
     return [c.artist.name for c in track.credits if c.role == ArtistRole.COMPOSER]
@@ -468,6 +474,21 @@ async def test_values_the_work_already_has_are_kept(mass: MusicAssistant) -> Non
         stored.musical_key,
         stored.catalog_numbers,
     ) == (WorkType.OTHER, 1807, "eng", "c-moll", ["Op. 67"])
+
+
+async def test_works_sharing_a_musicbrainz_id_merge_into_the_oldest(mass: MusicAssistant) -> None:
+    """Library works carrying the same MusicBrainz id merge when one of them is enriched."""
+    symphony = _musicbrainz_works("symphony_5")["symphony_5"]
+    older = await _add_work(mass, f"Fifth {_token()}", mbid=symphony.id)
+    newer = await _add_work(mass, f"Fifth again {_token()}", mbid=symphony.id)
+    ctrl = _controller(mass, [symphony])
+
+    await ctrl.link_item_to_musicbrainz(await mass.music.works.get_library_item(newer.item_id))
+
+    assert await _library_work_ids(mass) & {older.item_id, newer.item_id} == {older.item_id}
+    survivor = await mass.music.works.get_library_item(older.item_id)
+    assert survivor.work_type == WorkType.SYMPHONY
+    assert survivor.metadata.last_musicbrainz_lookup is not None
 
 
 async def test_work_musicbrainz_does_not_know_is_marked_looked_up(mass: MusicAssistant) -> None:
@@ -711,3 +732,35 @@ async def _reload(ctrl: MetaDataController, work: Work) -> Work:
     library_work = await ctrl.mass.music.works.get_library_item(work.item_id)
     reloaded = await ctrl._link_work_to_musicbrainz(library_work, reload=True)
     return await ctrl.mass.music.works.get_library_item(reloaded.item_id)
+
+
+async def test_work_merged_on_musicbrainz_takes_the_new_id_and_joins_its_holder(
+    mass: MusicAssistant,
+) -> None:
+    """A work whose id MusicBrainz answers with another work takes that id and joins its holder."""
+    token = _token()
+    new = MusicBrainzWork(id=str(uuid4()), title=f"Ave Maria {token}")
+    old_id = str(uuid4())
+    merged = await _add_work(mass, f"Ave Maria {token}", mbid=old_id)
+    track = await _add_track(mass, merged, [old_id])
+    holder = await _add_work(mass, f"Ave Maria (holder) {token}", mbid=new.id)
+    ctrl = _controller(mass, [new])
+    cast("AsyncMock", ctrl._musicbrainz_provider().get_work_details).side_effect = (  # type: ignore[union-attr]
+        lambda work_id: new if work_id in (old_id, new.id) else None
+    )
+
+    stored = await _reload(ctrl, merged)
+
+    assert stored.mbid == new.id
+    holders = await mass.music.works.get_library_items_by_external_id(
+        new.id, ExternalID.MB_WORK, limit=None
+    )
+    assert [x.item_id for x in holders] == [stored.item_id]
+    assert not await mass.music.works.get_library_items_by_external_id(
+        old_id, ExternalID.MB_WORK, limit=None
+    )
+    # the work holding the track survives
+    assert stored.item_id == merged.item_id
+    with pytest.raises(MediaNotFoundError):
+        await mass.music.works.get_library_item(holder.item_id)
+    assert (await _track_work(mass, track))[1].item_id == merged.item_id

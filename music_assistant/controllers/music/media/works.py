@@ -15,6 +15,7 @@ from music_assistant_models.enums import (
     SortField,
     WorkType,
 )
+from music_assistant_models.errors import InvalidDataError, MediaNotFoundError
 from music_assistant_models.helpers import create_safe_string, create_sort_name
 from music_assistant_models.media_items import (
     Artist,
@@ -35,7 +36,7 @@ from music_assistant.controllers.music.sorting import get_listing_default_direct
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import json_loads, serialize_to_json
 
-from .base import SUMMARY_ARTIST_FIELDS, MediaControllerBase
+from .base import SUMMARY_ARTIST_FIELDS, SUPPRESS_MEDIA_ITEM_UPDATES, MediaControllerBase
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -243,6 +244,54 @@ class WorksController(MediaControllerBase[Work]):
         """No provider matching for works, they are library-only items."""
         return
 
+    async def merge_library_works_by_mbid(self, work_id: int, mbid: str) -> int:
+        """
+        Merge the library works that are the given MusicBrainz work into one.
+
+        The work holding the most tracks survives, the oldest of them on a tie.
+
+        :param work_id: Library id of a work that is the MusicBrainz work.
+        :param mbid: The MusicBrainz work id.
+        :return: The library id the given work is found under after the merge.
+        """
+        same_mbid = await self.get_library_items_by_external_id(
+            mbid, ExternalID.MB_WORK, limit=None
+        )
+        all_ids = sorted({work_id, *(int(x.item_id) for x in same_mbid)})
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT work_id, COUNT(*) AS track_count FROM {DB_TABLE_TRACKS} "
+            "WHERE work_id IN :ids GROUP BY work_id",
+            {"ids": all_ids},
+            limit=0,
+        )
+        track_counts = {int(row["work_id"]): int(row["track_count"]) for row in rows}
+        # the survivor keeps its name and own fields
+        target_id = min(all_ids, key=lambda x: (-track_counts.get(x, 0), x))
+        source_ids = [x for x in all_ids if x != target_id]
+        for source_id in source_ids:
+            try:
+                await self.merge_library_items(target_id, source_id)
+            except MediaNotFoundError:
+                continue  # already merged by a concurrent run
+            except InvalidDataError as err:
+                self.logger.info("Not merging works with MusicBrainz ID %s: %s", mbid, err)
+                if source_id == work_id:
+                    return work_id
+        return target_id
+
+    async def create_library_item(self, item: Work) -> Work:
+        """
+        Add a work to the library as a new work, never matched to a stored one.
+
+        :param item: The work to add.
+        """
+        async with self.mass.music.database.deferred_commit(), self._db_add_lock:
+            db_id = await self._add_library_item(item)
+        library_item = await self.get_library_item(db_id)
+        if not SUPPRESS_MEDIA_ITEM_UPDATES.get():
+            self.mass.signal_event(EventType.MEDIA_ITEM_ADDED, library_item.uri, library_item)
+        return library_item
+
     async def rename_library_work(
         self, item_id: int, name: str, catalog_numbers: Sequence[str]
     ) -> None:
@@ -285,6 +334,21 @@ class WorksController(MediaControllerBase[Work]):
             "'$.last_musicbrainz_lookup', :timestamp) "
             "WHERE item_id = :item_id AND json_valid(metadata)",
             {"item_id": item_id, "timestamp": timestamp},
+        )
+
+    async def add_arrangement(self, work_id: int, source_work_id: int) -> None:
+        """
+        Link a library work as an arrangement of another library work.
+
+        :param work_id: Library id of the arrangement.
+        :param source_work_id: Library id of the work it arranges.
+        """
+        if work_id == source_work_id:
+            return
+        await self.mass.music.database.execute_write(
+            f"INSERT OR IGNORE INTO {DB_TABLE_WORK_ARRANGEMENTS}(work_id, source_work_id) "
+            "VALUES (:work_id, :source_work_id)",
+            {"work_id": work_id, "source_work_id": source_work_id},
         )
 
     async def get_library_work_id(self, work: Work | ItemMapping) -> int | None:
@@ -430,11 +494,56 @@ class WorksController(MediaControllerBase[Work]):
         if overwrite:
             await self.mass.music.database.delete(DB_TABLE_WORK_ARRANGEMENTS, {"work_id": db_id})
         for source_id in dict.fromkeys(source_ids):
-            await self.mass.music.database.execute_write(
-                f"INSERT OR IGNORE INTO {DB_TABLE_WORK_ARRANGEMENTS}(work_id, source_work_id) "
-                "VALUES (:work_id, :source_work_id)",
-                {"work_id": db_id, "source_work_id": source_id},
+            await self.add_arrangement(db_id, source_id)
+
+    async def _validate_library_item_merge(self, target: Work, source: Work) -> None:
+        """Validate that two works are not different MusicBrainz works."""
+        await super()._validate_library_item_merge(target, source)
+        if target.mbid and source.mbid and target.mbid != source.mbid:
+            msg = (
+                f"Cannot merge work '{source.name}' into '{target.name}': "
+                "they are different MusicBrainz works."
             )
+            raise InvalidDataError(msg)
+
+    async def _merge_play_statistics(
+        self, target_row: Mapping[str, Any], source_row: Mapping[str, Any]
+    ) -> None:
+        """Keep nothing, works are not played themselves."""
+        return
+
+    async def _merge_library_item_references(self, target_id: int, source_id: int) -> None:
+        """Move the tracks, parts and arrangement links of a merged work onto the target."""
+        database = self.mass.music.database
+        ids = {"target_id": target_id, "source_id": source_id}
+        # the movement fields stay on the tracks as they describe the recording
+        await database.execute_write(
+            f"UPDATE {DB_TABLE_TRACKS} SET work_id = :target_id WHERE work_id = :source_id", ids
+        )
+        await database.execute_write(
+            f"UPDATE {DB_TABLE_WORKS} SET parent_work_id = :target_id "
+            "WHERE parent_work_id = :source_id",
+            ids,
+        )
+        # the two works may have been part of one another
+        await database.execute_write(
+            f"UPDATE {DB_TABLE_WORKS} SET parent_work_id = NULL "
+            "WHERE item_id = :target_id AND parent_work_id = :target_id",
+            ids,
+        )
+        for column, other_column in (("work_id", "source_work_id"), ("source_work_id", "work_id")):
+            await database.execute_write(
+                f"INSERT OR IGNORE INTO {DB_TABLE_WORK_ARRANGEMENTS}({column}, {other_column}) "
+                f"SELECT :target_id, {other_column} FROM {DB_TABLE_WORK_ARRANGEMENTS} "
+                f"WHERE {column} = :source_id",
+                ids,
+            )
+        await database.execute_write(
+            f"DELETE FROM {DB_TABLE_WORK_ARRANGEMENTS} WHERE work_id = :source_id "
+            "OR source_work_id = :source_id OR work_id = source_work_id",
+            ids,
+        )
+        await self.mass.music.tracks.credit_work_composers(target_id)
 
     def _composers_query(self, artist_fields: str) -> str:
         """Return a subquery selecting the composers as a JSON array, in credited order."""

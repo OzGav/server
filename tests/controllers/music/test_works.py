@@ -159,6 +159,12 @@ def _ids(items: Iterable[MediaItem | ItemMapping]) -> list[str]:
     return [x.item_id for x in items]
 
 
+async def _library_work_ids(mass: MusicAssistant) -> set[str]:
+    """Return the ids of every work stored in the library, listed or not."""
+    rows = await mass.music.database.get_rows_from_query("SELECT item_id FROM works", limit=0)
+    return {str(row["item_id"]) for row in rows}
+
+
 async def test_work_round_trip(mass: MusicAssistant) -> None:
     """A work is stored and returned with all its fields and links."""
     first = await _add_artist(mass, "Composer One")
@@ -301,14 +307,21 @@ async def test_works_match_on_musicbrainz_id(mass: MusicAssistant, same_id: bool
 async def test_catalog_numbers_differing_only_in_spelling_are_kept_once(
     mass: MusicAssistant,
 ) -> None:
-    """Catalog numbers differing in case, dots or spacing count once, in their first spelling."""
+    """
+    Catalog numbers differing in case, dots or spacing count once, in their first spelling.
+
+    This holds for a new work given a number several times and for an update of a stored work.
+    """
     composer = await _add_artist(mass, "Composer")
     name = f"Serenade No. 13 {_token()}"
     mbid = _mbid()
-    await _add_work(mass, name, [composer], mbid=mbid, catalog_numbers=["K.525", "op. 67"])
+    work = await mass.music.works.create_library_item(
+        _work(name, [composer], mbid, catalog_numbers=["K.525", "K.525", "op. 67", "K.525"])
+    )
+    assert work.catalog_numbers == ["K.525", "op. 67"]
 
     again = await _add_work(
-        mass, name, [composer], mbid=mbid, catalog_numbers=["K. 525", "Op. 67", "KV 525"]
+        mass, name, [composer], mbid, catalog_numbers=["K. 525", "Op. 67", "KV 525"]
     )
 
     assert again.catalog_numbers == ["K.525", "op. 67", "KV 525"]
@@ -555,6 +568,17 @@ async def test_track_work_resolved_by_musicbrainz_id(mass: MusicAssistant) -> No
     assert unknown.work is None
 
 
+async def test_track_work_named_without_an_id_is_not_added(mass: MusicAssistant) -> None:
+    """A work read from a pop track's title is not added and does not make the track classical."""
+    before = await _library_work_ids(mass)
+
+    track = await _add_track(mass, _work(f"Suite {_token()}"), movement_name="Judy Blue Eyes")
+
+    assert track.work is None
+    assert await _library_work_ids(mass) == before
+    assert (track.classical_tag, track.is_classical) == (False, False)
+
+
 async def test_work_takes_a_new_name(mass: MusicAssistant) -> None:
     """A library work renamed is found and sorted by its new name and catalog numbers."""
     work = await _add_work(mass, "Planets Suite, Op 23", catalog_numbers=["Op 23"])
@@ -588,16 +612,23 @@ async def test_track_overwrite_without_work_keeps_work(mass: MusicAssistant) -> 
 
 
 async def test_track_overwrite_replaces_work(mass: MusicAssistant) -> None:
-    """An overwrite with another work replaces the work, a merging update keeps it."""
+    """
+    An overwrite with another work replaces the work.
+
+    A merging update keeps the stored work and does not add the work it describes.
+    """
     work = await _add_work(mass, f"Work {_token()}")
     other = await _add_work(mass, f"Other {_token()}")
     track = await _add_track(mass, work, movement_number=1)
     update = await mass.music.tracks.get_library_item(track.item_id)
-    update.work = ItemMapping.from_item(other)
+    update.work = _work(f"Provider work {_token()}")
     update.movement_number = 3
+    before = await _library_work_ids(mass)
 
     await mass.music.tracks.update_item_in_library(track.item_id, update)
     merged = await mass.music.tracks.get_library_item(track.item_id)
+    assert await _library_work_ids(mass) == before
+    update.work = ItemMapping.from_item(other)
     await mass.music.tracks.update_item_in_library(track.item_id, update, overwrite=True)
     overwritten = await mass.music.tracks.get_library_item(track.item_id)
 
@@ -815,3 +846,157 @@ async def test_favorite_work(mass: MusicAssistant) -> None:
     assert _ids(favorites) == [work.item_id]
     assert favorite_count == 1
     assert unliked.favorite is None
+
+
+# --------------------------------------------------------------------------- #
+#  merging works                                                               #
+# --------------------------------------------------------------------------- #
+
+
+async def test_merge_moves_everything_onto_the_oldest_work(mass: MusicAssistant) -> None:
+    """A merge keeps the target's own fields, fills its empty ones and moves every link over."""
+    first = await _add_artist(mass, "Composer")
+    second = await _add_artist(mass, "Second Composer")
+    lyricist = await _add_artist(mass, "Lyricist")
+    mbid = _mbid()
+    target = await _add_work(
+        mass, f"Target {_token()}", [first], catalog_numbers=["Op. 1"], work_type=WorkType.SYMPHONY
+    )
+    source = await _add_work(
+        mass,
+        f"Source {_token()}",
+        [second],
+        mbid=mbid,
+        catalog_numbers=["op.1", "K. 2"],
+        composition_year=1800,
+    )
+    await mass.music.database.insert(
+        DB_TABLE_WORK_ARTISTS,
+        {
+            "work_id": int(source.item_id),
+            "artist_id": int(lyricist.item_id),
+            "role": ArtistRole.LYRICIST.value,
+            "position": 0,
+        },
+    )
+    track = await _add_track(mass, source, movement_number=2, movement_name="Adagio")
+    child = await _add_work(mass, f"Child {_token()}", parent_work=ItemMapping.from_item(source))
+    arranged = await _add_work(
+        mass, f"Arranged {_token()}", arrangement_of=UniqueList([ItemMapping.from_item(source)])
+    )
+    original = await _add_work(mass, f"Original {_token()}")
+    await mass.music.works.add_arrangement(int(source.item_id), int(original.item_id))
+    user = User(user_id=f"fan-{_token()}", username="fan", role=UserRole.USER)
+    token = current_user.set(user)
+    try:
+        await mass.music.add_item_to_favorites(source)
+        merged = await mass.music.works.merge_library_items(target.item_id, source.item_id)
+        favorite = (await mass.music.works.get_library_item(target.item_id)).favorite
+    finally:
+        current_user.reset(token)
+
+    assert source.item_id not in await _library_work_ids(mass)
+    assert merged.name == target.name
+    assert merged.mbid == mbid
+    assert merged.composition_year == 1800
+    assert merged.work_type == WorkType.SYMPHONY
+    assert merged.catalog_numbers == ["Op. 1", "K. 2"]
+    assert _ids(merged.composers) == [first.item_id, second.item_id]
+    rows = await mass.music.database.get_rows(
+        DB_TABLE_WORK_ARTISTS, {"work_id": int(target.item_id), "role": "lyricist"}
+    )
+    assert [row["artist_id"] for row in rows] == [int(lyricist.item_id)]
+    assert _ids(merged.arrangement_of) == [original.item_id]
+    assert favorite is True
+    stored_child = await mass.music.works.get_library_item(child.item_id)
+    assert stored_child.parent_work is not None
+    assert stored_child.parent_work.item_id == target.item_id
+    stored_arranged = await mass.music.works.get_library_item(arranged.item_id)
+    assert _ids(stored_arranged.arrangement_of) == [target.item_id]
+    stored_track = await mass.music.tracks.get_library_item(track.item_id)
+    assert stored_track.work is not None
+    assert stored_track.work.item_id == target.item_id
+    assert (stored_track.movement_number, stored_track.movement_name) == (2, "Adagio")
+    # the target's work type makes the moved track classical
+    assert stored_track.is_classical
+
+
+async def test_merge_credits_the_composers_on_moved_tracks(mass: MusicAssistant) -> None:
+    """A moved track that credits no composer gets the composers of the merged work."""
+    composer = await _add_artist(mass, "Composer")
+    target = await _add_work(mass, f"Target {_token()}", [composer])
+    source = await _add_work(mass, f"Source {_token()}")
+    track = await _add_track(mass, source)
+
+    await mass.music.works.merge_library_items(target.item_id, source.item_id)
+
+    stored_track = await mass.music.tracks.get_library_item(track.item_id)
+    assert [x.artist.item_id for x in stored_track.credits if x.role == ArtistRole.COMPOSER] == [
+        composer.item_id
+    ]
+
+
+async def test_merge_drops_links_between_the_two_works(mass: MusicAssistant) -> None:
+    """A merged work that was a part or an arrangement of the target leaves no self link."""
+    target = await _add_work(mass, f"Target {_token()}")
+    source = await _add_work(
+        mass,
+        f"Source {_token()}",
+        parent_work=ItemMapping.from_item(target),
+        arrangement_of=UniqueList([ItemMapping.from_item(target)]),
+    )
+
+    merged = await mass.music.works.merge_library_items(target.item_id, source.item_id)
+
+    assert merged.parent_work is None
+    assert merged.arrangement_of == []
+    rows = await mass.music.database.get_rows_from_query(
+        f"SELECT * FROM {DB_TABLE_WORK_ARRANGEMENTS} "
+        "WHERE work_id = :work_id OR source_work_id = :work_id",
+        {"work_id": int(target.item_id)},
+    )
+    assert rows == []
+
+
+async def test_merge_of_different_musicbrainz_works_is_refused(mass: MusicAssistant) -> None:
+    """Two works holding different MusicBrainz work ids are never merged."""
+    target = await _add_work(mass, f"Target {_token()}", mbid=_mbid())
+    source = await _add_work(mass, f"Source {_token()}", mbid=_mbid())
+
+    with pytest.raises(InvalidDataError):
+        await mass.music.works.merge_library_items(target.item_id, source.item_id)
+
+    assert {target.item_id, source.item_id} <= await _library_work_ids(mass)
+
+
+@pytest.mark.parametrize(
+    ("with_tracks", "given", "survivor"),
+    [
+        # none has tracks, the newest is given
+        ((), 2, 0),
+        # the oldest has none, the two newer ones have one each
+        ((1, 2), 0, 1),
+    ],
+)
+async def test_merge_by_musicbrainz_id_keeps_the_oldest_with_tracks(
+    mass: MusicAssistant, with_tracks: tuple[int, ...], given: int, survivor: int
+) -> None:
+    """
+    Works sharing a MusicBrainz id merge into the oldest that has tracks of its own.
+
+    Without tracks on any of them they merge into the oldest, whichever of them is given.
+    """
+    mbid = _mbid()
+    # an add would match the stored work holding the id, so the duplicates are created as such
+    works = [
+        await mass.music.works.create_library_item(_work(f"{name} {_token()}", mbid=mbid))
+        for name in ("Oldest", "Newer", "Newest")
+    ]
+    for index in with_tracks:
+        await _add_track(mass, works[index])
+
+    kept = await mass.music.works.merge_library_works_by_mbid(int(works[given].item_id), mbid)
+
+    assert kept == int(works[survivor].item_id)
+    remaining = await _library_work_ids(mass)
+    assert {x.item_id for x in works} & remaining == {works[survivor].item_id}
