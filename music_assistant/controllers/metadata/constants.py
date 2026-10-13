@@ -83,6 +83,11 @@ CONF_LINK_PROVIDERS_VIA_MUSICBRAINZ = "link_providers_via_musicbrainz"
 # items looked up on MusicBrainz before that still lack its links
 CONF_MUSICBRAINZ_LINKED_DOMAINS = "musicbrainz_linked_domains"
 
+# TEMP(classical 5a catch-up): remove before release
+# core config key recording that the tracks whose recordings were read before their work ids
+# were kept were queued for the performers step once more
+CONF_RECORDING_WORKS_CATCH_UP_DONE = "classical_recording_works_catch_up_done"
+
 # keeps its historical artist-only id (and task domain) so existing schedules survive
 MISSING_METADATA_SCAN_TASK_ID = "metadata_missing_artist_metadata_scan_v2"
 

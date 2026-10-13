@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any, Final
 
-from music_assistant_models.enums import ExternalID, ImageType
+from music_assistant_models.enums import ArtistRole, ExternalID, ImageType
 from music_assistant_models.errors import InvalidProviderID, InvalidProviderURI
 from music_assistant_models.helpers import create_safe_string, get_global_cache_value
 from music_assistant_models.media_items import (
@@ -19,6 +19,7 @@ from music_assistant_models.media_items import (
 )
 from music_assistant_models.unique_list import UniqueList
 
+from music_assistant.constants import DB_TABLE_EXTERNAL_ID_LOOKUP, DB_TABLE_TRACK_ARTISTS
 from music_assistant.helpers.external_ids import is_valid_isrc
 from music_assistant.helpers.uri import canonical_provider_url, discogs_id_from_url, parse_uri
 
@@ -58,6 +59,34 @@ def search_name_match_clause(
     return (
         f"{db_table}.item_id IN "
         f"(SELECT rowid FROM {db_table}_fts WHERE {db_table}_fts MATCH :{param_name})"
+    )
+
+
+def has_musicbrainz_id(item_id: str, media_type: MediaType, id_type: ExternalID) -> str:
+    """
+    Return a query part that is true for an item carrying the given MusicBrainz id.
+
+    :param item_id: SQL expression of the library item id, e.g. ``albums.item_id``.
+    :param media_type: Media type of the item.
+    :param id_type: The MusicBrainz id type the item has to carry.
+    """
+    return (
+        f"EXISTS (SELECT 1 FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} "
+        f"WHERE {DB_TABLE_EXTERNAL_ID_LOOKUP}.media_type = '{media_type.value}' "
+        f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.external_id_type = '{id_type.value}' "
+        f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.item_id = {item_id})"
+    )
+
+
+def track_composers_query(tracks: str) -> str:
+    """
+    Return a subquery selecting the ids of the artists credited as composer on some tracks.
+
+    :param tracks: Subquery selecting the ids of the tracks.
+    """
+    return (
+        f"SELECT artist_id FROM {DB_TABLE_TRACK_ARTISTS} "
+        f"WHERE role = '{ArtistRole.COMPOSER.value}' AND track_id IN ({tracks})"
     )
 
 

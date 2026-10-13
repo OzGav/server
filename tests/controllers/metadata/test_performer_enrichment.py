@@ -24,6 +24,7 @@ from music_assistant.controllers.metadata.controller import (
     _tracks_with_recording_to_read_query,
 )
 from music_assistant.controllers.metadata.performer_enrichment import _relations_naming
+from music_assistant.controllers.music.classical import PERFORMING_ROLES
 from music_assistant.providers.musicbrainz.models import MusicBrainzRelease
 from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider
 
@@ -44,6 +45,8 @@ PIANO_CONCERTO = "Piano Concerto No. 1 in B-flat minor, Op. 23"
 KENNEDY_MBID = "2171e02c-e6c5-4109-85b7-ce4f13576a36"
 ECO_MBID = "8c936585-f1e5-4729-9402-98f319d265b0"
 OTHER_MBID = "00000000-0000-0000-0000-000000000001"
+KENNEDY_WORK = "3f62d0d8-8ccd-31ab-bfca-768a1ae5708d"
+ECO_SPOTIFY_ID = "4fwqPcLS4wnTVT0pbfJGyl"
 
 
 # --------------------------------------------------------------------------- #
@@ -587,6 +590,125 @@ async def test_recording_year_is_stored_and_tracks_are_marked_read(
 
 
 # --------------------------------------------------------------------------- #
+#  recording works and performers matched by id or provider link               #
+# --------------------------------------------------------------------------- #
+
+
+async def test_track_gets_the_work_ids_of_its_recording(music_mass: MusicAssistant) -> None:
+    """A track without MusicBrainz work ids takes those of the works its recording performs."""
+    ctrl = _controller(music_mass, {"release/": _lookup(BEST_CLASSICAL)})
+    track = await _kennedy_album(music_mass)
+
+    await _read_album(ctrl, track)
+
+    assert await _work_ids(music_mass, track) == {KENNEDY_WORK}
+
+
+async def test_track_keeps_the_work_ids_it_has(music_mass: MusicAssistant) -> None:
+    """The work ids a file's tags give a track are kept as they are."""
+    ctrl = _controller(music_mass, {"release/": _lookup(BEST_CLASSICAL)})
+    file_track = _track(
+        "Spring",
+        _recording_id(BEST_CLASSICAL, KENNEDY),
+        ["Nigel Kennedy"],
+        [],
+        _album(_release(BEST_CLASSICAL).id),
+    )
+    file_track.external_ids.add((ExternalID.MB_WORK, OTHER_MBID))
+    track = await _add(music_mass, file_track)
+
+    await _read_album(ctrl, track)
+
+    assert await _work_ids(music_mass, track) == {OTHER_MBID}
+
+
+async def test_artist_of_another_name_is_matched_by_its_provider_link(
+    music_mass: MusicAssistant,
+) -> None:
+    """A track artist MusicBrainz links to the same provider artist gets its exact role."""
+    ctrl = _controller(
+        music_mass,
+        {"release/": _lookup(BEST_CLASSICAL), f"artist/{ECO_MBID}": _eco_with_spotify_link()},
+    )
+    track = await _kennedy_album(
+        music_mass,
+        ["Nigel Kennedy", "ECO Players"],
+        [("Antonio Vivaldi", ArtistRole.COMPOSER, None)],
+    )
+    await _map_to_spotify(music_mass, "ECO Players", ECO_SPOTIFY_ID)
+
+    with patch.object(music_mass.music, "get_provider_instances", _spotify_instances()):
+        await _read_album(ctrl, track)
+
+    assert await _mbid(music_mass, "ECO Players") == ECO_MBID
+    assert ("ECO Players", ArtistRole.ORCHESTRA, None) in await _credits(music_mass, track)
+    # only the artist no name matched is looked up, the composer is never
+    assert [x.split("?")[0] for x in _requests(ctrl) if x.startswith("artist/")] == [
+        f"artist/{ECO_MBID}"
+    ]
+
+
+async def test_artist_linked_to_another_provider_artist_is_not_matched(
+    music_mass: MusicAssistant,
+) -> None:
+    """A track artist MusicBrainz links to another provider artist gets no role or id."""
+    ctrl = _controller(
+        music_mass,
+        {"release/": _lookup(BEST_CLASSICAL), f"artist/{ECO_MBID}": _eco_with_spotify_link()},
+    )
+    track = await _kennedy_album(
+        music_mass,
+        ["Nigel Kennedy", "ECO Players"],
+        [("Antonio Vivaldi", ArtistRole.COMPOSER, None)],
+    )
+    await _map_to_spotify(music_mass, "ECO Players", "anotherSpotifyArtist0")
+
+    with patch.object(music_mass.music, "get_provider_instances", _spotify_instances()):
+        await _read_album(ctrl, track)
+
+    assert await _mbid(music_mass, "ECO Players") is None
+    assert not any(x[1] in PERFORMING_ROLES for x in await _credits(music_mass, track))
+
+
+async def test_artist_holding_the_relations_id_is_matched_without_a_lookup(
+    music_mass: MusicAssistant,
+) -> None:
+    """A track artist that already has the id a relation names is that performer."""
+    ctrl = _controller(music_mass, {"release/": _lookup(BEST_CLASSICAL)})
+    await music_mass.music.artists.add_item_to_library(_artist("ECO Players", ECO_MBID))
+    track = await _kennedy_album(
+        music_mass,
+        ["Nigel Kennedy", "ECO Players"],
+        [("Antonio Vivaldi", ArtistRole.COMPOSER, None)],
+    )
+
+    await _read_album(ctrl, track)
+
+    assert ("ECO Players", ArtistRole.ORCHESTRA, None) in await _credits(music_mass, track)
+    assert len(_requests(ctrl)) == 1
+
+
+# TEMP(classical 5a catch-up): remove before release
+async def test_read_tracks_without_work_ids_are_read_once_more(music_mass: MusicAssistant) -> None:
+    """The tracks read before their work ids were kept are queued again, once."""
+    ctrl = _controller(music_mass, {})
+    without_ids = await _add(music_mass, _track("Plain", OTHER_MBID, ["Somebody"], [], _album()))
+    tagged = _track("Tagged", KENNEDY_MBID, ["Somebody"], [], _album(), 2)
+    tagged.external_ids.add((ExternalID.MB_WORK, KENNEDY_WORK))
+    with_ids = await _add(music_mass, tagged)
+    for track in (without_ids, with_ids):
+        assert await ctrl._link_track_performers(track)
+    assert await _tracks_due(music_mass) == set()
+
+    await ctrl._queue_recording_works_catch_up()
+
+    assert await _tracks_due(music_mass) == {without_ids.item_id}
+    assert await ctrl._link_track_performers(without_ids)
+    await ctrl._queue_recording_works_catch_up()
+    assert await _tracks_due(music_mass) == set()
+
+
+# --------------------------------------------------------------------------- #
 #  lookups and selection                                                       #
 # --------------------------------------------------------------------------- #
 
@@ -762,6 +884,56 @@ async def test_fallback_lookups_stop_while_musicbrainz_is_rate_limiting(
 
     assert len(_requests(ctrl)) == 1
     assert await _albums_due(music_mass) == {album.item_id}
+
+
+def _eco_with_spotify_link() -> dict[str, Any]:
+    """Return a MusicBrainz artist lookup of the English Chamber Orchestra, linked to Spotify."""
+    return {
+        "id": ECO_MBID,
+        "name": "English Chamber Orchestra",
+        "sort-name": "English Chamber Orchestra",
+        "type": "Orchestra",
+        "relations": [
+            {
+                "type": "free streaming",
+                "target-type": "url",
+                "url": {"resource": f"https://open.spotify.com/artist/{ECO_SPOTIFY_ID}"},
+            }
+        ],
+    }
+
+
+def _spotify_instances() -> Mock:
+    """Return a stand-in for the music provider instance lookup with Spotify loaded."""
+
+    def _instances(domain: str, **_kwargs: Any) -> list[Mock]:
+        return [Mock(available=True, instance_id="spotify")] if domain == "spotify" else []
+
+    return Mock(side_effect=_instances)
+
+
+async def _map_to_spotify(mass: MusicAssistant, name: str, spotify_id: str) -> None:
+    """Map the library artist of the given name to a Spotify artist."""
+    artists = await mass.music.artists.get_library_items_by_query(
+        extra_query_parts=["artists.name = :name"], extra_query_params={"name": name}
+    )
+    await mass.music.artists.add_provider_mappings(
+        artists[0].item_id,
+        [
+            ProviderMapping(
+                item_id=spotify_id,
+                provider_domain="spotify",
+                provider_instance="spotify",
+                in_library=False,
+            )
+        ],
+    )
+
+
+async def _work_ids(mass: MusicAssistant, track: Track) -> set[str]:
+    """Return the MusicBrainz work ids a library track carries."""
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    return {value for id_type, value in stored.external_ids if id_type == ExternalID.MB_WORK}
 
 
 async def _holders(mass: MusicAssistant, mbid: str) -> list[Artist]:

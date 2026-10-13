@@ -53,7 +53,11 @@ from music_assistant_models.media_items import (
 from music_assistant_models.media_items.metadata import MediaItemChapter
 from music_assistant_models.streamdetails import StreamDetails
 
-from music_assistant.constants import CONF_ENTRY_UNOFFICIAL_PROVIDER
+from music_assistant.constants import (
+    CLASSICAL_GENRE_NAME,
+    CONF_ENTRY_UNOFFICIAL_PROVIDER,
+    DB_TABLE_ALBUMS,  # TEMP(classical 5a tag clear)
+)
 from music_assistant.controllers.cache import use_cache
 from music_assistant.helpers.app_vars import app_var
 from music_assistant.helpers.external_ids import (
@@ -63,6 +67,7 @@ from music_assistant.helpers.external_ids import (
     normalize_external_id,
 )
 from music_assistant.helpers.json import SerializableType
+from music_assistant.helpers.library_reread import reread_library_albums, update_library_album
 from music_assistant.helpers.throttle_retry import (
     MAX_WAIT_TIME,
     RequestPriority,
@@ -89,6 +94,7 @@ from .constants import (
     CONF_ACCOUNT_NAME,
     CONF_AUDIO_QUALITY,
     CONF_AUDIOBOOKS_SUPPORTED,
+    CONF_CLASSICAL_REREAD_DONE,
     CONF_CLIENT_ID,
     CONF_PLAYBACK_BACKEND,
     CONF_REFRESH_TOKEN_DEV,
@@ -99,10 +105,12 @@ from .constants import (
     CREDENTIALS_FILE,
     GLOBAL_SEARCH_TIMEOUT,
     LIKED_SONGS_FAKE_PLAYLIST_ID_PREFIX,
+    PARSED_ITEM_CACHE_CHECKSUM,
     SOLOIST_DATA_DIR_NAME,
 )
 from .helpers import get_spotify_token
 from .parsers import (
+    lists_composers_first,
     parse_album,
     parse_artist,
     parse_audiobook,
@@ -146,6 +154,7 @@ class SpotifyProvider(MusicProvider):
     # monotonic time until which the fallback to the global session is not logged again
     _dev_fallback_logged_until: float = 0.0
     backend: SpotifyPlaybackBackend
+    _classical_reread_task: asyncio.Task[None] | None = None
 
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """
@@ -267,8 +276,23 @@ class SpotifyProvider(MusicProvider):
                 await self.backend.unload()
             raise
 
+    async def loaded_in_mass(self) -> None:
+        """Call after the provider has been loaded."""
+        if not self.mass.config.get_raw_provider_config_value(
+            self.instance_id, CONF_CLASSICAL_REREAD_DONE, False
+        ):
+            self._classical_reread_task = self.mass.create_task(
+                self._reread_library_albums(),
+                task_id=f"spotify_classical_reread_{self.instance_id}",
+                task_name="spotify_classical_reread",
+            )
+
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
+        if self._classical_reread_task and not self._classical_reread_task.done():
+            self._classical_reread_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._classical_reread_task
         try:
             if (backend := getattr(self, "backend", None)) is not None:
                 await backend.unload()
@@ -535,13 +559,13 @@ class SpotifyProvider(MusicProvider):
         artist_obj = await self._get_data(f"artists/{prov_artist_id}")
         return parse_artist(artist_obj, self)
 
-    @use_cache()
+    @use_cache(cache_checksum=PARSED_ITEM_CACHE_CHECKSUM)
     async def get_album(self, prov_album_id: str) -> Album:
         """Get full album details by id."""
         album_obj = await self._get_data(f"albums/{prov_album_id}")
         return parse_album(album_obj, self)
 
-    @use_cache()
+    @use_cache(cache_checksum=PARSED_ITEM_CACHE_CHECKSUM)
     async def get_track(self, prov_track_id: str) -> Track:
         """Get full track details by id."""
         track_obj = await self._get_data(f"tracks/{prov_track_id}")
@@ -786,14 +810,13 @@ class SpotifyProvider(MusicProvider):
             # the resume position stays in MA's own tracking, and Spotify's chapter
             # resume points are read separately via get_resume_position()
 
-    @use_cache(86400 * 365, allow_expired_cache=True)  # 1 year - album track listings are immutable
+    # 1 year - album track listings are immutable
+    @use_cache(86400 * 365, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True)
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get all album tracks for given album id."""
-        return [
-            parse_track(item, self)
-            async for item in self._get_all_items(f"albums/{prov_album_id}/tracks")
-            if item["id"]
-        ]
+        return self._parse_album_tracks(
+            [item async for item in self._get_all_items(f"albums/{prov_album_id}/tracks")]
+        )
 
     @use_cache(3600 * 3, allow_expired_cache=True)  # 3 hours
     async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
@@ -1744,6 +1767,59 @@ class SpotifyProvider(MusicProvider):
             raise
 
         return chapters_data
+
+    def _parse_album_tracks(self, track_objs: list[dict[str, Any]]) -> list[Track]:
+        """Parse the track objects of a whole album, crediting a classical album's composers."""
+        track_objs = [item for item in track_objs if item and item["id"]]
+        composer_first = lists_composers_first(track_objs)
+        return [parse_track(item, self, composer_first=composer_first) for item in track_objs]
+
+    async def _reread_library_albums(self) -> None:
+        """Read this account's library albums again once, for the classical details they give."""
+        if await reread_library_albums(self, self._reread_library_album):
+            self._update_config_value(CONF_CLASSICAL_REREAD_DONE, True, immediate=True)
+
+    async def _reread_library_album(self, library_id: int, prov_album_id: str) -> None:
+        """
+        Update a library album and its library tracks with what Spotify gives for them now.
+
+        :param library_id: The library id of the album.
+        :param prov_album_id: The Spotify id of the album.
+        """
+        album_obj = await self._get_data(f"albums/{prov_album_id}")
+        album = parse_album(album_obj, self)
+        first_page = album_obj.get("tracks") or {}
+        track_objs = first_page.get("items") or []
+        if first_page.get("next"):
+            track_objs = [
+                item async for item in self._get_all_items(f"albums/{prov_album_id}/tracks")
+            ]
+        if CLASSICAL_GENRE_NAME in (album.metadata.genres or ()):
+            await update_library_album(self, library_id, album)
+        await self._clear_classical_tag(library_id)  # TEMP(classical 5a tag clear)
+        for track in self._parse_album_tracks(track_objs):
+            # only a classical track gets a composer credit
+            if not track.credits:
+                continue
+            if library_track := await self.mass.music.tracks.get_library_item_by_prov_id(
+                track.item_id, self.instance_id
+            ):
+                await self.mass.music.tracks.update_item_in_library(library_track.item_id, track)
+
+    # TEMP(classical 5a tag clear): remove before release, with its call above
+    async def _clear_classical_tag(self, library_id: int) -> None:
+        """Clear the classical tag of a library album only Spotify provides, its genre now says it."""
+        # the tag merges with an OR on every update, so only an explicit write clears it
+        library_album = await self.mass.music.albums.get_library_item(library_id)
+        if not library_album.classical_tag or any(
+            x.provider_domain != self.domain for x in library_album.provider_mappings
+        ):
+            return
+        await self.mass.music.database.execute_write(
+            f"UPDATE {DB_TABLE_ALBUMS} SET classical_tag = 0 WHERE item_id = :item_id",
+            {"item_id": library_id},
+        )
+        await self.mass.music.classification.update_item(MediaType.ALBUM, library_id)
 
     async def _get_all_items(
         self,

@@ -8,9 +8,8 @@ import pytest
 from music_assistant_models.enums import ArtistRole, Period
 
 from music_assistant.helpers.tags import AudioTags
+from music_assistant.helpers.work_titles import TrackWork, parse_catalog_numbers
 from music_assistant.providers.filesystem_local.helpers import (
-    TrackWork,
-    parse_catalog_numbers,
     parse_track_work,
     performer_credit_role,
     period_from_genres,

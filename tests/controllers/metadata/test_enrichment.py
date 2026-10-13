@@ -170,6 +170,34 @@ async def test_album_enrichment_backfills_external_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_album_enrichment_picks_up_the_provider_classical_tag() -> None:
+    """An album added without its tracks is tagged classical once the provider's full album is."""
+    enrichment = _enrichment()
+    prov_item = Album(
+        item_id="prov1",
+        provider="spotify_1",
+        name="Test Album",
+        provider_mappings=set(),
+        classical_tag=True,
+    )
+    _mass(enrichment).music.albums.get_provider_item = AsyncMock(return_value=prov_item)
+    album = Album(
+        item_id="1",
+        provider="library",
+        name="Test Album",
+        provider_mappings={
+            ProviderMapping(
+                item_id="prov1", provider_domain="spotify", provider_instance="spotify_1"
+            )
+        },
+    )
+
+    await enrichment._update_album_metadata(album, force_refresh=True)
+
+    assert album.classical_tag
+
+
+@pytest.mark.asyncio
 async def test_track_enrichment_survives_provider_error() -> None:
     """A raising track metadata provider is logged and skipped; later providers still run."""
     enrichment = _enrichment()
@@ -1004,6 +1032,27 @@ async def test_track_identity_fills_recording_id_and_isrcs_and_links() -> None:
     _mass(enrichment).music.tracks.link_musicbrainz_mappings.assert_awaited_once_with(
         track, [SPOTIFY_TRACK_URL]
     )
+    _mass(enrichment).music.tracks.update_item_in_library.assert_awaited_once_with("1", track)
+
+
+@pytest.mark.asyncio
+async def test_track_refresh_keeps_the_provider_tracks_isrcs() -> None:
+    """The ISRCs of the provider's full track are added to the library track's own."""
+    enrichment = _enrichment()
+    track = _track({(ExternalID.ISRC, "GBSTK0700001")})
+    track.provider_mappings = {
+        ProviderMapping(item_id="sp-1", provider_domain="spotify", provider_instance="spotify_1")
+    }
+    prov_track = _track({(ExternalID.ISRC, "USRC17607839"), (ExternalID.ISRC, "not-an-isrc")})
+    _mass(enrichment).music.tracks.get_provider_item = AsyncMock(return_value=prov_track)
+
+    await enrichment._update_track_metadata(track, force_refresh=True)
+
+    assert {value for kind, value in track.external_ids if kind == ExternalID.ISRC} == {
+        "GBSTK0700001",
+        "USRC17607839",
+    }
+    _mass(enrichment).music.tracks.get_provider_item.assert_awaited_once_with("sp-1", "spotify_1")
     _mass(enrichment).music.tracks.update_item_in_library.assert_awaited_once_with("1", track)
 
 

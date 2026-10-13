@@ -24,6 +24,7 @@ from music_assistant.helpers.compare import compare_strings
 from music_assistant.helpers.external_ids import is_valid_isrc
 from music_assistant.helpers.json import make_utf8_safe
 from music_assistant.helpers.security import is_safe_path
+from music_assistant.helpers.work_titles import TrackWork, split_movement_title
 
 from .constants import IMAGE_EXTENSIONS, METADATA_IMAGE_STEMS, NFO_FILENAMES
 
@@ -39,45 +40,6 @@ MAX_CONSECUTIVE_SCAN_ERRORS = 10
 
 # number of example paths kept for the scan summary the user gets to see
 MAX_REPORTED_FAILED_PATHS = 5
-
-# a movement title such as "I. Allegro", "3. Presto" or "No. 4. The Call" starts with its
-# number and a full stop
-_NUMBERED_MOVEMENT = re.compile(r"^(?:No\.\s)?([IVX]+|\d+)\.\s")
-_ROMAN_NUMERALS = (
-    "I",
-    "II",
-    "III",
-    "IV",
-    "V",
-    "VI",
-    "VII",
-    "VIII",
-    "IX",
-    "X",
-    "XI",
-    "XII",
-    "XIII",
-    "XIV",
-    "XV",
-    "XVI",
-    "XVII",
-    "XVIII",
-    "XIX",
-    "XX",
-)
-
-# catalog prefixes such as "BWV" or "op.", the single letter ones (Köchel, Deutsch, ...)
-# only after a comma so "Symphony no. 5 in D minor" or "Livre I" never count
-_CATALOG_PREFIXES = (
-    "BWV|BuxWV|CD|FP|GWV|Hob|HWV|Kk|KV|MWV|[Oo]pus|[Oo]p|RCT|RV|SV|Sz|TrV|TWV|WAB|WoO|WWV|ZT"
-)
-_SINGLE_LETTER_CATALOG_PREFIXES = "DHKLPSTZ"
-# a catalog number such as "op. 8 no. 1", "K. 297c/299", "Hob. XVI:52" or "TWV 51:D7"
-_CATALOG_NUMBER = re.compile(
-    rf"(?:(?<=, )[{_SINGLE_LETTER_CATALOG_PREFIXES}]|\b(?:{_CATALOG_PREFIXES}))\.?\s?"
-    r"(?:[IVXL]+:|\d+:[A-Z]?)?\d+[A-Za-z]*(?:/\d+[A-Za-z]*)?"
-    r"(?:\s(?:[Nn]o\.|[Nn]r\.|[Nn]°)\s?\d+)?"
-)
 
 # a person leading a choir, credited as a performer rather than as a choir
 _CHOIR_LEADER_ROLE = re.compile(r"\b(choir\s?master|chorus\s(master|director))\b", re.IGNORECASE)
@@ -404,16 +366,6 @@ def get_valid_isrcs(isrcs: Iterable[str], path: str, log: logging.Logger) -> lis
     return valid_isrcs
 
 
-@dataclass(frozen=True)
-class TrackWork:
-    """The work a track belongs to, with the movement its work title names."""
-
-    name: str
-    mbid: str | None = None
-    movement_name: str | None = None
-    movement_number: int | None = None
-
-
 def parse_track_work(tags: AudioTags) -> TrackWork | None:
     """
     Return the work a track belongs to, or None when it belongs to no work.
@@ -426,23 +378,14 @@ def parse_track_work(tags: AudioTags) -> TrackWork | None:
     :param tags: The tags of the track.
     """
     if not (works := tags.works):
-        return _split_movement_title(tags.title)
+        return split_movement_title(tags.title)
     work_ids = tags.musicbrainz_workids
     # the work and id tags pair up by position only when they hold as many values
     paired_ids = work_ids if len(work_ids) == len(works) else (None,) * len(works)
     index = 0 if tags.movement_name or tags.movement_number or tags.movement_total else -1
-    if track_work := _split_movement_title(works[index]):
+    if track_work := split_movement_title(works[index]):
         return track_work
     return TrackWork(works[index], paired_ids[index])
-
-
-def parse_catalog_numbers(title: str) -> list[str]:
-    """
-    Return the catalog numbers a work title names, written as the title writes them.
-
-    :param title: The title of a work, such as "Symphony no. 5 in C minor, op. 67".
-    """
-    return list(dict.fromkeys(match.group() for match in _CATALOG_NUMBER.finditer(title)))
 
 
 def is_placeholder_artist(name: str) -> bool:
@@ -1029,20 +972,3 @@ def _real_path_of(fd: int) -> str:
         # 1024 is MAXPATHLEN, the buffer size F_GETPATH writes the path into
         return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0])
     return str(Path(f"/proc/self/fd/{fd}").readlink())
-
-
-def _split_movement_title(title: str) -> TrackWork | None:
-    """Return the parent work of a numbered movement title, or None for any other title."""
-    # MusicBrainz titles movement works "Parent: I. Movement" (see its classical style guide)
-    parent, _, movement = title.rpartition(": ")
-    if parent and (match := _NUMBERED_MOVEMENT.match(movement)):
-        numeral = match.group(1)
-        number = int(numeral) if numeral.isdecimal() else _roman_number(numeral)
-        if number:
-            return TrackWork(parent, movement_name=movement, movement_number=number)
-    return None
-
-
-def _roman_number(numeral: str) -> int | None:
-    """Return the value of a Roman numeral from I to XX, or None for any other text."""
-    return _ROMAN_NUMERALS.index(numeral) + 1 if numeral in _ROMAN_NUMERALS else None

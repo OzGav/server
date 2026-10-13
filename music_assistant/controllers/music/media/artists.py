@@ -48,14 +48,17 @@ from music_assistant.constants import (
     DB_TABLE_AUDIOBOOK_ARTISTS,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACKS,
     DB_TABLE_WORK_ARTISTS,
     VARIOUS_ARTISTS_MBID,
     VARIOUS_ARTISTS_NAME,
 )
 from music_assistant.controllers.music.constants import SIMILAR_ITEMS_LIMIT
 from music_assistant.controllers.music.helpers import (
+    has_musicbrainz_id,
     metadata_for_update,
     provider_mappings_for_update,
+    track_composers_query,
 )
 from music_assistant.controllers.music.listing import apply_listing, resolve_listing_sort
 from music_assistant.controllers.music.listing_cache import Listing
@@ -1684,6 +1687,25 @@ class ArtistsController(MediaControllerBase[Artist]):
             with contextlib.suppress(MediaNotFoundError):  # already merged by a concurrent add
                 await self.merge_library_items(target_id, source_id)
         return target_id
+
+    async def get_library_composers(self, with_mbid: bool) -> list[Artist]:
+        """
+        Return the library artists credited as composer on classical tracks.
+
+        :param with_mbid: True for the composers with a MusicBrainz artist id, False for those
+            without one.
+        """
+        classical_tracks = f"SELECT item_id FROM {DB_TABLE_TRACKS} WHERE is_classical = 1"
+        has_mbid = has_musicbrainz_id(
+            f"{DB_TABLE_ARTISTS}.item_id", MediaType.ARTIST, ExternalID.MB_ARTIST
+        )
+        return await self.get_library_items_by_query(
+            extra_query_parts=[
+                f"{DB_TABLE_ARTISTS}.item_id IN ({track_composers_query(classical_tracks)})",
+                has_mbid if with_mbid else f"NOT {has_mbid}",
+            ],
+            limit=0,
+        )
 
     def artist_from_item_mapping(self, item: ItemMapping) -> Artist:
         """Create an Artist object from an ItemMapping object."""

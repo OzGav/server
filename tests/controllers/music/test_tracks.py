@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, call, patch
 
 import pytest
 from music_assistant_models.enums import (
+    ArtistRole,
     ContentType,
     ExternalID,
     ImageType,
@@ -25,12 +26,14 @@ from music_assistant_models.media_items import (
     Album,
     Artist,
     AudioFormat,
+    Credit,
     ItemMapping,
     MediaItemImage,
     ProviderMapping,
     SearchResults,
     Track,
     UniqueList,
+    Work,
 )
 
 from music_assistant.constants import DB_TABLE_TRACKS
@@ -3263,3 +3266,109 @@ async def test_merge_keeps_an_album_thumb_the_source_track_stores(mass: MusicAss
     await mass.music.tracks.merge_library_items(target.item_id, source.item_id)
 
     assert await _stored_image_paths(mass, target.item_id) == [TRACK_THUMB.path, NEW_THUMB.path]
+
+
+JOINED_COMPOSER = "Ludwig van Beethoven & Conducted By William Bowles & Sarah Ainsworth"
+
+
+def _library_artist(item_id: str, name: str, sort_name: str | None = None) -> Artist:
+    """Return a library artist."""
+    return Artist(
+        item_id=item_id, provider="library", name=name, sort_name=sort_name, provider_mappings=set()
+    )
+
+
+def _joined_composer_track(composer_name: str = JOINED_COMPOSER) -> Track:
+    """Return a provider track crediting a composer as main artist, on the track and its work."""
+    track = create_track("spotify_1", "joined", name="Für Elise")
+    composer = Artist(
+        item_id="joined_composer", provider="spotify_1", name=composer_name, provider_mappings=set()
+    )
+    track.artists = UniqueList([composer, *track.artists])
+    track.credits = [
+        Credit(artist=composer, role=ArtistRole.COMPOSER, position=2),
+        Credit(artist=track.artists[0], role=ArtistRole.PERFORMER, instrument="piano"),
+    ]
+    track.work = Work(
+        item_id="Für Elise",
+        provider="spotify_1",
+        name="Für Elise",
+        provider_mappings=set(),
+        composers=UniqueList([composer]),
+    )
+    return track
+
+
+async def test_joined_composer_is_replaced_by_the_library_composer(
+    music: MusicController,
+) -> None:
+    """A joined composer name naming one library composer credits that composer."""
+    beethoven = _library_artist("1", "Ludwig van Beethoven", "Beethoven, Ludwig van")
+    track = _joined_composer_track()
+    performer_credit = track.credits[1]
+    performer = track.artists[1]
+    query = AsyncMock(return_value=[beethoven, _library_artist("2", "Frédéric Chopin")])
+
+    with patch.object(music.artists, "get_library_composers", query):
+        replaced = await music.tracks._split_joined_composers(track)
+
+    query.assert_awaited_once_with(with_mbid=True)
+    assert replaced == {JOINED_COMPOSER}
+    assert track.credits == [
+        Credit(artist=beethoven, role=ArtistRole.COMPOSER, position=2),
+        performer_credit,
+    ]
+    assert isinstance(track.work, Work)
+    assert list(track.work.composers) == [beethoven]
+    assert list(track.artists) == [beethoven, performer]
+
+
+async def test_joined_composer_already_a_main_artist_is_not_repeated(
+    music: MusicController,
+) -> None:
+    """A library composer already among the main artists replaces a joined name only once."""
+    beethoven = _library_artist("1", "Ludwig van Beethoven")
+    track = _joined_composer_track()
+    track.artists = UniqueList([beethoven, *track.artists])
+    performer = track.artists[2]
+
+    with patch.object(music.artists, "get_library_composers", AsyncMock(return_value=[beethoven])):
+        await music.tracks._split_joined_composers(track)
+
+    assert list(track.artists) == [beethoven, performer]
+
+
+async def test_joined_composer_matching_several_composers_is_kept(
+    music: MusicController,
+) -> None:
+    """A joined composer name that several library composers match stays as it is."""
+    track = _joined_composer_track("Strauss & Conducted By Herbert von Karajan")
+    joined = track.credits[0].artist
+    query = AsyncMock(
+        return_value=[
+            _library_artist("1", "Johann Strauss II"),
+            _library_artist("2", "Richard Strauss"),
+        ]
+    )
+
+    with patch.object(music.artists, "get_library_composers", query):
+        replaced = await music.tracks._split_joined_composers(track)
+
+    assert replaced == set()
+    assert track.credits[0].artist is joined
+    assert isinstance(track.work, Work)
+    assert list(track.work.composers) == [joined]
+    assert track.artists[0] is joined
+
+
+async def test_track_without_joined_composer_queries_no_composers(
+    music: MusicController,
+) -> None:
+    """A track without a joined composer name never looks up the library composers."""
+    track = _joined_composer_track("Ludwig van Beethoven")
+    query = AsyncMock(return_value=[])
+
+    with patch.object(music.artists, "get_library_composers", query):
+        await music.tracks._split_joined_composers(track)
+
+    query.assert_not_awaited()

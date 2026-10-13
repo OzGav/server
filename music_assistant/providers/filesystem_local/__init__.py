@@ -115,6 +115,7 @@ from music_assistant.helpers.util import (
     parse_title_and_version,
     try_parse_int,
 )
+from music_assistant.helpers.work_titles import parse_catalog_numbers
 from music_assistant.models.music_provider import MusicProvider
 
 from .constants import (
@@ -177,7 +178,6 @@ from .helpers import (
     is_metadata_file,
     is_placeholder_artist,
     open_real_path,
-    parse_catalog_numbers,
     parse_nfo_root,
     parse_track_work,
     performer_credit_role,

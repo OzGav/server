@@ -266,6 +266,17 @@ class MusicBrainzRecording(DataClassDictMixin):
         return list(unique.values())
 
     @property
+    def performance_work_ids(self) -> list[str]:
+        """Return the ids of the works the recording is a performance of, each once."""
+        return list(
+            dict.fromkeys(
+                relation.work.id
+                for relation in self.relations or ()
+                if relation.type == "performance" and relation.work
+            )
+        )
+
+    @property
     def recording_year(self) -> int | None:
         """Return the year the recording was made, from its earliest dated session, if known."""
         years = (
