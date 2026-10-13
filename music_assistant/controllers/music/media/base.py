@@ -134,6 +134,7 @@ JSON_KEYS = (
     "catalog_numbers",
     "parent_work",
     "arrangement_of",
+    "arrangements",
     "work",
     "track_album",
     "metadata",

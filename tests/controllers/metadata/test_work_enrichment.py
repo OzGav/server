@@ -264,6 +264,15 @@ async def _library_work_ids(mass: MusicAssistant) -> set[str]:
     return {str(row["item_id"]) for row in rows}
 
 
+def _linked(works: Iterable[Work | ItemMapping]) -> list[tuple[str, list[str]]]:
+    """Return the id and composer ids of each linked work."""
+    linked = []
+    for work in works:
+        assert isinstance(work, Work)
+        linked.append((work.item_id, [x.item_id for x in work.composers]))
+    return linked
+
+
 def _composers(track: Track) -> list[str]:
     """Return the names of the composers credited on a track."""
     return [c.artist.name for c in track.credits if c.role == ArtistRole.COMPOSER]
@@ -593,6 +602,64 @@ async def test_work_musicbrainz_does_not_know_is_marked_looked_up(mass: MusicAss
 
 
 # --------------------------------------------------------------------------- #
+#  arrangements                                                                #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("held", [True, False])
+async def test_arrangement_in_the_library_is_linked_to_its_original(
+    mass: MusicAssistant, held: bool
+) -> None:
+    """
+    An original's forward arrangement relation links the library work arranged from it.
+
+    An arrangement the library lacks adds no work.
+    """
+    symphony = _musicbrainz_works("symphony_5")["symphony_5"]
+    [relation] = symphony.arrangement_relations
+    assert relation.work is not None
+    composer = await _add_artist(mass, f"Beethoven {_token()}")
+    original = await _add_work(mass, f"Symphony no. 5 {_token()}", [composer], mbid=symphony.id)
+    transcription = (
+        await _add_work(mass, f"S. 464 no. 5 {_token()}", mbid=relation.work.id) if held else None
+    )
+    ctrl = _controller(mass, [symphony])
+    before = await _library_work_ids(mass)
+
+    stored = await _enrich(ctrl, original)
+
+    assert await _library_work_ids(mass) == before
+    if transcription:
+        assert _linked(stored.arrangements) == [(transcription.item_id, [])]
+        arranged = await mass.music.works.get_library_item(transcription.item_id)
+        assert _linked(arranged.arrangement_of) == [(original.item_id, [composer.item_id])]
+    else:
+        assert stored.arrangements == []
+
+
+@pytest.mark.parametrize("relation_type", ["arrangement", "orchestration"])
+async def test_arrangement_is_linked_to_its_original_in_the_library(
+    mass: MusicAssistant, relation_type: str
+) -> None:
+    """A work's backward arrangement or orchestration relation links it to its original."""
+    token = _token()
+    original_mb = MusicBrainzWork(id=str(uuid4()), title=f"Pictures {token}")
+    arrangement_mb = MusicBrainzWork(
+        id=str(uuid4()),
+        title=f"Pictures, orchestrated {token}",
+        relations=[MusicBrainzRelation(type=relation_type, direction="backward", work=original_mb)],
+    )
+    original = await _add_work(mass, original_mb.title, mbid=original_mb.id)
+    arrangement = await _add_work(mass, arrangement_mb.title, mbid=arrangement_mb.id)
+    ctrl = _controller(mass, [arrangement_mb])
+
+    stored = await _enrich(ctrl, arrangement)
+
+    assert [x.item_id for x in stored.arrangement_of] == [original.item_id]
+    assert stored.arrangements == []
+
+
+# --------------------------------------------------------------------------- #
 #  composers                                                                   #
 # --------------------------------------------------------------------------- #
 
@@ -854,3 +921,33 @@ async def test_work_merged_on_musicbrainz_takes_the_new_id_and_joins_its_holder(
     with pytest.raises(MediaNotFoundError):
         await mass.music.works.get_library_item(holder.item_id)
     assert (await _track_work(mass, track))[1].item_id == merged.item_id
+
+
+@pytest.mark.parametrize("still_listed", [True, False])
+async def test_work_looked_up_again_drops_an_arrangement_link_musicbrainz_removed(
+    mass: MusicAssistant, still_listed: bool
+) -> None:
+    """
+    An arrangement link MusicBrainz no longer lists goes on a lookup again, not before.
+
+    A link MusicBrainz still lists stays.
+    """
+    token = _token()
+    original_mb = MusicBrainzWork(id=str(uuid4()), title=f"Pictures {token}")
+    arrangement_mb = MusicBrainzWork(
+        id=str(uuid4()),
+        title=f"Pictures, orchestrated {token}",
+        relations=[MusicBrainzRelation(type="arrangement", direction="backward", work=original_mb)],
+    )
+    original = await _add_work(mass, original_mb.title, mbid=original_mb.id)
+    arrangement = await _add_work(mass, arrangement_mb.title, mbid=arrangement_mb.id)
+    ctrl = _controller(mass, [arrangement_mb])
+    assert (await _enrich(ctrl, arrangement)).arrangement_of
+    if not still_listed:
+        arrangement_mb.relations = []
+
+    assert (await _enrich(ctrl, arrangement)).arrangement_of
+    reloaded = await _reload(ctrl, arrangement)
+    assert [x.item_id for x in reloaded.arrangement_of] == (
+        [original.item_id] if still_listed else []
+    )

@@ -10,6 +10,7 @@ from mashumaro import DataClassDictMixin
 from music_assistant_models.enums import WorkType
 
 from .constants import (
+    ARRANGEMENT_RELATION_TYPES,
     CATALOG_SERIES_TYPE,
     KEY_ATTRIBUTE_TYPE,
     NO_LYRICS_LANGUAGE,
@@ -364,6 +365,16 @@ class MusicBrainzWork(DataClassDictMixin):
         ]
 
     @property
+    def arrangement_of_relations(self) -> list[MusicBrainzRelation]:
+        """Return the relations to the works this work is an arrangement of, as ``work``."""
+        return self._arrangement_relations("backward")
+
+    @property
+    def arrangement_relations(self) -> list[MusicBrainzRelation]:
+        """Return the relations to the arrangements of this work, as ``work``."""
+        return self._arrangement_relations("forward")
+
+    @property
     def composer_relations(self) -> list[MusicBrainzRelation]:
         """
         Return the composer relations of the work, each carrying the composer as ``artist``.
@@ -408,6 +419,16 @@ class MusicBrainzWork(DataClassDictMixin):
             if relation.series
             and relation.series.type == CATALOG_SERIES_TYPE
             and (number := relation.attribute_values.get("number"))
+        ]
+
+    def _arrangement_relations(self, direction: str) -> list[MusicBrainzRelation]:
+        """Return the arrangement and orchestration relations in the given direction."""
+        return [
+            relation
+            for relation in self.relations
+            if relation.type in ARRANGEMENT_RELATION_TYPES
+            and relation.direction == direction
+            and relation.work
         ]
 
 

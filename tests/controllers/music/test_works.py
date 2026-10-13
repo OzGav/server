@@ -153,6 +153,15 @@ def _composer_ids(track: Track) -> list[str]:
     return [x.artist.item_id for x in track.credits if x.role == ArtistRole.COMPOSER]
 
 
+def _linked(works: Iterable[Work | ItemMapping]) -> list[tuple[str, list[str]]]:
+    """Return the id and composer ids of each linked work."""
+    linked = []
+    for work in works:
+        assert isinstance(work, Work)
+        linked.append((work.item_id, [x.item_id for x in work.composers]))
+    return linked
+
+
 def _ids(items: Iterable[MediaItem | ItemMapping]) -> list[str]:
     """Return the item ids of the given items, in order."""
     return [x.item_id for x in items]
@@ -898,13 +907,12 @@ async def test_merge_moves_everything_onto_the_oldest_work(mass: MusicAssistant)
         DB_TABLE_WORK_ARTISTS, {"work_id": int(target.item_id), "role": "lyricist"}
     )
     assert [row["artist_id"] for row in rows] == [int(lyricist.item_id)]
+    assert _ids(merged.arrangements) == [arranged.item_id]
     assert _ids(merged.arrangement_of) == [original.item_id]
     assert favorite is True
     stored_child = await mass.music.works.get_library_item(child.item_id)
     assert stored_child.parent_work is not None
     assert stored_child.parent_work.item_id == target.item_id
-    stored_arranged = await mass.music.works.get_library_item(arranged.item_id)
-    assert _ids(stored_arranged.arrangement_of) == [target.item_id]
     stored_track = await mass.music.tracks.get_library_item(track.item_id)
     assert stored_track.work is not None
     assert stored_track.work.item_id == target.item_id
@@ -942,6 +950,7 @@ async def test_merge_drops_links_between_the_two_works(mass: MusicAssistant) -> 
 
     assert merged.parent_work is None
     assert merged.arrangement_of == []
+    assert merged.arrangements == []
     rows = await mass.music.database.get_rows_from_query(
         f"SELECT * FROM {DB_TABLE_WORK_ARRANGEMENTS} "
         "WHERE work_id = :work_id OR source_work_id = :work_id",
@@ -992,3 +1001,33 @@ async def test_merge_by_musicbrainz_id_keeps_the_oldest_with_tracks(
     assert kept == int(works[survivor].item_id)
     remaining = await _library_work_ids(mass)
     assert {x.item_id for x in works} & remaining == {works[survivor].item_id}
+
+
+# --------------------------------------------------------------------------- #
+#  related works                                                               #
+# --------------------------------------------------------------------------- #
+
+
+async def test_full_work_lists_its_related_works_with_their_composers(
+    mass: MusicAssistant,
+) -> None:
+    """The full work carries its originals and arrangements, each with its composers."""
+    composer = await _add_artist(mass, "Mussorgsky")
+    arranger = await _add_artist(mass, "Ravel")
+    original = await _add_work(mass, f"Pictures {_token()}", [composer])
+    arrangement = await _add_work(
+        mass,
+        f"Pictures orchestrated {_token()}",
+        [arranger],
+        arrangement_of=UniqueList([ItemMapping.from_item(original)]),
+    )
+
+    stored = await mass.music.get_item(
+        MediaType.WORK, original.item_id, "library", allow_update_metadata=False
+    )
+    stored_arrangement = await mass.music.works.get_library_item(arrangement.item_id)
+
+    assert isinstance(stored, Work)
+    assert _linked(stored.arrangements) == [(arrangement.item_id, [arranger.item_id])]
+    assert _linked(stored_arrangement.arrangement_of) == [(original.item_id, [composer.item_id])]
+    assert all(isinstance(x, Work) for x in stored.arrangements)
