@@ -41,6 +41,7 @@ from music_assistant.constants import (
     DB_TABLE_PLAYLISTS,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORK_ARTISTS,  # TEMP(classical 5b catch-up)
     DB_TABLE_WORKS,
     VERBOSE_LOG_LEVEL,
 )
@@ -65,12 +66,15 @@ from music_assistant.models.music_provider import MusicProvider
 
 from .constants import (
     ALBUM_RECONCILIATION_TASK_ID,
+    CONF_ALIAS_JOIN_DONE,  # TEMP(classical 5b alias join)
+    CONF_COMPOSERLESS_WORKS_CATCH_UP_DONE,  # TEMP(classical 5b catch-up)
     CONF_ENABLE_ONLINE_METADATA,
     CONF_ENABLE_RADIO_METADATA_LOOKUP,
     CONF_LINK_PROVIDERS_VIA_MUSICBRAINZ,
     CONF_MUSICBRAINZ_LINKED_DOMAINS,
     CONF_PREFER_LOCAL_GENRES,
     CONF_RECORDING_WORKS_CATCH_UP_DONE,
+    CONF_SAME_WORKS_JOIN_DONE,  # TEMP(classical 5b work join)
     CONF_THUMB_CACHE_MAX_SIZE,
     DEFAULT_LANGUAGE,
     DEFAULT_THUMB_CACHE_MAX_SIZE_MB,
@@ -204,6 +208,27 @@ class MetaDataController(
             # TEMP(classical 5a catch-up): remove before release
             ConfigEntry(
                 key=CONF_RECORDING_WORKS_CATCH_UP_DONE,
+                type=ConfigEntryType.BOOLEAN,
+                required=False,
+                hidden=True,
+            ),
+            # TEMP(classical 5b catch-up): remove before release
+            ConfigEntry(
+                key=CONF_COMPOSERLESS_WORKS_CATCH_UP_DONE,
+                type=ConfigEntryType.BOOLEAN,
+                required=False,
+                hidden=True,
+            ),
+            # TEMP(classical 5b work join): remove before release
+            ConfigEntry(
+                key=CONF_SAME_WORKS_JOIN_DONE,
+                type=ConfigEntryType.BOOLEAN,
+                required=False,
+                hidden=True,
+            ),
+            # TEMP(classical 5b alias join): remove before release
+            ConfigEntry(
+                key=CONF_ALIAS_JOIN_DONE,
                 type=ConfigEntryType.BOOLEAN,
                 required=False,
                 hidden=True,
@@ -769,6 +794,12 @@ class MetaDataController(
             return
         # TEMP(classical 5a catch-up): remove before release
         await self._queue_recording_works_catch_up()
+        # TEMP(classical 5b catch-up): remove before release
+        await self._queue_composerless_works_catch_up()
+        # TEMP(classical 5b work join): remove before release
+        await self._join_same_works_once()
+        # TEMP(classical 5b alias join): remove before release
+        await self._merge_composers_by_aliases_once()
         linked_domains = self._refresh_musicbrainz_linked_domains()
         processed: dict[str, int] = {}
         linked = not_found = failed = 0
@@ -1004,6 +1035,61 @@ class MetaDataController(
         self.mass.config.set_raw_core_config_value(
             self.domain, CONF_RECORDING_WORKS_CATCH_UP_DONE, True
         )
+
+    # TEMP(classical 5b catch-up): remove before release
+    async def _queue_composerless_works_catch_up(self) -> None:
+        """Queue the identified works without composers for another MusicBrainz lookup once."""
+        if self.mass.config.get_raw_core_config_value(
+            self.domain, CONF_COMPOSERLESS_WORKS_CATCH_UP_DONE, False
+        ):
+            return
+        identified = has_musicbrainz_id(
+            f"{DB_TABLE_WORKS}.item_id", MediaType.WORK, ExternalID.MB_WORK
+        )
+        try:
+            await self.mass.music.database.execute_write(
+                f"UPDATE {DB_TABLE_WORKS} "
+                "SET metadata = json_remove(metadata, '$.last_musicbrainz_lookup') "
+                f"WHERE {_valid_metadata_guard(DB_TABLE_WORKS)} AND {identified} "
+                f"AND NOT EXISTS (SELECT 1 FROM {DB_TABLE_WORK_ARTISTS} "
+                f"WHERE {DB_TABLE_WORK_ARTISTS}.work_id = {DB_TABLE_WORKS}.item_id "
+                f"AND {DB_TABLE_WORK_ARTISTS}.role = :composer)",
+                {"composer": ArtistRole.COMPOSER.value},
+            )
+        except Exception as err:
+            self.logger.warning("Could not queue the works without composers again: %s", err)
+            return
+        self.mass.config.set_raw_core_config_value(
+            self.domain, CONF_COMPOSERLESS_WORKS_CATCH_UP_DONE, True
+        )
+
+    # TEMP(classical 5b work join): remove before release
+    async def _join_same_works_once(self) -> None:
+        """Join the library works that adding them now would have made one work, once."""
+        if self.mass.config.get_raw_core_config_value(
+            self.domain, CONF_SAME_WORKS_JOIN_DONE, False
+        ):
+            return
+        try:
+            await self.mass.music.works.join_same_works()
+        except Exception as err:
+            self.logger.warning("Could not join the works that are the same work: %s", err)
+            return
+        self.mass.config.set_raw_core_config_value(self.domain, CONF_SAME_WORKS_JOIN_DONE, True)
+
+    # TEMP(classical 5b alias join): remove before release
+    async def _merge_composers_by_aliases_once(self) -> None:
+        """Run the alias-based composer merge for all existing confirmed composers, once."""
+        if self.mass.config.get_raw_core_config_value(self.domain, CONF_ALIAS_JOIN_DONE, False):
+            return
+        try:
+            for artist in await self.mass.music.artists.get_library_composers(with_mbid=True):
+                if artist.mbid:
+                    await self._merge_composer_by_aliases(artist.mbid)
+        except Exception as err:
+            self.logger.warning("Could not run alias-based composer merge: %s", err)
+            return
+        self.mass.config.set_raw_core_config_value(self.domain, CONF_ALIAS_JOIN_DONE, True)
 
     async def _pending_musicbrainz_link_counts(self) -> dict[str, int]:
         """Return how many items each MusicBrainz link step still has to look up."""

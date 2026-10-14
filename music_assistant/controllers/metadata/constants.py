@@ -88,6 +88,19 @@ CONF_MUSICBRAINZ_LINKED_DOMAINS = "musicbrainz_linked_domains"
 # were kept were queued for the performers step once more
 CONF_RECORDING_WORKS_CATCH_UP_DONE = "classical_recording_works_catch_up_done"
 
+# TEMP(classical 5b catch-up): remove before release
+# core config key recording that the identified works without composers were queued for
+# another MusicBrainz lookup once
+CONF_COMPOSERLESS_WORKS_CATCH_UP_DONE = "classical_composerless_works_catch_up_done"
+
+# TEMP(classical 5b work join): remove before release
+# core config key recording that the library works that are the same work were joined once
+CONF_SAME_WORKS_JOIN_DONE = "classical_same_works_join_done"
+
+# TEMP(classical 5b alias join): remove before release
+# core config key recording that the alias-based composer merge ran once for existing composers
+CONF_ALIAS_JOIN_DONE = "classical_alias_join_done"
+
 # keeps its historical artist-only id (and task domain) so existing schedules survive
 MISSING_METADATA_SCAN_TASK_ID = "metadata_missing_artist_metadata_scan_v2"
 

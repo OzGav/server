@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -922,6 +923,58 @@ async def test_album_identity_marks_a_miss_without_linking() -> None:
     assert album.external_ids == set()
     _mass(enrichment).music.albums.link_musicbrainz_mappings.assert_not_awaited()
     _mass(enrichment).music.albums.link_album_tracks.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("album", "expected"),
+    [
+        (
+            _album({(ExternalID.BARCODE, "5051083087282")}),
+            'Album "In Rainbows" (barcode 5051083087282) is not on MusicBrainz, add it for '
+            "example with Harmony: https://harmony.pulsewidth.org.uk/release?gtin=5051083087282",
+        ),
+        (
+            Album(
+                item_id="1",
+                provider="library",
+                name="In Rainbows",
+                provider_mappings={
+                    ProviderMapping(
+                        item_id="7eyQXxuf2nGj9d2367Gi5f",
+                        provider_domain="spotify",
+                        provider_instance="spotify",
+                    )
+                },
+            ),
+            'Album "In Rainbows" is not on MusicBrainz, add it for example with Harmony: '
+            "https://harmony.pulsewidth.org.uk/release"
+            "?url=https%3A%2F%2Fopen.spotify.com%2Falbum%2F7eyQXxuf2nGj9d2367Gi5f",
+        ),
+        # nothing to add it by
+        (_album(), "Album In Rainbows was not found on MusicBrainz"),
+        # MusicBrainz has the album, only no single edition of it matched
+        (
+            _album(
+                {
+                    (ExternalID.BARCODE, "5051083087282"),
+                    (ExternalID.MB_RELEASEGROUP, RELEASE_GROUP_ID),
+                }
+            ),
+            "Album In Rainbows was not found on MusicBrainz",
+        ),
+    ],
+)
+async def test_album_identity_miss_tells_where_to_add_the_album(
+    album: Album, expected: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An album MusicBrainz lacks is logged with a Harmony link by its barcode or its URL."""
+    enrichment = _enrichment(_musicbrainz(release=None))
+    enrichment.logger = logging.getLogger("test_enrichment")
+    caplog.set_level(logging.DEBUG, logger="test_enrichment")
+
+    await enrichment._link_album_to_musicbrainz(album)
+
+    assert [record.getMessage() for record in caplog.records] == [expected]
 
 
 @pytest.mark.asyncio

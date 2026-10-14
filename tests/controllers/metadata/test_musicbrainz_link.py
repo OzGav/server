@@ -140,6 +140,8 @@ def _controller(
     mass.music.get_provider_instances = _provider_instances(loaded_domains, unavailable_domains)
     mass.get_provider = Mock(return_value=musicbrainz or _musicbrainz())
     ctrl.mass = mass
+    # TEMP(classical 5b alias join): remove before release
+    ctrl._merge_composers_by_aliases_once = AsyncMock()  # type: ignore[method-assign]
     if stub_link:
         ctrl.link_item_to_musicbrainz = AsyncMock()  # type: ignore[method-assign]
     return ctrl

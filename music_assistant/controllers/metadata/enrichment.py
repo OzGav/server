@@ -13,6 +13,7 @@ from contextlib import suppress
 from dataclasses import replace
 from time import time
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlencode
 
 import aiohttp
 from music_assistant_models.enums import (
@@ -50,6 +51,7 @@ from music_assistant.helpers.compare import compare_strings
 from music_assistant.helpers.external_ids import is_valid_barcode, is_valid_isrc
 from music_assistant.helpers.provider_access import visible_music_sources
 from music_assistant.models.music_provider import MusicProvider
+from music_assistant.providers.musicbrainz.constants import HARMONY_RELEASE_URL
 from music_assistant.providers.musicbrainz.models import release_year
 from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider, relation_urls
 
@@ -720,7 +722,7 @@ class MetadataEnrichmentMixin:
                 album, library_track_count=len(db_tracks) or None
             )
             if release is None:
-                self.logger.debug("Album %s was not found on MusicBrainz", album.name)
+                self._log_album_not_found(album)
             else:
                 urls = relation_urls(release.relations)
                 _fill_album_from_release(album, release, urls)
@@ -749,6 +751,38 @@ class MetadataEnrichmentMixin:
             return False
         album.metadata.last_musicbrainz_lookup = int(time())
         return False
+
+    def _log_album_not_found(self, album: Album) -> None:
+        """Log that MusicBrainz lacks an album, with where to add it when that can be told."""
+        # a release group id means MusicBrainz has the album, only no single edition matched
+        if not album.get_external_id(ExternalID.MB_RELEASEGROUP):
+            barcode = min(
+                (
+                    value
+                    for id_type, value in album.external_ids
+                    if id_type == ExternalID.BARCODE and is_valid_barcode(value)
+                ),
+                default=None,
+            )
+            if barcode:
+                self.logger.debug(
+                    'Album "%s" (barcode %s) is not on MusicBrainz, '
+                    "add it for example with Harmony: %s?%s",
+                    album.name,
+                    barcode,
+                    HARMONY_RELEASE_URL,
+                    urlencode({"gtin": barcode}),
+                )
+                return
+            if urls := MusicbrainzProvider._reverse_lookup_urls(album):
+                self.logger.debug(
+                    'Album "%s" is not on MusicBrainz, add it for example with Harmony: %s?%s',
+                    album.name,
+                    HARMONY_RELEASE_URL,
+                    urlencode({"url": urls[0]}),
+                )
+                return
+        self.logger.debug("Album %s was not found on MusicBrainz", album.name)
 
     async def _link_track_to_musicbrainz(self, track: Track) -> bool:
         """

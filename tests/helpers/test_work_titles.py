@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from music_assistant.helpers.work_titles import TrackWork, joined_composer_name, parse_work_title
+from music_assistant.helpers.work_titles import (
+    TrackWork,
+    joined_composer_name,
+    numbered_piece,
+    parse_catalog_numbers,
+    parse_work_title,
+    part_key,
+)
 
 # real Spotify titles, with the first artist Spotify lists for them
 BEETHOVEN = "Ludwig van Beethoven"
@@ -115,9 +122,36 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
             ),
         ),
         (
+            "Swan Lake, Act II, Op. 20, TH 12: No. 10, Scene",
+            "Pyotr Ilyich Tchaikovsky",
+            TrackWork(
+                "Swan Lake, Act II, Op. 20, TH 12",
+                None,
+                "No. 10, Scene",
+                None,
+                "Swan Lake, Op. 20, TH 12",
+            ),
+        ),
+        (
+            "St. Matthew Passion, BWV 244, Anhang: Aria",
+            "Johann Sebastian Bach",
+            TrackWork(
+                "St. Matthew Passion, BWV 244, Anhang",
+                None,
+                "Aria",
+                None,
+                "St. Matthew Passion, BWV 244",
+            ),
+        ),
+        (
             "Symphony No. 3 Part 2: I. Lento",
             None,
             TrackWork("Symphony No. 3 Part 2", None, "I. Lento", 1),
+        ),
+        (
+            "La bohème, Act II, Scene 1: Viva Parpignol!",
+            PUCCINI,
+            TrackWork("La bohème, Act II, Scene 1", None, "Viva Parpignol!"),
         ),
     ],
 )
@@ -278,6 +312,62 @@ def test_composer_work_and_dashed_movement(title: str, composer: str, expected: 
     assert parse_work_title(title, composer) == expected
 
 
+def test_tchaikovsky_catalog_number() -> None:
+    """A Tchaikovsky thematic catalog number is read like any other catalog number."""
+    assert parse_catalog_numbers("Swan Lake, Op. 20, TH 12") == ["Op. 20", "TH 12"]
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Nocturne Op. 9 No. 2", ["Op. 9 No. 2"]),
+        ("Nocturne In F Sharp Major, Op 15, No. 2", ["Op 15, No. 2"]),
+        ("Symphony No. 5 in C minor, Op. 67", ["Op. 67"]),
+    ],
+)
+def test_catalog_number_keeps_its_number_within_the_opus(title: str, expected: list[str]) -> None:
+    """The number within an opus belongs to the catalog number, with or without a comma."""
+    assert parse_catalog_numbers(title) == expected
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("Matthäus-Passion, BWV 244, Part 1", "St. Matthew Passion, BWV 244, Part I"),
+        ("Messiah, HWV 56, Pt. 2", "Messiah, HWV 56, Part II"),
+        ("La bohème, Act II", "La Bohème, Act 2"),
+        ("Swan Lake, Act II, Op. 20, TH 12", "Swan Lake, Act 2"),
+        ("Matthäus-Passion, BWV 244, Anhang", "St. Matthew Passion, BWV 244, Anhang"),
+    ],
+)
+def test_same_part_written_differently(first: str, second: str) -> None:
+    """The same act or part written differently has one key."""
+    assert part_key(first) is not None
+    assert part_key(first) == part_key(second)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("Matthäus-Passion, BWV 244, Part 1", "Matthäus-Passion, BWV 244, Part 2"),
+        ("Opera, Act 1", "Opera, Part 1"),
+        ("Passion, Anhang", "Passion, Appendix"),
+        ("Passion, Anhang", "Passion, Part 1"),
+    ],
+)
+def test_different_parts_have_different_keys(first: str, second: str) -> None:
+    """Different acts or parts never share a key."""
+    assert part_key(first) != part_key(second)
+
+
+@pytest.mark.parametrize(
+    "work", ["Symphony No. 5, Op. 67", "Symphony No. 3 Part 2", "La bohème, Act II, Scene 1"]
+)
+def test_whole_work_has_no_part_key(work: str) -> None:
+    """A work that is not an act or part has no part key."""
+    assert part_key(work) is None
+
+
 @pytest.mark.parametrize(
     ("name", "title", "expected"),
     [
@@ -297,3 +387,22 @@ def test_composer_work_and_dashed_movement(title: str, composer: str, expected: 
 def test_joined_composer_name(name: str, title: str, expected: str | None) -> None:
     """A joined name starts with its composer only when its credits or the title say so."""
     assert joined_composer_name(name, title) == expected
+
+
+@pytest.mark.parametrize(
+    ("work", "expected"),
+    [
+        (
+            "Piano Sonata No. 11 in A major, K 331, No. 3 Rondo Alla Turca",
+            ("K 331", 3, "Rondo Alla Turca"),
+        ),
+        ("Serenade for Strings in C major, Op. 48, No. 2 Waltz", ("Op. 48", 2, "Waltz")),
+        ("Fantasie in C major, Op. 17, No. 1", ("Op. 17", 1, None)),
+        ("Serenade, Op. 48, No. 2, TH 48", ("Op. 48", 2, None)),
+        ("Piano Sonata No. 11 in A Major, K. 331", None),
+        ("Symphony No. 5 in C minor, Op. 67", None),
+    ],
+)
+def test_numbered_piece(work: str, expected: tuple[str, int, str | None] | None) -> None:
+    """A work titled as a numbered piece of an opus gives its opus, number and name."""
+    assert numbered_piece(work) == expected

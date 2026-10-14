@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from music_assistant_models.enums import MediaType
+from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import ItemMapping, Work
 from music_assistant_models.unique_list import UniqueList
 
@@ -49,22 +50,32 @@ _ROMAN_NUMERALS = (
 # catalog prefixes such as "BWV" or "op.", the single letter ones (Köchel, Deutsch, ...)
 # only after a comma so "Symphony no. 5 in D minor" or "Livre I" never count
 _CATALOG_PREFIXES = (
-    "BWV|BuxWV|CD|FP|GWV|Hob|HWV|Kk|KV|MWV|[Oo]pus|[Oo]p|RCT|RV|SV|Sz|TrV|TWV|WAB|WoO|WWV|ZT"
+    "BWV|BuxWV|CD|FP|GWV|Hob|HWV|Kk|KV|MWV|[Oo]pus|[Oo]p|RCT|RV|SV|Sz|TH|TrV|TWV|WAB|WoO|WWV|ZT"
 )
 _SINGLE_LETTER_CATALOG_PREFIXES = "DHKLPSTZ"
 # a catalog number such as "op. 8 no. 1", "K. 297c/299", "Hob. XVI:52" or "TWV 51:D7"
 _CATALOG_NUMBER = re.compile(
     rf"(?:(?<=, )[{_SINGLE_LETTER_CATALOG_PREFIXES}]|\b(?:{_CATALOG_PREFIXES}))\.?\s?"
     r"(?:[IVXL]+:|\d+:[A-Z]?)?\d+[A-Za-z]*(?:/\d+[A-Za-z]*)?"
-    r"(?:\s(?:[Nn]o\.|[Nn]r\.|[Nn]°)\s?\d+)?"
+    r"(?:,?\s(?:[Nn]o\.|[Nn]r\.|[Nn]°)\s?\d+)?"
 )
+# the number of a piece within its opus closing a catalog number, as in "Op. 48, No. 2"
+_PIECE_NUMBER = re.compile(r",?\s(?:[Nn]o\.|[Nn]r\.|[Nn]°)\s?(\d+)$")
 
 # the colon between the work and the movement of a "Work: Piece" title, followed by a space
 # or straight by the quoted text of an aria ('La Bohème, Act I:"Che gelida manina"'), so
 # catalog numbers such as "Hob. I:94" are never split
 _WORK_SEPARATOR = re.compile(r':(?:\s+|(?=["“]))')
-# an act or part closing a work title, such as "La bohème, Act II" or "Messiah, HWV 56, Pt. 2"
-_ACT_OR_PART = re.compile(r"^(.+), (?:Act|Part|Pt\.) (?:[IVX]+|\d+)$")
+# the words naming an act or part of a work, the numbered ones with the kind of part they name
+_NUMBERED_PART_WORDS = {"Act": "act", "Part": "part", "Pt.": "part"}
+_UNNUMBERED_PART_WORDS = ("Anhang", "Appendix")
+# an act or part closing a work title, only followed by catalog numbers, such as
+# "La bohème, Act II", "Messiah, HWV 56, Pt. 2" or "Swan Lake, Act II, Op. 20, TH 12"
+_ACT_OR_PART = re.compile(
+    rf"^(?P<work>.+), (?:(?P<word>{'|'.join(map(re.escape, _NUMBERED_PART_WORDS))}) "
+    rf"(?P<number>[IVX]+|\d+)|(?P<label>{'|'.join(_UNNUMBERED_PART_WORDS)}))"
+    rf"(?P<catalog>(?:, {_CATALOG_NUMBER.pattern})*)$"
+)
 # a work and its numbered movement joined by a dash, as in "Miserere - 01. Miserere Mei, Deus"
 _DASHED_MOVEMENT = re.compile(r"^(.+?) - ((?:No\.\s)?(?:\d+[a-z]?|[IVX]+)\.\s.+)$")
 
@@ -136,13 +147,43 @@ def work_with_movement(work: str, movement: str | None = None) -> TrackWork:
     :param work: The name of the work, such as "La bohème, Act II".
     :param movement: The title of the movement, such as "I. Allegro con brio".
     """
-    act_or_part = _ACT_OR_PART.match(work)
     return TrackWork(
         work,
         movement_name=movement,
         movement_number=_movement_number(movement) if movement else None,
-        parent_name=act_or_part.group(1) if act_or_part else None,
+        parent_name=parent_work_name(work),
     )
+
+
+def parent_work_name(work: str) -> str | None:
+    """
+    Return the name of the work an act or part is part of, or None for any other work.
+
+    The catalog numbers after the act or part belong to that work.
+
+    :param work: The name of a work, such as "Swan Lake, Act II, Op. 20, TH 12".
+    """
+    if not (match := _ACT_OR_PART.match(work)):
+        return None
+    return match["work"] + match["catalog"]
+
+
+def part_key(work: str) -> tuple[str, int | str] | None:
+    """
+    Return what tells an act or part apart from the other parts of its work, or None.
+
+    The same act or part written differently, such as "Part 1", "Part I" and "Pt. 1", has
+    one key. An unnumbered part, such as an "Anhang", is told apart by its label.
+
+    :param work: The name of a work, such as "Messiah, HWV 56, Pt. 2".
+    """
+    if not (match := _ACT_OR_PART.match(work)):
+        return None
+    if match["label"]:
+        return "label", create_safe_string(match["label"], True, True)
+    number = match["number"]
+    value = int(number) if number.isdecimal() else _roman_number(number)
+    return (_NUMBERED_PART_WORDS[match["word"]], value) if value else None
 
 
 def parse_catalog_numbers(title: str) -> list[str]:
@@ -152,6 +193,32 @@ def parse_catalog_numbers(title: str) -> list[str]:
     :param title: The title of a work, such as "Symphony no. 5 in C minor, op. 67".
     """
     return list(dict.fromkeys(match.group() for match in _CATALOG_NUMBER.finditer(title)))
+
+
+def numbered_piece(work: str) -> tuple[str, int, str | None] | None:
+    """
+    Return the opus, number and name of a work titled as a numbered piece of an opus, or None.
+
+    "Piano Sonata No. 11 in A major, K 331, No. 3 Rondo Alla Turca" gives "K 331", 3 and
+    "Rondo Alla Turca". The name is None when the title names none after the number.
+
+    :param work: The name of a work.
+    """
+    numbered = [
+        (catalog, piece)
+        for catalog in _CATALOG_NUMBER.finditer(work)
+        if (piece := _PIECE_NUMBER.search(catalog.group()))
+    ]
+    if len(numbered) != 1:
+        return None
+    [(catalog, piece)] = numbered
+    name = work[catalog.end() :].strip(" ,.-")
+    # text that is another catalog number names no piece
+    return (
+        catalog.group()[: piece.start()],
+        int(piece.group(1)),
+        name if name and not parse_catalog_numbers(name) else None,
+    )
 
 
 def set_track_work(track: Track, track_work: TrackWork, composer: Artist | None) -> None:

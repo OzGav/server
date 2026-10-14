@@ -13,10 +13,13 @@ from music_assistant_models.media_items import (
     Album,
     Artist,
     Credit,
+    ItemMapping,
     ProviderMapping,
     Track,
     UniqueList,
+    Work,
 )
+from music_assistant_models.media_items.metadata import MediaItemMetadata
 
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.controller import (
@@ -446,6 +449,52 @@ async def test_composing_track_artist_is_no_performer(music_mass: MusicAssistant
     )
 
 
+async def test_track_naming_only_its_composer_gets_the_recordings_performers(
+    music_mass: MusicAssistant,
+) -> None:
+    """A track naming no artist but its composer is credited with the recording's performers."""
+    ctrl = _controller(
+        music_mass,
+        {"release/": _lookup(BEST_CLASSICAL), f"artist/{ECO_MBID}": _eco_with_spotify_link()},
+    )
+    await music_mass.music.artists.add_item_to_library(_artist("Nigel Kennedy"))
+    track = await _kennedy_album(
+        music_mass, ["Antonio Vivaldi"], [("Antonio Vivaldi", ArtistRole.COMPOSER, None)]
+    )
+
+    with patch.object(music_mass.music, "get_provider_instances", _spotify_instances()):
+        await _read_album(ctrl, track)
+
+    # the library's own artist is taken by its name, the orchestra is added on its Spotify link
+    assert await _credits(music_mass, track) == {
+        ("Antonio Vivaldi", ArtistRole.MAIN_ARTIST, None),
+        ("Antonio Vivaldi", ArtistRole.COMPOSER, None),
+        ("Nigel Kennedy", ArtistRole.CONDUCTOR, None),
+        ("Nigel Kennedy", ArtistRole.SOLOIST, "violin"),
+        ("English Chamber Orchestra", ArtistRole.ORCHESTRA, None),
+    }
+    assert await _mbid(music_mass, "English Chamber Orchestra") == ECO_MBID
+
+
+async def test_performer_linked_to_no_music_provider_is_not_added(
+    music_mass: MusicAssistant,
+) -> None:
+    """A performer neither in the library nor linked to a loaded music provider is left out."""
+    ctrl = _controller(music_mass, {"release/": _lookup(BEST_CLASSICAL)})
+    track = await _kennedy_album(
+        music_mass, ["Antonio Vivaldi"], [("Antonio Vivaldi", ArtistRole.COMPOSER, None)]
+    )
+    before = await _credits(music_mass, track)
+
+    await _read_album(ctrl, track)
+
+    assert await _credits(music_mass, track) == before
+    assert not await music_mass.music.artists.get_library_items_by_query(
+        extra_query_parts=["artists.name = :name"],
+        extra_query_params={"name": "English Chamber Orchestra"},
+    )
+
+
 @pytest.mark.parametrize(
     ("release", "title", "artists"),
     [
@@ -620,6 +669,38 @@ async def test_track_keeps_the_work_ids_it_has(music_mass: MusicAssistant) -> No
     await _read_album(ctrl, track)
 
     assert await _work_ids(music_mass, track) == {OTHER_MBID}
+
+
+@pytest.mark.parametrize(("work_mbid", "looked_up_again"), [(None, True), (OTHER_MBID, False)])
+async def test_track_gaining_work_ids_has_its_unidentified_work_looked_up_again(
+    music_mass: MusicAssistant, work_mbid: str | None, looked_up_again: bool
+) -> None:
+    """A track taking its recording's work ids has its unidentified work looked up again."""
+    ctrl = _controller(music_mass, {"release/": _lookup(BEST_CLASSICAL)})
+    work = await music_mass.music.works.add_item_to_library(
+        Work(
+            item_id="Spring",
+            provider=PROVIDER_INSTANCE,
+            name="Spring",
+            provider_mappings=set(),
+            external_ids={(ExternalID.MB_WORK, work_mbid)} if work_mbid else set(),
+            metadata=MediaItemMetadata(last_musicbrainz_lookup=1),
+        )
+    )
+    spring = _track(
+        "Spring",
+        _recording_id(BEST_CLASSICAL, KENNEDY),
+        ["Nigel Kennedy"],
+        [],
+        _album(_release(BEST_CLASSICAL).id),
+    )
+    spring.work = ItemMapping.from_item(work)
+    track = await _add(music_mass, spring)
+
+    await _read_album(ctrl, track)
+
+    stored = await music_mass.music.works.get_library_item(work.item_id)
+    assert (stored.metadata.last_musicbrainz_lookup is None) == looked_up_again
 
 
 async def test_artist_of_another_name_is_matched_by_its_provider_link(
