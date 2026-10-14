@@ -56,6 +56,7 @@ from music_assistant.constants import (
     GENRE_ICONS_DIR_NAME,
     RESOURCES_DIR,
 )
+from music_assistant.controllers.music.classification import CLASSICAL_GENRE_KEY
 from music_assistant.controllers.music.helpers import search_name_match_clause
 from music_assistant.controllers.music.listing import resolve_listing_sort
 from music_assistant.controllers.tasks.context import update_current_task_progress_text
@@ -66,7 +67,7 @@ from music_assistant.helpers.json import json_loads, serialize_to_json
 from .base import MediaControllerBase
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from music_assistant_models.event import MassEvent
 
@@ -1252,6 +1253,26 @@ class GenreController(MediaControllerBase[Genre]):
                 )
             if to_add or to_remove:
                 await self.mass.music.classification.update_item(media_type, media_id_int)
+
+    async def names_classical_genre(self, genre_names: Iterable[str]) -> bool:
+        """
+        Return whether any of the given music genre names maps to the curated classical genre.
+
+        :param genre_names: Genre names as tagged, such as the genre tags of a file.
+        """
+        genre_ids: set[int] = set()
+        for name in genre_names:
+            # resolved one by one, as a name the library does not know resolves all to nothing
+            genre_ids |= await self._resolve_genre_names_cached({name}, None) or set()
+        if not genre_ids:
+            return False
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT 1 FROM {DB_TABLE_GENRES} WHERE item_id IN :genre_ids "
+            "AND translation_key = :key AND content_type IS NULL",
+            {"genre_ids": list(genre_ids), "key": CLASSICAL_GENRE_KEY},
+            limit=1,
+        )
+        return bool(rows)
 
     def register_scheduled_scan_task(self) -> BackgroundTask:
         """Register the recurring genre mapping scan task."""

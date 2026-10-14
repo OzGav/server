@@ -39,19 +39,9 @@ from music_assistant.mass import MusicAssistant
 from music_assistant.models.music_provider import MusicProvider
 
 
-async def test_merging_track_update_adds_no_provider_work(mass: MusicAssistant) -> None:
-    """A merging update keeps the stored work and leaves the work it describes out."""
-    work = await _add_work(mass, f"Work {_token()}")
-    track = await _add_track(mass, work)
-    update = await mass.music.tracks.get_library_item(track.item_id)
-    update.work = _work(f"Other {_token()}")
-    before = await _library_work_ids(mass)
-
-    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
-
-    assert stored.work is not None
-    assert stored.work.item_id == work.item_id
-    assert await _library_work_ids(mass) == before
+async def _add_part(mass: MusicAssistant, name: str, parent: Work, composer: Artist) -> Work:
+    """Add a work that is a part of a library work."""
+    return await _add_work(mass, name, [composer], parent_work=ItemMapping.from_item(parent))
 
 
 PROVIDER_INSTANCE = "works_instance"
@@ -626,6 +616,21 @@ async def test_track_work_named_without_an_id_is_not_added(mass: MusicAssistant)
     assert track.work is None
     assert await _library_work_ids(mass) == before
     assert (track.classical_tag, track.is_classical) == (False, False)
+
+
+async def test_track_work_named_without_an_id_is_the_work_of_the_track_s_own_id(
+    mass: MusicAssistant,
+) -> None:
+    """A track carrying one MusicBrainz work id gets that work, whatever work its source names."""
+    mbid = _mbid()
+    name = f"Moonlight Sonata {_token()}"
+
+    track = await _add_track(mass, _work(name), movement_name="First Movement", work_ids=[mbid])
+
+    assert track.work is not None
+    work = await mass.music.works.get_library_item(track.work.item_id)
+    assert (work.mbid, work.name) == (mbid, name)
+    assert not track.classical_tag
 
 
 async def test_provider_work_matches_a_composer_the_provider_names_differently(

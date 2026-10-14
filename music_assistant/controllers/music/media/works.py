@@ -288,7 +288,20 @@ class WorksController(MediaControllerBase[Work]):
         same_mbid = await self.get_library_items_by_external_id(
             mbid, ExternalID.MB_WORK, limit=None
         )
-        all_ids = sorted({work_id, *(int(x.item_id) for x in same_mbid)})
+        return await self.merge_library_works([int(x.item_id) for x in same_mbid], work_id)
+
+    async def merge_library_works(self, work_ids: Iterable[int], work_id: int) -> int:
+        """
+        Merge the given library works into one.
+
+        The work holding the most tracks survives, the oldest of them on a tie. A
+        work that cannot be merged, such as a different MusicBrainz work, stays as it is.
+
+        :param work_ids: Library ids of the works to merge.
+        :param work_id: Library id of one of the works, merged along with them.
+        :return: The library id the given work is found under after the merge.
+        """
+        all_ids = sorted({work_id, *work_ids})
         rows = await self.mass.music.database.get_rows_from_query(
             f"SELECT work_id, COUNT(*) AS track_count FROM {DB_TABLE_TRACKS} "
             "WHERE work_id IN :ids GROUP BY work_id",
@@ -305,7 +318,7 @@ class WorksController(MediaControllerBase[Work]):
             except MediaNotFoundError:
                 continue  # already merged by a concurrent run
             except InvalidDataError as err:
-                self.logger.info("Not merging works with MusicBrainz ID %s: %s", mbid, err)
+                self.logger.info("Not merging work %s into %s: %s", source_id, target_id, err)
                 if source_id == work_id:
                     return work_id
         return target_id
@@ -409,18 +422,7 @@ class WorksController(MediaControllerBase[Work]):
             return work_id
         if not work.mbid:
             return None
-        # matched on the library artists, as a provider may name a composer differently
-        work.composers = UniqueList(
-            [
-                ItemMapping(
-                    media_type=MediaType.ARTIST,
-                    item_id=str(await self._get_library_artist_id(x)),
-                    provider="library",
-                    name=x.name,
-                )
-                for x in work.composers
-            ]
-        )
+        await self._set_library_composers(work)
         return int((await self.add_item_to_library(work)).item_id)
 
     async def _add_library_item(self, item: Work, overwrite_existing: bool = False) -> int:
@@ -553,6 +555,21 @@ class WorksController(MediaControllerBase[Work]):
             await self.mass.music.database.delete(DB_TABLE_WORK_ARRANGEMENTS, {"work_id": db_id})
         for source_id in dict.fromkeys(source_ids):
             await self.add_arrangement(db_id, source_id)
+
+    async def _set_library_composers(self, work: Work) -> None:
+        """Replace the composers of a work by their library artists, adding those if needed."""
+        # matched on the library artists, as a provider may name a composer differently
+        work.composers = UniqueList(
+            [
+                ItemMapping(
+                    media_type=MediaType.ARTIST,
+                    item_id=str(await self._get_library_artist_id(x)),
+                    provider="library",
+                    name=x.name,
+                )
+                for x in work.composers
+            ]
+        )
 
     async def _validate_library_item_merge(self, target: Work, source: Work) -> None:
         """Validate that two works are not different MusicBrainz works."""

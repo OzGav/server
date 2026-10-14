@@ -15,7 +15,9 @@ LUCENE_SPECIAL = r'([+\-&|!(){}\[\]\^"~*?:\\\/])'
 
 # Pages users are pointed to for adding what MusicBrainz lacks.
 MUSICBRAINZ_WEB_URL = "https://musicbrainz.org"
+HARMONY_RELEASE_URL = "https://harmony.pulsewidth.org.uk/release"
 MAGICISRC_URL = "https://magicisrc.kepstin.ca/"
+
 # A recording search lists only a few of the releases a song appeared on, and for a much
 # reissued song those can all be reissues. The release group knows when it was first
 # released, but a group that predates the listed releases by only a few years is usually

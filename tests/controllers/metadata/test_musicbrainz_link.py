@@ -687,6 +687,8 @@ async def test_link_item_resolves_an_artists_musicbrainz_id_first() -> None:
     ctrl._get_artist_mbid = AsyncMock(return_value=(ARTIST_ID, False))  # type: ignore[method-assign]
     ctrl._link_artist_to_musicbrainz = AsyncMock()  # type: ignore[method-assign]
     _mass(ctrl).music.artists.merge_library_artists_by_mbid = AsyncMock(return_value=1)
+    # the artist is no classical composer
+    _mass(ctrl).music.database.get_rows_from_query = AsyncMock(return_value=[])
     artist = Artist(item_id="1", provider="library", name="Radiohead", provider_mappings=set())
 
     await ctrl.link_item_to_musicbrainz(artist)

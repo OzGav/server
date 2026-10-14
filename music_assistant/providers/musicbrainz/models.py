@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, cast
 from mashumaro import DataClassDictMixin
 from music_assistant_models.enums import ArtistRole, WorkType
 
+from music_assistant.helpers.work_titles import without_part_subtitle
+
 from .constants import (
     ARRANGEMENT_RELATION_TYPES,
     CATALOG_SERIES_TYPE,
@@ -55,6 +57,9 @@ def release_year(date: str | None) -> int | None:
 
 def part_name(title: str, parent_title: str) -> str:
     """Return the title of a part without the start it shares with the title of its work, if any."""
+    # the parts of an act with a subtitle, such as "Luisa Miller: Atto II. “L'intrigo”", share
+    # its title only up to the act's number
+    parent_title = without_part_subtitle(parent_title)
     shared = next(
         (
             index

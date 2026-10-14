@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -960,6 +961,166 @@ async def test_album_identity_marks_a_miss_without_linking() -> None:
     assert album.external_ids == set()
     _mass(enrichment).music.albums.link_musicbrainz_mappings.assert_not_awaited()
     _mass(enrichment).music.albums.link_album_tracks.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("album", "expected"),
+    [
+        (
+            _album(
+                {(ExternalID.BARCODE, "5051083087282")},
+                provider_mappings={_library_mapping()},
+            ),
+            'Album "In Rainbows" (barcode 5051083087282) is not on MusicBrainz, add it for '
+            "example with Harmony: https://harmony.pulsewidth.org.uk/release?gtin=5051083087282",
+        ),
+        # an album stored only for a track of it gets no hint
+        (
+            _album(
+                {(ExternalID.BARCODE, "5051083087282")},
+                provider_mappings={_library_mapping(in_library=False)},
+            ),
+            "Album In Rainbows was not found on MusicBrainz",
+        ),
+        (
+            Album(
+                item_id="1",
+                provider="library",
+                name="In Rainbows",
+                provider_mappings={
+                    ProviderMapping(
+                        item_id="7eyQXxuf2nGj9d2367Gi5f",
+                        provider_domain="spotify",
+                        provider_instance="spotify",
+                        in_library=True,
+                    )
+                },
+            ),
+            'Album "In Rainbows" is not on MusicBrainz, add it for example with Harmony: '
+            "https://harmony.pulsewidth.org.uk/release"
+            "?url=https%3A%2F%2Fopen.spotify.com%2Falbum%2F7eyQXxuf2nGj9d2367Gi5f",
+        ),
+        # nothing to add it by
+        (_album(), "Album In Rainbows was not found on MusicBrainz"),
+        # MusicBrainz has the album, only no single edition of it matched
+        (
+            _album(
+                {
+                    (ExternalID.BARCODE, "5051083087282"),
+                    (ExternalID.MB_RELEASEGROUP, RELEASE_GROUP_ID),
+                }
+            ),
+            "Album In Rainbows was not found on MusicBrainz",
+        ),
+    ],
+)
+async def test_album_identity_miss_tells_where_to_add_the_album(
+    album: Album, expected: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An album MusicBrainz lacks is logged with a Harmony link by its barcode or its URL."""
+    enrichment = _enrichment(_musicbrainz(release=None))
+    enrichment.logger = logging.getLogger("test_enrichment")
+    caplog.set_level(logging.DEBUG, logger="test_enrichment")
+
+    await enrichment._link_album_to_musicbrainz(album)
+
+    assert [record.getMessage() for record in caplog.records] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_album_identity_miss_is_logged_once(caplog: pytest.LogCaptureFixture) -> None:
+    """The hint on adding an album to MusicBrainz is logged once, however often it is missed."""
+    enrichment = _enrichment(_musicbrainz(release=None))
+    enrichment.logger = logging.getLogger("test_enrichment")
+    caplog.set_level(logging.INFO, logger="test_enrichment")
+    album = _album({(ExternalID.BARCODE, "5051083087282")}, provider_mappings={_library_mapping()})
+
+    await enrichment._link_album_to_musicbrainz(album)
+    await enrichment._link_album_to_musicbrainz(album)
+
+    assert len(caplog.records) == 1
+
+
+@pytest.mark.parametrize(
+    ("release_title", "in_library", "expected"),
+    [
+        (
+            "OK Computer",
+            True,
+            'Album "In Rainbows" (barcode 5051083087282) is on MusicBrainz as release '
+            '"OK Computer", but its title differs, so it is not used; correct the release or '
+            f"the album's tags: https://musicbrainz.org/release/{RELEASE_ID}",
+        ),
+        (
+            "In Rainbows",
+            True,
+            'Album "In Rainbows" (barcode 5051083087282) is on MusicBrainz as release '
+            '"In Rainbows", but its first artist differs, so it is not used; correct the release '
+            f"or the album's tags: https://musicbrainz.org/release/{RELEASE_ID}",
+        ),
+        # an album stored only for a track of it gets no hint
+        ("OK Computer", False, "Album In Rainbows was not found on MusicBrainz"),
+    ],
+)
+async def test_album_barcode_on_another_release_names_that_release(
+    release_title: str, in_library: bool, expected: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An album whose barcode MusicBrainz has on a release that is not it names that release."""
+    musicbrainz = _musicbrainz(release=None)
+
+    async def resolve_release(*_args: Any, on_barcode_mismatch: Any, **_kwargs: Any) -> None:
+        on_barcode_mismatch("5051083087282", _release(title=release_title))
+
+    musicbrainz.resolve_release = AsyncMock(side_effect=resolve_release)
+    enrichment = _enrichment(musicbrainz)
+    enrichment.logger = logging.getLogger("test_enrichment")
+    caplog.set_level(logging.DEBUG, logger="test_enrichment")
+    album = _album(
+        {(ExternalID.BARCODE, "5051083087282")},
+        provider_mappings={_library_mapping(in_library=in_library)},
+    )
+
+    await enrichment._link_album_to_musicbrainz(album)
+    await enrichment._link_album_to_musicbrainz(album)
+
+    assert [record.getMessage() for record in caplog.records] == [expected]
+    assert caplog.records[0].levelno == (logging.INFO if in_library else logging.DEBUG)
+
+
+@pytest.mark.asyncio
+async def test_album_barcode_on_another_release_names_the_link_to_add(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An album with a streaming link is told to add that link to the release its barcode is on."""
+    musicbrainz = _musicbrainz(release=None)
+
+    async def resolve_release(*_args: Any, on_barcode_mismatch: Any, **_kwargs: Any) -> None:
+        on_barcode_mismatch("5051083087282", _release(title="OK Computer"))
+
+    musicbrainz.resolve_release = AsyncMock(side_effect=resolve_release)
+    enrichment = _enrichment(musicbrainz)
+    enrichment.logger = logging.getLogger("test_enrichment")
+    caplog.set_level(logging.DEBUG, logger="test_enrichment")
+    album = _album(
+        {(ExternalID.BARCODE, "5051083087282")},
+        provider_mappings={
+            ProviderMapping(
+                item_id="3106",
+                provider_domain="tidal",
+                provider_instance="tidal_1",
+                in_library=True,
+            )
+        },
+    )
+
+    await enrichment._link_album_to_musicbrainz(album)
+
+    assert [record.getMessage() for record in caplog.records] == [
+        'Album "In Rainbows" (barcode 5051083087282) is on MusicBrainz as release '
+        '"OK Computer", but its title differs, so it is not used; if it is this album, add '
+        "https://tidal.com/album/3106 to the release, else correct the release or the album's "
+        f"tags: https://musicbrainz.org/release/{RELEASE_ID}"
+    ]
 
 
 @pytest.mark.asyncio

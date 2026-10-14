@@ -127,6 +127,21 @@ def test_album_is_classical_by_its_work_titles(
     assert _is_classical_album(_album_obj(titles)) is expected
 
 
+def test_work_title_gives_work_movement_and_composer() -> None:
+    """The first artist of a "Work: Piece" track is its composer, the rest names the work."""
+    track = parse_track(
+        _track_obj("La bohème, Act II: Viva Parpignol!", ("Giacomo Puccini", *PERFORMERS)),
+        _make_provider(),
+    )
+
+    assert [x.name for x in track.artists] == ["Giacomo Puccini", *PERFORMERS]
+    assert _composer_names(track) == ["Giacomo Puccini"]
+    assert track.movement_name == "Viva Parpignol!"
+    assert track.movement_number is None
+    assert isinstance(track.work, Work)
+    assert track.work.name == "La bohème, Act II"
+
+
 def test_title_naming_another_composer_credits_no_performer() -> None:
     """A "Composer: Work - 1. Movement" title keeps its performing first artist off the work."""
     track = parse_track(

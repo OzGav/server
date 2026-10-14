@@ -19,7 +19,11 @@ from music_assistant_models.errors import MediaNotFoundError
 from music_assistant_models.media_items import Album, Artist, ProviderMapping, Track, UniqueList
 from music_assistant_models.provider import ProviderManifest
 
-from music_assistant.constants import DB_TABLE_EXTERNAL_ID_LOOKUP, DB_TABLE_PROVIDER_MAPPINGS
+from music_assistant.constants import (
+    DB_TABLE_ALBUM_TRACKS,
+    DB_TABLE_EXTERNAL_ID_LOOKUP,
+    DB_TABLE_PROVIDER_MAPPINGS,
+)
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.models.music_provider import MusicProvider
 from music_assistant.providers.musicbrainz.models import (
@@ -436,6 +440,57 @@ async def _track_domains(mass: MusicAssistant) -> list[set[str]]:
     """Return the provider domains of every library track."""
     tracks = await mass.music.tracks.library_items(limit=0)
     return [{x.provider_domain for x in track.provider_mappings} for track in tracks]
+
+
+async def test_release_tracklist_joins_the_tracks_of_one_recording(mass: MusicAssistant) -> None:
+    """Two tracks at one position of a merged album become one track mapped to both services."""
+    album = await _add_spotify_album(mass)
+    for number in (1, 2):
+        await _add_tidal_track(mass, album, number)
+    album_id = int(album.item_id)
+    assert len(await mass.music.albums.get_library_album_tracks(album_id)) == 4
+
+    await mass.music.albums.link_album_tracks(
+        await mass.music.albums.get_library_item(album_id),
+        await mass.music.albums.get_library_album_tracks(album_id),
+        _release(),
+        link_providers=False,
+    )
+
+    tracks = sorted(
+        await mass.music.albums.get_library_album_tracks(album_id), key=lambda x: x.track_number
+    )
+    assert [track.mbid for track in tracks] == list(RECORDING_IDS)
+    assert [{x.provider_domain for x in track.provider_mappings} for track in tracks] == [
+        {"spotify", "tidal"},
+        {"spotify", "tidal"},
+    ]
+    rows = await mass.music.database.get_rows(DB_TABLE_ALBUM_TRACKS, {"album_id": album_id})
+    assert sorted((row["disc_number"], row["track_number"]) for row in rows) == [(1, 1), (1, 2)]
+
+
+async def test_release_tracklist_skips_a_track_joined_earlier_in_the_run(
+    mass: MusicAssistant,
+) -> None:
+    """A track merged into one listed before it is not written again."""
+    album = await _add_spotify_album(mass)
+    album_id = int(album.item_id)
+    spotify_track = (await mass.music.albums.get_library_album_tracks(album_id))[0]
+    await _set_recording_id(mass, spotify_track, RECORDING_IDS[0])
+    await _add_tidal_track(mass, album, 1)
+    db_tracks = sorted(
+        await mass.music.albums.get_library_album_tracks(album_id),
+        key=lambda x: "spotify" in {m.provider_domain for m in x.provider_mappings},
+    )
+
+    await mass.music.albums.link_album_tracks(
+        await mass.music.albums.get_library_item(album_id),
+        db_tracks,
+        _release(),
+        link_providers=False,
+    )
+
+    assert sorted(await _track_domains(mass), key=len) == [{"spotify"}, {"spotify", "tidal"}]
 
 
 async def test_recording_link_joins_the_track_already_holding_it(mass: MusicAssistant) -> None:

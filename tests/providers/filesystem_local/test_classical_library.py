@@ -19,31 +19,6 @@ from music_assistant.providers.filesystem_local.helpers import FileSystemItem
 from tests.providers.filesystem_local.conftest import make_provider
 
 
-async def test_pop_track_with_a_work_tag_stays_non_classical(
-    provider: LocalFileSystemProvider, mass: MusicAssistant
-) -> None:
-    """A pop song tagged with its work gets the work but is not classical."""
-    token = _token()
-    path = f"{token}/Album/01.flac"
-    tags = _tags(
-        path,
-        album=f"Album {token}",
-        artist=f"Band {token}",
-        composer=f"Songwriter {token}",
-        work=[f"Song {token}"],
-        musicbrainzworkid=[str(uuid4())],
-        genre="Pop",
-    )
-
-    track = await _add_track(provider, path, tags)
-
-    assert track.work is not None
-    assert track.work.name == f"Song {token}"
-    full_track = await mass.music.tracks.get_library_item(track.item_id)
-    assert not full_track.classical_tag
-    assert not full_track.is_classical
-
-
 @pytest.fixture(name="mass")
 def mass_fixture(
     music_mass_module: MusicAssistant, monkeypatch: pytest.MonkeyPatch
@@ -106,18 +81,7 @@ async def _parse_track(provider: LocalFileSystemProvider, path: str, tags: Audio
 
 async def _add_track(provider: LocalFileSystemProvider, path: str, tags: AudioTags) -> Track:
     """Parse a track file and add it to the library, the way a sync does."""
-    absolute_path = Path(provider.base_path, path)
-    absolute_path.parent.mkdir(parents=True, exist_ok=True)
-    absolute_path.touch()
-    file_item = FileSystemItem(
-        filename=path.rsplit("/", 1)[-1],
-        relative_path=path,
-        absolute_path=str(absolute_path),
-        is_dir=False,
-        checksum=uuid4().hex,
-    )
-    track = await provider._parse_track(file_item, tags)
-    await provider._set_track_work(track, tags)
+    track = await _parse_track(provider, path, tags)
     return await provider.mass.music.tracks.add_item_to_library(track)
 
 
@@ -126,7 +90,7 @@ async def test_classical_track_lands_in_the_library(
 ) -> None:
     """A tagged classical track carries its credits, work, movement and classical tag."""
     token = _token()
-    composer_mbid = str(uuid4())
+    composer_mbid, work_mbid = str(uuid4()), str(uuid4())
     tags = _tags(
         f"{token}/Album/01.flac",
         title="Symphony No. 5: I. Allegro con brio",
@@ -138,6 +102,7 @@ async def test_classical_track_lands_in_the_library(
         conductor=[f"Conductor {token}"],
         performer=[f"Orchestra {token} (orchestra)", f"Pianist {token} (piano)"],
         work=[f"Symphony No. 5 {token}"],
+        musicbrainzworkid=[work_mbid],
         movementname="Allegro con brio",
         movement="1",
         movementtotal="4",
@@ -154,6 +119,7 @@ async def test_classical_track_lands_in_the_library(
     assert (ArtistRole.SOLOIST, f"Pianist {token}", "piano") in roles
     assert track.work is not None
     assert track.work.name == f"Symphony No. 5 {token}"
+    assert (await mass.music.works.get_library_item(track.work.item_id)).mbid == work_mbid
     assert (track.movement_number, track.movement_total, track.movement_name) == (
         1,
         4,
@@ -168,6 +134,29 @@ async def test_classical_track_lands_in_the_library(
     assert composer.period == Period.BAROQUE
 
 
+async def test_pop_track_adds_only_its_main_artist(
+    provider: LocalFileSystemProvider, mass: MusicAssistant
+) -> None:
+    """A pop file's composer and performer credits stay out of the library."""
+    token = _token()
+    path = f"{token}/Album/01.flac"
+    tags = _tags(
+        path,
+        album=f"Album {token}",
+        artist=f"Singer {token}",
+        composer=f"Songwriter {token}",
+        performer=[f"Backing Singer {token} (background vocals)"],
+        genre="Rock",
+    )
+
+    track = await _add_track(provider, path, tags)
+
+    assert [x.name for x in track.artists] == [f"Singer {token}"]
+    assert not track.credits
+    artists = await mass.music.artists.library_items(search=token)
+    assert [x.name for x in artists] == [f"Singer {token}"]
+
+
 async def test_renamed_file_replaces_the_credits(provider: LocalFileSystemProvider) -> None:
     """A file renamed with new tags leaves only its new credits on the library track."""
     token = _token()
@@ -176,6 +165,7 @@ async def test_renamed_file_replaces_the_credits(provider: LocalFileSystemProvid
         "album": f"Songs {token}",
         "artist": f"Singer {token}",
         "musicbrainzrecordingid": str(uuid4()),
+        "isclassical": "1",
     }
     old = await _add_track(
         provider,
@@ -195,7 +185,7 @@ async def test_renamed_file_replaces_the_credits(provider: LocalFileSystemProvid
     )
 
     assert new.item_id == old.item_id
-    assert [(c.role, c.artist.name) for c in new.credits if c.role != ArtistRole.MAIN_ARTIST] == [
+    assert [(c.role, c.artist.name) for c in new.credits] == [
         (ArtistRole.COMPOSER, f"Charles Gounod {token}")
     ]
 
@@ -252,6 +242,7 @@ async def test_credits_follow_the_tag_order_per_role(provider: LocalFileSystemPr
     """Each role numbers its credits in tag order, and a credit is never repeated."""
     tags = _tags(
         "Album/01.flac",
+        isclassical="1",
         composer="Composer A; Composer B",
         conductor=["Conductor"],
         performer=[
@@ -293,6 +284,7 @@ async def test_musicbrainz_placeholder_credits_are_skipped(
     """Placeholder names such as [traditional] and [anonymous] give no credit."""
     tags = _tags(
         "Album/01.flac",
+        isclassical="1",
         composer="[traditional]",
         lyricist=["[anonymous]", "Real Lyricist"],
     )
@@ -308,6 +300,7 @@ async def test_roon_credits_are_read_without_performer_tags(
     """Roon's personnel, soloist and ensemble tags credit the performers of a file."""
     tags = _tags(
         "Album/01.flac",
+        isclassical="1",
         personnel=["Berliner Philharmoniker - Orchestra", "Wolfgang Schulz - Flute"],
         soloist=["Martha Argerich - Piano", "Gidon Kremer"],
         ensemble=["Kremerata Baltica"],
@@ -331,6 +324,7 @@ async def test_composers_carry_their_musicbrainz_ids_and_sort_names(
     first_id, second_id = str(uuid4()), str(uuid4())
     tags = _tags(
         "Album/01.flac",
+        isclassical="1",
         composer="Wolfgang Amadeus Mozart; Antonio Salieri",
         composersort=["Mozart, Wolfgang Amadeus", "Salieri, Antonio"],
         musicbrainzcomposerid=[first_id, second_id],
@@ -346,7 +340,7 @@ async def test_composers_carry_their_musicbrainz_ids_and_sort_names(
 
 async def test_credit_reuses_the_track_artist(provider: LocalFileSystemProvider) -> None:
     """A songwriter credited as composer is the same artist as the track artist."""
-    tags = _tags("Album/01.flac", artist="Singer", composer="Singer; Cowriter")
+    tags = _tags("Album/01.flac", artist="Singer", composer="Singer; Cowriter", isclassical="1")
 
     track = await _parse_track(provider, "Album/01.flac", tags)
 
@@ -357,13 +351,14 @@ async def test_credit_reuses_the_track_artist(provider: LocalFileSystemProvider)
 async def test_work_takes_the_catalog_numbers_of_its_title(
     provider: LocalFileSystemProvider, mass: MusicAssistant
 ) -> None:
-    """The catalog numbers in the work part of a work title land on the work."""
+    """The catalog numbers in a work title land on the work."""
     token = _token()
     path = f"{token}/Album/01.flac"
     tags = _tags(
         path,
         album=f"Album {token}",
-        work=[f"{token} Concerto in E major, op. 8 no. 1, RV 269: I. Allegro"],
+        work=[f"{token} Concerto in E major, op. 8 no. 1, RV 269"],
+        musicbrainzworkid=[str(uuid4())],
     )
 
     track = await _add_track(provider, path, tags)
@@ -373,36 +368,10 @@ async def test_work_takes_the_catalog_numbers_of_its_title(
     assert work.catalog_numbers == ["op. 8 no. 1", "RV 269"]
 
 
-async def test_movement_tags_link_the_general_work_and_keep_the_movement_id(
-    provider: LocalFileSystemProvider, mass: MusicAssistant
-) -> None:
-    """With movement tags the general work links with its id, the movement id stays on the track."""
-    token = _token()
-    work_id, movement_work_id = str(uuid4()), str(uuid4())
-    path = f"{token}/Album/01.flac"
-    tags = _tags(
-        path,
-        album=f"Album {token}",
-        composer=f"Composer {token}",
-        work=[f"Symphony {token}", f"Symphony {token}: I. Allegro"],
-        musicbrainzworkid=[work_id, movement_work_id],
-        movementname="Allegro",
-        movement="1/4",
-    )
-
-    track = await _add_track(provider, path, tags)
-
-    assert track.work is not None
-    work = await mass.music.works.get_library_item(track.work.item_id)
-    assert (work.name, work.get_external_id(ExternalID.MB_WORK)) == (f"Symphony {token}", work_id)
-    assert (track.movement_number, track.movement_total, track.movement_name) == (1, 4, "Allegro")
-    assert _work_ids(track) == {movement_work_id}
-
-
 async def test_movement_tags_win_over_a_split_movement_title(
     provider: LocalFileSystemProvider, mass: MusicAssistant
 ) -> None:
-    """A movement title links the parent work, the movement tags keep their own values."""
+    """A movement title's movement tags keep their own values."""
     token = _token()
     movement_work_id = str(uuid4())
     path = f"{token}/Album/03.flac"
@@ -420,7 +389,7 @@ async def test_movement_tags_win_over_a_split_movement_title(
 
     assert track.work is not None
     work = await mass.music.works.get_library_item(track.work.item_id)
-    assert (work.name, work.get_external_id(ExternalID.MB_WORK)) == (f"Symphony {token}", None)
+    assert (work.name, work.mbid) == (f"Symphony {token}", movement_work_id)
     # the tags name the movement and its total, the title only fills in its number
     assert (track.movement_name, track.movement_number, track.movement_total) == (
         "Scherzo. Allegro",
@@ -428,6 +397,24 @@ async def test_movement_tags_win_over_a_split_movement_title(
         4,
     )
     assert _work_ids(track) == {movement_work_id}
+
+
+@pytest.mark.parametrize(
+    ("work", "genre"),
+    [("Ave verum corpus", "Classical"), ("Symphony No. 5", "Rock")],
+)
+async def test_work_tag_of_a_classical_file_without_an_id_gives_no_work(
+    provider: LocalFileSystemProvider, work: str, genre: str
+) -> None:
+    """A classical file's work tag without its MusicBrainz id gives no work and no classical tag."""
+    token = _token()
+    path = f"{token}/Album/01.flac"
+    tags = _tags(path, album=f"Album {token}", work=[f"{work} {token}"], genre=genre)
+
+    track = await _add_track(provider, path, tags)
+
+    assert track.work is None
+    assert not track.classical_tag
 
 
 async def test_composer_period_comes_from_the_nfo_files_first(
@@ -470,20 +457,16 @@ async def test_composer_period_comes_from_the_nfo_files_first(
 
 
 async def test_only_composers_get_a_period(provider: LocalFileSystemProvider) -> None:
-    """Performers get no period, and the plain genre Classical sets none."""
+    """Performers get no period."""
     baroque = await _parse_track(
         provider,
         "Album/01.flac",
         _tags("Album/01.flac", composer="Bach", conductor=["Karajan"], genre="Baroque"),
     )
-    classical = await _parse_track(
-        provider, "Album/02.flac", _tags("Album/02.flac", composer="Haydn", genre="Classical")
-    )
 
     assert _period(baroque.composers[0]) == Period.BAROQUE
     assert _period(baroque.conductors[0]) is None
     assert _period(baroque.artists[0]) is None
-    assert _period(classical.composers[0]) is None
 
 
 async def test_artist_overwrite_without_a_period_keeps_it(mass: MusicAssistant) -> None:

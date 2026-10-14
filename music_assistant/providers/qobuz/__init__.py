@@ -46,6 +46,7 @@ from music_assistant_models.media_items import (
 from music_assistant_models.streamdetails import StreamDetails
 
 from music_assistant.constants import (
+    CLASSICAL_GENRE_NAME,
     CONF_ENTRY_UNOFFICIAL_PROVIDER,
     CONF_PASSWORD,
     CONF_USERNAME,
@@ -70,11 +71,15 @@ from music_assistant.helpers.throttle_retry import (
 )
 from music_assistant.helpers.util import (
     infer_album_type,
+    is_placeholder_artist,
     lock,
     parse_title_and_version,
     try_parse_int,
 )
+from music_assistant.helpers.work_titles import set_track_work
 from music_assistant.models.music_provider import MusicProvider
+
+from .classical import artist_key, is_classical_album, track_credits, track_work
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -107,7 +112,7 @@ SUPPORTED_FEATURES = {
 
 VARIOUS_ARTISTS_ID = "145383"
 # Bump when the shape of parsed artists, albums or tracks changes, so cached items are re-parsed
-PARSED_ITEM_CACHE_CHECKSUM = "instance_id_provider_v1"
+PARSED_ITEM_CACHE_CHECKSUM = "classical_v2"
 
 CONF_QUALITY = "quality"
 
@@ -245,6 +250,7 @@ class QobuzProvider(MusicProvider):
     @use_cache(3600 * 24 * 30, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM)  # Cache for 30 days
     async def get_artist(self, prov_artist_id: str) -> Artist:
         """Get full artist details by id."""
+        _require_qobuz_artist_id(prov_artist_id)
         params: dict[str, Any] = {"artist_id": prov_artist_id}
         artist_obj = await self._get_data("artist/get", **params)
         if artist_obj and artist_obj.get("id"):
@@ -272,7 +278,9 @@ class QobuzProvider(MusicProvider):
         msg = f"Item {prov_track_id} not found"
         raise MediaNotFoundError(msg)
 
-    @use_cache(3600 * 24 * 7, allow_expired_cache=True)  # Cache for 7 days
+    @use_cache(
+        3600 * 24 * 7, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True
+    )  # Cache for 7 days
     async def get_track_by_external_id(
         self, external_id: str, external_id_type: ExternalID
     ) -> Track | None:
@@ -290,7 +298,9 @@ class QobuzProvider(MusicProvider):
             fetch_item=self.get_track,
         )
 
-    @use_cache(3600 * 24 * 7, allow_expired_cache=True)  # Cache for 7 days
+    @use_cache(
+        3600 * 24 * 7, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True
+    )  # Cache for 7 days
     async def get_album_by_external_id(
         self, external_id: str, external_id_type: ExternalID
     ) -> Album | None:
@@ -342,17 +352,9 @@ class QobuzProvider(MusicProvider):
     )  # Cache for 30 days
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get all album tracks for given album id."""
-        params = {"album_id": prov_album_id}
-        result: list[Track] = []
-        for index, item in enumerate(
-            await self._get_all_items("album/get", **params, key="tracks")
-        ):
-            if not (item and item["id"]):
-                continue
-            result.append(await self._parse_track(item))
-            if index % 10 == 0:
-                await asyncio.sleep(0)
-        return result
+        if not (album_obj := await self._get_album_with_tracks(prov_album_id)):
+            return []
+        return await self._parse_album_tracks(album_obj)
 
     @use_cache(
         3600 * 3, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True
@@ -388,6 +390,8 @@ class QobuzProvider(MusicProvider):
     )  # Cache for 14 days
     async def get_artist_albums(self, prov_artist_id: str) -> list[Album]:
         """Get a list of albums for the given artist."""
+        if not is_qobuz_artist_id(prov_artist_id):
+            return []
         result = await self._get_data(
             "artist/get",
             artist_id=prov_artist_id,
@@ -413,6 +417,8 @@ class QobuzProvider(MusicProvider):
     )  # Cache for 14 days
     async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
         """Get a list of most popular tracks for the given artist."""
+        if not is_qobuz_artist_id(prov_artist_id):
+            return []
         result = await self._get_data(
             "artist/get",
             artist_id=prov_artist_id,
@@ -449,6 +455,8 @@ class QobuzProvider(MusicProvider):
         """Add item to library."""
         result = None
         if item.media_type == MediaType.ARTIST:
+            if not is_qobuz_artist_id(item.item_id):
+                return False
             result = await self._get_data("favorite/create", artist_id=item.item_id)
         elif item.media_type == MediaType.ALBUM:
             result = await self._get_data("favorite/create", album_ids=item.item_id)
@@ -462,6 +470,8 @@ class QobuzProvider(MusicProvider):
         """Remove item from library."""
         result = None
         if media_type == MediaType.ARTIST:
+            if not is_qobuz_artist_id(prov_item_id):
+                return False
             result = await self._get_data("favorite/delete", artist_ids=prov_item_id)
         elif media_type == MediaType.ALBUM:
             result = await self._get_data("favorite/delete", album_ids=prov_item_id)
@@ -611,6 +621,21 @@ class QobuzProvider(MusicProvider):
         with request_priority(RequestPriority.LOW):
             await self._post_data("track/reportStreamingStart", data=events)
 
+    def _parse_named_artist(self, name: str) -> Artist:
+        """Parse an artist Qobuz names without an artist id, identified by its name."""
+        return Artist(
+            item_id=name,
+            provider=self.instance_id,
+            name=name,
+            provider_mappings={
+                ProviderMapping(
+                    item_id=name,
+                    provider_domain=self.domain,
+                    provider_instance=self.instance_id,
+                )
+            },
+        )
+
     def _parse_artist(self, artist_obj: dict[str, Any]) -> Artist:
         """Parse qobuz artist object to generic layout."""
         artist = Artist(
@@ -699,6 +724,9 @@ class QobuzProvider(MusicProvider):
 
         if "genre" in album_obj:
             album.metadata.genres = {album_obj["genre"]["name"]}
+            # Qobuz names its genres in the account's language
+            if is_classical_album(album_obj):
+                album.metadata.genres.add(CLASSICAL_GENRE_NAME)
         if img := self.__get_image(album_obj):
             album.metadata.add_image(
                 MediaItemImage(
@@ -723,8 +751,19 @@ class QobuzProvider(MusicProvider):
             album.date_added = datetime.datetime.fromtimestamp(favorited_at, tz=datetime.UTC)
         return album
 
-    async def _parse_track(self, track_obj: dict[str, Any]) -> Track:
-        """Parse qobuz track object to generic layout."""
+    async def _parse_track(
+        self,
+        track_obj: dict[str, Any],
+        album_obj: dict[str, Any] | None = None,
+        album_artists: dict[str, Artist] | None = None,
+    ) -> Track:
+        """
+        Parse qobuz track object to generic layout.
+
+        :param track_obj: The Qobuz track object.
+        :param album_obj: The album of an album's track listing, whose track objects carry none.
+        :param album_artists: The Qobuz artists the album names, keyed by artist_key.
+        """
         name, version = parse_title_and_version(track_obj["title"], track_obj.get("version"))
         track = Track(
             item_id=str(track_obj["id"]),
@@ -775,27 +814,14 @@ class QobuzProvider(MusicProvider):
                 role = performer_str.split(", ")[1]
                 name = performer_str.split(", ")[0]
                 if "artist" in role.lower():
-                    artist = Artist(
-                        item_id=name,
-                        provider=self.instance_id,
-                        name=name,
-                        provider_mappings={
-                            ProviderMapping(
-                                item_id=name,
-                                provider_domain=self.domain,
-                                provider_instance=self.instance_id,
-                            )
-                        },
-                    )
-                    track.artists.append(artist)
-        # TODO: fix grabbing composer from details
+                    track.artists.append(self._parse_named_artist(name))
 
         if "album" in track_obj:
             album = await self._parse_album(track_obj["album"])
             if album:
                 track.album = album
         if track_obj.get("performers"):
-            track.metadata.performers = {x.strip() for x in track_obj["performers"].split("-")}
+            track.metadata.performers = {x.strip() for x in track_obj["performers"].split(" - ")}
         if track_obj.get("copyright"):
             track.metadata.copyright = track_obj["copyright"]
         if track_obj.get("parental_warning"):
@@ -811,7 +837,86 @@ class QobuzProvider(MusicProvider):
             )
         if favorited_at := track_obj.get("favorited_at"):
             track.date_added = datetime.datetime.fromtimestamp(favorited_at, tz=datetime.UTC)
+        album_obj = album_obj or track_obj.get("album")
+        if album_obj and is_classical_album(album_obj):
+            self._set_classical_details(track, track_obj, album_obj, album_artists)
         return track
+
+    def _set_classical_details(
+        self,
+        track: Track,
+        track_obj: dict[str, Any],
+        album_obj: dict[str, Any],
+        album_artists: dict[str, Artist] | None,
+    ) -> None:
+        """Set the credits, work and movement Qobuz gives for a track of a classical album."""
+        composer_obj = track_obj.get("composer") or {}
+        composer = (
+            self._parse_artist(composer_obj)
+            if composer_obj.get("id") and not is_placeholder_artist(composer_obj.get("name", ""))
+            else None
+        )
+        track.credits.extend(
+            track_credits(
+                track_obj.get("performers") or "",
+                composer,
+                track.artists,
+                self._album_artists(album_obj, [track_obj])
+                if album_artists is None
+                else album_artists,
+                {
+                    artist_key(x["name"]): x.get("roles") or []
+                    for x in album_obj.get("artists") or []
+                    if x.get("name")
+                },
+                self._parse_named_artist,
+            )
+        )
+        if classical_work := track_work(
+            track.name, track_obj.get("work"), composer.name if composer else None
+        ):
+            set_track_work(track, classical_work)
+
+    def _album_artists(
+        self, album_obj: dict[str, Any], track_objs: list[dict[str, Any]]
+    ) -> dict[str, Artist]:
+        """Return the Qobuz artists an album and its tracks name, keyed by artist_key."""
+        artist_objs = [
+            *(album_obj.get("artists") or []),
+            album_obj.get("artist"),
+            *(x.get(key) for x in track_objs for key in ("performer", "composer")),
+        ]
+        return {
+            artist_key(x["name"]): self._parse_artist(x)
+            for x in artist_objs
+            if x and x.get("id") and x.get("name") and str(x["id"]) != VARIOUS_ARTISTS_ID
+        }
+
+    async def _parse_album_tracks(self, album_obj: dict[str, Any]) -> list[Track]:
+        """Parse the tracks of an album object that holds its whole track listing."""
+        track_objs = [
+            x for x in (album_obj.get("tracks") or {}).get("items") or [] if x and x["id"]
+        ]
+        album_artists = self._album_artists(album_obj, track_objs)
+        result: list[Track] = []
+        for index, item in enumerate(track_objs):
+            result.append(await self._parse_track(item, album_obj, album_artists))
+            if index % 10 == 0:
+                await asyncio.sleep(0)
+        return result
+
+    async def _get_album_with_tracks(self, prov_album_id: str) -> dict[str, Any] | None:
+        """Return the album object with its whole track listing, None when not logged in."""
+        album_obj = await self._get_data("album/get", album_id=prov_album_id, limit=500, offset=0)
+        if not album_obj:
+            return None
+        tracks = album_obj.setdefault("tracks", {})
+        items = tracks.get("items") or []
+        if len(items) < tracks.get("total", 0):
+            tracks["items"] = items + await self._get_all_items(
+                "album/get", album_id=prov_album_id, key="tracks", offset=len(items)
+            )
+        return album_obj
 
     def _parse_playlist(self, playlist_obj: dict[str, Any]) -> Playlist:
         """Parse qobuz playlist object to generic layout."""
@@ -925,11 +1030,16 @@ class QobuzProvider(MusicProvider):
         return None
 
     async def _get_all_items(
-        self, endpoint: str, key: str = "tracks", **kwargs: Any
+        self, endpoint: str, key: str = "tracks", offset: int = 0, **kwargs: Any
     ) -> list[dict[str, Any]]:
-        """Get all items from a paged list."""
+        """
+        Get all items from a paged list.
+
+        :param endpoint: The API endpoint to read.
+        :param key: The key of the paged list in the response.
+        :param offset: The position of the first item to get.
+        """
         limit = 500
-        offset = 0
         all_items: list[dict[str, Any]] = []
         while True:
             kwargs["limit"] = limit
@@ -946,7 +1056,7 @@ class QobuzProvider(MusicProvider):
             if items_received < limit:
                 # If the API returned fewer items than requested but reports more exist,
                 # the server silently capped our limit. Continue paginating.
-                if items_received > 0 and total > len(all_items):
+                if items_received > 0 and total > kwargs["offset"] + items_received:
                     continue
                 break
         return all_items
@@ -1086,3 +1196,25 @@ class QobuzProvider(MusicProvider):
         if obj.get("artist"):
             return self.__get_image(obj["artist"])
         return None
+
+
+def is_qobuz_artist_id(item_id: str) -> bool:
+    """
+    Return whether an artist id is a Qobuz artist id.
+
+    An artist Qobuz names without an id has its name as its id, which must never be sent to the
+    API.
+
+    :param item_id: The provider item id of the artist.
+    """
+    return item_id.isdecimal()
+
+
+def _require_qobuz_artist_id(item_id: str) -> None:
+    """
+    Raise MediaNotFoundError for an artist id that cannot exist on Qobuz, without a request.
+
+    :param item_id: The provider item id of the artist.
+    """
+    if not is_qobuz_artist_id(item_id):
+        raise MediaNotFoundError(f"{item_id} is not a Qobuz artist id")

@@ -9,10 +9,12 @@ into library items (artists, albums, tracks, playlists, audiobooks and podcasts)
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from dataclasses import replace
 from time import time
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlencode
 
 import aiohttp
 from music_assistant_models.enums import (
@@ -48,10 +50,12 @@ from music_assistant.controllers.music.helpers import (
     fill_track_from_recording,
 )
 from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
-from music_assistant.helpers.compare import compare_strings
+from music_assistant.helpers.compare import compare_album_name, compare_strings
 from music_assistant.helpers.external_ids import is_valid_barcode, is_valid_isrc
+from music_assistant.helpers.logging import log_once
 from music_assistant.helpers.provider_access import visible_music_sources
 from music_assistant.models.music_provider import MusicProvider
+from music_assistant.providers.musicbrainz.constants import HARMONY_RELEASE_URL, MUSICBRAINZ_WEB_URL
 from music_assistant.providers.musicbrainz.models import release_year
 from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider, relation_urls
 
@@ -64,7 +68,6 @@ from .constants import (
 from .helpers import composer_period, fill_artist_from_musicbrainz, is_latin, musicbrainz_name
 
 if TYPE_CHECKING:
-    import logging
     from collections.abc import Hashable, Iterable, Sequence
 
     from music_assistant_models.config_entries import CoreConfig
@@ -295,9 +298,17 @@ class MetadataEnrichmentMixin:
         await self.mass.music.artists.update_item_in_library(artist.item_id, artist)
         # an id a name search found may belong to a namesake, so only a reliable one merges
         if merge_mbid:
-            await self.mass.music.artists.merge_library_artists_by_mbid(
-                int(artist.item_id), merge_mbid
-            )
+            await self._merge_identified_artist(int(artist.item_id), merge_mbid)
+
+    async def _merge_identified_artist(self, artist_id: int, mbid: str) -> None:
+        """Merge the artists sharing an artist's newly found MusicBrainz id, confirming a composer."""
+        survivor_id = await self.mass.music.artists.merge_library_artists_by_mbid(artist_id, mbid)
+        await self._confirm_if_composer(survivor_id, mbid)
+
+    async def _confirm_if_composer(self, artist_id: int, mbid: str) -> None:
+        """Join a classical composer's other spellings and its credits joined with others to it."""
+        if await self._is_classical_composer(artist_id):
+            await self._confirm_composer(mbid)
 
     def _select_description(
         self,
@@ -765,7 +776,7 @@ class MetadataEnrichmentMixin:
                 on_barcode_mismatch=lambda barcode, found: mismatches.append((barcode, found)),
             )
             if release is None:
-                self.logger.debug("Album %s was not found on MusicBrainz", album.name)
+                self._log_album_not_found(album, mismatches[0] if mismatches else None)
             else:
                 if album.mbid and album.mbid.casefold() != release.id.casefold():
                     await self._follow_merged_release(musicbrainz, album)
@@ -796,6 +807,86 @@ class MetadataEnrichmentMixin:
             return False
         album.metadata.last_musicbrainz_lookup = int(time())
         return False
+
+    def _log_album_not_found(
+        self, album: Album, barcode_release: tuple[str, MusicBrainzRelease] | None = None
+    ) -> None:
+        """
+        Log that MusicBrainz lacks an album, with where to add it when that can be told.
+
+        Where to add it is only told for an album the user added to the library, not for one
+        stored only for a track of it. Such an album whose barcode MusicBrainz has on a release
+        of another title or first artist is logged with that release instead.
+
+        :param album: The library album.
+        :param barcode_release: A barcode of the album and the release MusicBrainz has under it.
+        """
+        in_library = any(x.in_library for x in album.provider_mappings)
+        if in_library and barcode_release:
+            listed_barcode, release = barcode_release
+            # the album's own streaming link on the release identifies it whatever its title
+            urls = MusicbrainzProvider.reverse_lookup_urls(album)
+            fix = "correct the release or the album's tags"
+            log_once(
+                self.logger,
+                self._logged_hints,
+                ("album", album.uri),
+                logging.INFO,
+                'Album "%s" (barcode %s) is on MusicBrainz as release "%s", but its %s differs, '
+                "so it is not used; %s: %s/release/%s",
+                album.name,
+                listed_barcode,
+                release.title,
+                "first artist" if compare_album_name(release.title, album.name) else "title",
+                f"if it is this album, add {urls[0]} to the release, else {fix}" if urls else fix,
+                MUSICBRAINZ_WEB_URL,
+                release.id,
+            )
+            return
+        # a release group id means MusicBrainz has the album, only no single edition matched
+        if not album.get_external_id(ExternalID.MB_RELEASEGROUP) and in_library:
+            barcode = min(
+                (
+                    value
+                    for id_type, value in album.external_ids
+                    if id_type == ExternalID.BARCODE and is_valid_barcode(value)
+                ),
+                default=None,
+            )
+            if barcode:
+                log_once(
+                    self.logger,
+                    self._logged_hints,
+                    ("album", album.uri),
+                    logging.INFO,
+                    'Album "%s" (barcode %s) is not on MusicBrainz, '
+                    "add it for example with Harmony: %s?%s",
+                    album.name,
+                    barcode,
+                    HARMONY_RELEASE_URL,
+                    urlencode({"gtin": barcode}),
+                )
+                return
+            if urls := MusicbrainzProvider.reverse_lookup_urls(album):
+                log_once(
+                    self.logger,
+                    self._logged_hints,
+                    ("album", album.uri),
+                    logging.INFO,
+                    'Album "%s" is not on MusicBrainz, add it for example with Harmony: %s?%s',
+                    album.name,
+                    HARMONY_RELEASE_URL,
+                    urlencode({"url": urls[0]}),
+                )
+                return
+        log_once(
+            self.logger,
+            self._logged_hints,
+            ("album", album.uri),
+            logging.DEBUG,
+            "Album %s was not found on MusicBrainz",
+            album.name,
+        )
 
     async def _link_track_to_musicbrainz(self, track: Track, rebuild: bool = False) -> bool:
         """
