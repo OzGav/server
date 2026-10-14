@@ -17,7 +17,10 @@ from music_assistant_models.enums import (
     SortField,
     TaskStatus,
 )
-from music_assistant_models.errors import MusicAssistantError
+from music_assistant_models.errors import (
+    InvalidDataError,  # TEMP(classical 6a country catch-up, 5c movements catch-up)
+    MusicAssistantError,
+)
 from music_assistant_models.event import MassEvent
 from music_assistant_models.media_items import (
     Album,
@@ -27,14 +30,18 @@ from music_assistant_models.media_items import (
     Track,
     UniqueList,
     Work,
+    WorkMovement,  # TEMP(classical 5c movements catch-up)
 )
 
 from music_assistant.constants import DB_TABLE_ALBUMS
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.constants import (
+    COMPOSER_LOOKUP_RETRY_INTERVAL,
+    CONF_COMPOSER_COUNTRIES_DONE,  # TEMP(classical 6a country catch-up)
     CONF_LINK_PROVIDERS_VIA_MUSICBRAINZ,
     CONF_MUSICBRAINZ_LINKED_DOMAINS,
     CONF_THUMB_CACHE_MAX_SIZE,
+    CONF_WORK_MOVEMENTS_DONE,  # TEMP(classical 5c movements catch-up)
     MUSICBRAINZ_LINK_BATCH_SIZE,
     MUSICBRAINZ_LINK_TASK_ID,
     REFRESH_INTERVAL,
@@ -43,6 +50,7 @@ from music_assistant.controllers.metadata.controller import (
     _albums_to_identify_query,
     _albums_with_recordings_to_read_query,
     _artists_to_identify_query,
+    _composers_to_identify_query,
     _relink_query,
     _tracks_to_identify_query,
     _tracks_with_recording_to_read_query,
@@ -142,6 +150,10 @@ def _controller(
     ctrl.mass = mass
     # TEMP(classical 5b alias join): remove before release
     ctrl._merge_composers_by_aliases_once = AsyncMock()  # type: ignore[method-assign]
+    # TEMP(classical 6a country catch-up): remove before release
+    ctrl._fill_composer_countries_once = AsyncMock()  # type: ignore[method-assign]
+    # TEMP(classical 5c movements catch-up): remove before release
+    ctrl._fill_work_movements_once = AsyncMock()  # type: ignore[method-assign]
     if stub_link:
         ctrl.link_item_to_musicbrainz = AsyncMock()  # type: ignore[method-assign]
     return ctrl
@@ -194,6 +206,9 @@ def _queue(
             params = kwargs.get("extra_query_params") or {}
             if kwargs["extra_query_parts"][0] in performer_queries:
                 queried.append(f"{name} performers")
+                return []
+            if kwargs["extra_query_parts"][0] == _composers_to_identify_query():
+                queried.append("composers")
                 return []
             if "domain" in params:
                 queried.append(f"relink {name} {params['domain']}")
@@ -251,7 +266,7 @@ def _provider_instances(loaded: Sequence[str] = (), unavailable: Sequence[str] =
 
 
 async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
-    """Albums, then artists, tracks and works are selected by their queries, newest first."""
+    """Albums, artists, tracks, works and composers are selected by their queries, newest first."""
     ctrl = _controller()
     queried = _queue(ctrl)
 
@@ -263,6 +278,7 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
         "artists",
         "tracks",
         "works",
+        "composers",
         "albums performers",
         "tracks performers",
     ]
@@ -272,6 +288,11 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
         (music.artists, _artists_to_identify_query(), {}),
         (music.tracks, _tracks_to_identify_query(), {}),
         (music.works, _works_to_enrich_query(), {"stale": NOW - REFRESH_INTERVAL}),
+        (
+            music.artists,
+            _composers_to_identify_query(),
+            {"stale": NOW - COMPOSER_LOOKUP_RETRY_INTERVAL},
+        ),
         (music.albums, _albums_with_recordings_to_read_query(), {}),
         (music.tracks, _tracks_with_recording_to_read_query(), {}),
     ):
@@ -499,6 +520,7 @@ async def test_link_run_relinks_for_a_provider_loaded_since_the_previous_run() -
         "relink albums tidal",
         "relink artists tidal",
         "works",
+        "composers",
         "albums performers",
         "tracks performers",
     ]
@@ -698,16 +720,17 @@ async def test_link_item_hands_a_work_to_the_work_step() -> None:
 async def test_diagnostics_report_the_last_run_and_the_pending_counts() -> None:
     """Diagnostics carry the last run summary and how many items each phase still has."""
     ctrl = _controller()
-    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[6, 5, 4, 3, 2, 1])
+    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[7, 6, 5, 4, 3, 2, 1])
 
     assert await ctrl.get_diagnostics() == {
         "musicbrainz_link": {
             "last_run": None,
             "pending": {
-                "albums": 6,
-                "artists": 5,
-                "tracks": 4,
-                "works": 3,
+                "albums": 7,
+                "artists": 6,
+                "tracks": 5,
+                "works": 4,
+                "composers": 3,
                 "album performers": 2,
                 "track performers": 1,
             },
@@ -740,6 +763,101 @@ async def test_sync_completion_queues_the_link_run_once(
             await asyncio.sleep(0.01)
 
     assert handler.await_count == 1
+
+
+# --------------------------------------------------------------------------- #
+#  TEMP(classical 6a country catch-up): remove before release                  #
+# --------------------------------------------------------------------------- #
+
+
+async def test_country_catch_up_fills_the_composers_without_a_country_once() -> None:
+    """Composers with a MusicBrainz id but no country get it once; the rest are left alone."""
+    composers = []
+    for item_id, country in (("1", None), ("2", "AT"), ("3", None)):
+        artist = Artist(item_id=item_id, provider="library", name=item_id, provider_mappings=set())
+        artist.mbid = f"00000000-0000-4000-8000-00000000000{item_id}"
+        artist.metadata.country = country
+        composers.append(artist)
+    musicbrainz = _musicbrainz()
+    details = {composers[0].mbid: Mock(country_code="PL")}
+
+    async def _details(mbid: str) -> Mock:
+        if mbid not in details:
+            raise InvalidDataError(mbid)
+        return details[mbid]
+
+    musicbrainz.get_artist_details = AsyncMock(side_effect=_details)
+    ctrl = _controller(musicbrainz=musicbrainz)
+    mass = _mass(ctrl)
+    artists = mass.music.artists
+    artists.get_library_composers = AsyncMock(return_value=composers)
+    done: dict[str, bool] = {}
+    mass.config.get_raw_core_config_value = Mock(
+        side_effect=lambda _domain, key, default=None: done.get(key, default)
+    )
+    mass.config.set_raw_core_config_value = Mock(
+        side_effect=lambda _domain, key, value: done.__setitem__(key, value)
+    )
+
+    await MetaDataController._fill_composer_countries_once(ctrl)
+    await MetaDataController._fill_composer_countries_once(ctrl)
+
+    assert [x.args[0] for x in musicbrainz.get_artist_details.await_args_list] == [
+        composers[0].mbid,
+        composers[2].mbid,
+    ]
+    artists.update_item_in_library.assert_awaited_once_with("1", composers[0])
+    assert composers[0].metadata.country == "PL"
+    assert done == {CONF_COMPOSER_COUNTRIES_DONE: True}
+
+
+# --------------------------------------------------------------------------- #
+#  TEMP(classical 5c movements catch-up): remove before release                #
+# --------------------------------------------------------------------------- #
+
+
+async def test_movements_catch_up_fills_the_works_musicbrainz_lists_parts_of_once() -> None:
+    """Works with a MusicBrainz id get the movements MusicBrainz lists once, others stay alone."""
+    works = {}
+    for item_id in ("1", "2", "3"):
+        work = Work(item_id=item_id, provider="library", name=item_id, provider_mappings=set())
+        work.mbid = f"00000000-0000-4000-8000-00000000000{item_id}"
+        works[item_id] = work
+    movements = [WorkMovement(number=1, name="I. Allegro")]
+    details = {
+        works["1"].mbid: Mock(movements=movements),
+        works["2"].mbid: Mock(movements=[]),
+    }
+
+    async def _details(mbid: str) -> Mock:
+        if mbid not in details:
+            raise InvalidDataError(mbid)
+        return details[mbid]
+
+    musicbrainz = _musicbrainz()
+    musicbrainz.get_work_details = AsyncMock(side_effect=_details)
+    ctrl = _controller(musicbrainz=musicbrainz)
+    mass = _mass(ctrl)
+    mass.music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"item_id": x} for x in works]
+    )
+    mass.music.works.get_library_item = AsyncMock(side_effect=works.get)
+    done: dict[str, bool] = {}
+    mass.config.get_raw_core_config_value = Mock(
+        side_effect=lambda _domain, key, default=None: done.get(key, default)
+    )
+    mass.config.set_raw_core_config_value = Mock(
+        side_effect=lambda _domain, key, value: done.__setitem__(key, value)
+    )
+
+    await MetaDataController._fill_work_movements_once(ctrl)
+    await MetaDataController._fill_work_movements_once(ctrl)
+
+    assert musicbrainz.get_work_details.await_count == 3
+    mass.music.works.update_item_in_library.assert_awaited_once_with("1", works["1"])
+    assert works["1"].metadata.movements == movements
+    assert works["2"].metadata.movements is None
+    assert done == {CONF_WORK_MOVEMENTS_DONE: True}
 
 
 # --------------------------------------------------------------------------- #
@@ -825,6 +943,7 @@ async def test_link_run_selects_albums_by_their_lookup_marker(mass: MusicAssista
             "artists": 0,
             "tracks": 0,
             "works": 0,
+            "composers": 0,
             "album performers": 0,
             "track performers": 0,
         },

@@ -5,11 +5,17 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from music_assistant_models.enums import ArtistRole
 from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import Credit
 
 from music_assistant.helpers.compare import compare_strings
+from music_assistant.helpers.credit_roles import (
+    NO_ROLE,
+    is_known_role,
+    is_performing_role,
+    role_credits,
+    role_word,
+)
 from music_assistant.helpers.util import is_placeholder_artist
 from music_assistant.helpers.work_titles import TrackWork, parse_work_title, work_with_movement
 
@@ -21,104 +27,10 @@ if TYPE_CHECKING:
 # the Qobuz genre of classical music, which the path of every classical sub-genre starts with
 CLASSICAL_GENRE_ID = 10
 
-# the credit role of each role a performers string names, keyed by the role in lowercase without
-# spaces or hyphens; None for a role that is no credit, such as a producer or a publisher. The
-# main artist role marks an artist performing on the recording without naming how.
-_ROLE_WORDS: dict[str, ArtistRole | None] = {
-    "conductor": ArtistRole.CONDUCTOR,
-    "director": ArtistRole.CONDUCTOR,
-    "orchestra": ArtistRole.ORCHESTRA,
-    "ensemble": ArtistRole.ENSEMBLE,
-    "chamberensemble": ArtistRole.ENSEMBLE,
-    "choir": ArtistRole.CHOIR,
-    "chorus": ArtistRole.CHOIR,
-    "soloist": ArtistRole.SOLOIST,
-    "narrator": ArtistRole.PERFORMER,
-    "composer": ArtistRole.COMPOSER,
-    "lyricist": ArtistRole.LYRICIST,
-    "librettist": ArtistRole.LYRICIST,
-    "arranger": ArtistRole.ARRANGER,
-    "mainartist": ArtistRole.MAIN_ARTIST,
-    "artist": ArtistRole.MAIN_ARTIST,
-    "performer": ArtistRole.MAIN_ARTIST,
-    "featuredartist": ArtistRole.MAIN_ARTIST,
-    "author": None,
-    "writer": None,
-    "nonlyricauthor": None,
-    "translator": None,
-    "label": None,
-    "aandradministrator": None,
-}
-# the role of an artist the performers string names without any role
-_NO_ROLE = ""
-_PERFORMING_ROLES = frozenset(
-    (
-        ArtistRole.CONDUCTOR,
-        ArtistRole.ORCHESTRA,
-        ArtistRole.ENSEMBLE,
-        ArtistRole.CHOIR,
-        ArtistRole.SOLOIST,
-        ArtistRole.PERFORMER,
-    )
-)
 # production and rights roles, such as "Recording Engineer" or "OriginalPublisher"
 _NO_CREDIT_ROLE = re.compile(
     r"(engineer|producer|publisher|editor|mixer|mixing|mastering|assistant|administrator|"
     r"programmer|programming|manager|coordinator)$"
-)
-# a voice, such as "Tenor Vocals" or "TenorVocalist"
-_VOICE = re.compile(r"^(?:(.+?)\s?)?(?:vocals|vocalist|singer)$", re.IGNORECASE)
-_INSTRUMENTS = frozenset(
-    (
-        "accordion",
-        "bandoneon",
-        "bass clarinet",
-        "bassoon",
-        "basso continuo",
-        "celesta",
-        "cello",
-        "cembalo",
-        "clarinet",
-        "clavichord",
-        "continuo",
-        "contrabassoon",
-        "cor anglais",
-        "cornet",
-        "cornett",
-        "double bass",
-        "english horn",
-        "flute",
-        "fortepiano",
-        "french horn",
-        "guitar",
-        "harmonium",
-        "harp",
-        "harpsichord",
-        "horn",
-        "keyboards",
-        "lute",
-        "mandolin",
-        "oboe",
-        "oboe d'amore",
-        "organ",
-        "percussion",
-        "piano",
-        "piccolo",
-        "recorder",
-        "saxophone",
-        "synthesizer",
-        "theorbo",
-        "timpani",
-        "trombone",
-        "trumpet",
-        "tuba",
-        "viol",
-        "viola",
-        "viola da gamba",
-        "viola d'amore",
-        "violin",
-        "violoncello",
-    )
 )
 
 
@@ -187,12 +99,12 @@ def track_credits(
             continue
         names.setdefault(artist_key(name), name)
         # an artist named without any role is one of the performers
-        roles_by_artist.setdefault(artist_key(name), []).extend(roles or [_NO_ROLE])
+        roles_by_artist.setdefault(artist_key(name), []).extend(roles or [NO_ROLE])
     if composer:
         _drop_respelled_composer(roles_by_artist, artist_key(composer.name))
     for key, roles in album_roles.items():
         # an album artist credited with a performing role on the album performs on every track
-        if performing_roles := [x for x in roles if _performing_role(x)]:
+        if performing_roles := [x for x in roles if is_performing_role(x)]:
             roles_by_artist.setdefault(key, []).extend(performing_roles)
     main_artist_keys = {artist_key(x.name) for x in main_artists}
     for main_artist in main_artists:
@@ -214,7 +126,7 @@ def track_credits(
     )
     # a director leads the performance, unless the track names a conductor as well
     has_conductor = any(
-        _word(x) == "conductor" for roles in roles_by_artist.values() for x in roles
+        role_word(x) == "conductor" for roles in roles_by_artist.values() for x in roles
     )
     result: list[Credit] = []
     for key, roles in roles_by_artist.items():
@@ -222,12 +134,12 @@ def track_credits(
         # another name, as "Wiener Philharmoniker" next to the album's "Wiener Philharmonic
         # Orchestra"
         if key in joined or (
-            key not in artists and (key not in names or all(x == _NO_ROLE for x in roles))
+            key not in artists and (key not in names or all(x == NO_ROLE for x in roles))
         ):
             continue
         # a composer is a performer as well only when the performers string says so
-        is_main_artist = key in main_artist_keys and all(_word(x) != "composer" for x in roles)
-        for role, instrument in _artist_credits(roles, has_conductor, is_main_artist):
+        is_main_artist = key in main_artist_keys and all(role_word(x) != "composer" for x in roles)
+        for role, instrument in role_credits(roles, has_conductor, is_main_artist):
             if not (credited := artists.get(key)):
                 credited = artists[key] = named_artist(names[key])
             position = sum(x.role == role for x in result)
@@ -260,71 +172,29 @@ def artist_key(name: str) -> str:
     return create_safe_string(name, True, True)
 
 
-def _artist_credits(
-    roles: list[str], has_conductor: bool, is_main_artist: bool = False
-) -> list[tuple[ArtistRole, str | None]]:
-    """Return the credit roles and instruments one artist's roles give."""
-    result: dict[tuple[ArtistRole, str | None], None] = {}
-    performs = False
-    for role in roles:
-        word = _word(role)
-        if word == "director" and has_conductor:
-            continue
-        if voice := _VOICE.match(role):
-            # a voice is written as MusicBrainz and Picard write it, as in "tenor vocals"
-            result[(ArtistRole.SOLOIST, f"{voice.group(1) or ''} vocals".lower().lstrip())] = None
-        elif role.lower() in _INSTRUMENTS:
-            result[(ArtistRole.SOLOIST, role.lower())] = None
-        elif role == _NO_ROLE or _ROLE_WORDS.get(word) == ArtistRole.MAIN_ARTIST:
-            performs = True
-        elif credit_role := _ROLE_WORDS.get(word):
-            result[(credit_role, None)] = None
-    performing = [x for x in result if x[0] in _PERFORMING_ROLES]
-    if any(instrument for _role, instrument in performing):
-        # a soloist credited with an instrument or voice needs no plain soloist credit
-        result.pop((ArtistRole.SOLOIST, None), None)
-    if (performs or is_main_artist) and not performing:
-        result[(ArtistRole.PERFORMER, None)] = None
-    return list(result)
-
-
 def _drop_respelled_composer(roles_by_artist: dict[str, list[str]], composer_key: str) -> None:
     """Drop the composer roles of other names when the track's composer is not among them."""
     composer_keys = [
         key
         for key, roles in roles_by_artist.items()
-        if key != composer_key and any(_word(x) == "composer" for x in roles)
+        if key != composer_key and any(role_word(x) == "composer" for x in roles)
     ]
     # a performers string naming co-composers names the track's composer too, so one that
     # leaves it out spells that composer another way ("Frederic Chopin" for "Frédéric Chopin")
-    if any(_word(x) == "composer" for x in roles_by_artist[composer_key][1:]):
+    if any(role_word(x) == "composer" for x in roles_by_artist[composer_key][1:]):
         return
     for key in composer_keys:
-        if not (roles := [x for x in roles_by_artist[key] if _word(x) != "composer"]):
+        if not (roles := [x for x in roles_by_artist[key] if role_word(x) != "composer"]):
             del roles_by_artist[key]
         else:
             roles_by_artist[key] = roles
 
 
-def _performing_role(role: str) -> bool:
-    """Return whether a role, from a performers string or an album, names a performing credit."""
-    if _VOICE.match(role) or role.lower() in _INSTRUMENTS:
-        return True
-    return _ROLE_WORDS.get(_word(role)) in _PERFORMING_ROLES
-
-
 def _is_role(part: str) -> bool:
     """Return whether a part of a performers string credit is a role rather than a name."""
-    word = _word(part)
     return (
-        word in _ROLE_WORDS
-        or bool(_NO_CREDIT_ROLE.search(word) or _VOICE.match(part))
-        or part.lower() in _INSTRUMENTS
+        is_known_role(part)
+        or bool(_NO_CREDIT_ROLE.search(role_word(part)))
         # Qobuz writes its other roles as one word, as in "SoundEditor"
         or " " not in part
     )
-
-
-def _word(role: str) -> str:
-    """Return a role in lowercase without spaces or hyphens, as in "mainartist"."""
-    return re.sub(r"[\s-]", "", role).lower()

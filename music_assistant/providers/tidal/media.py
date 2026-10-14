@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp.client_exceptions import ClientError
@@ -21,6 +22,7 @@ from music_assistant.helpers.external_ids import (
     normalize_external_id,
 )
 
+from .classical import is_classical_album, lists_composers_first
 from .constants import FAVORITE_TRACKS_PLAYLIST_ID, PAGES_MIX, PLAYLISTS, SKIPPABLE_ITEM_ERRORS
 from .parsers import (
     parse_favorite_tracks_playlist,
@@ -135,8 +137,17 @@ class TidalMediaManager:
     async def get_album(self, prov_album_id: str) -> Album:
         """Get album details."""
         try:
+            # the first page of tracks, with their genres and credits, tells a classical album
             doc = await self.api.get_jsonapi(
-                f"albums/{prov_album_id}", include=["artists", "coverArt", "genres"]
+                f"albums/{prov_album_id}",
+                include=[
+                    "artists",
+                    "coverArt",
+                    "genres",
+                    "items",
+                    "items.genres",
+                    "items.credits.artist",
+                ],
             )
             return parse_album_v2(self.provider, doc, doc.data)
         except (ClientError, KeyError, ValueError) as err:
@@ -179,7 +190,14 @@ class TidalMediaManager:
             # track carries an image, matching the unofficial API's behaviour.
             doc = await self.api.get_jsonapi(
                 f"tracks/{prov_track_id}",
-                include=["artists", "albums", "albums.coverArt", "genres", "credits"],
+                include=[
+                    "artists",
+                    "albums",
+                    "albums.coverArt",
+                    "genres",
+                    "credits",
+                    "credits.artist",
+                ],
             )
             track = parse_track_v2(self.provider, doc, doc.data)
         except (ClientError, KeyError, ValueError) as err:
@@ -213,7 +231,8 @@ class TidalMediaManager:
 
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get album tracks."""
-        tracks: list[Track] = []
+        # the tracks with their numbers, parsed once the whole album is known
+        items: list[tuple[JsonApiDocument, dict[str, Any], int, int]] = []
         # Tidal numbers album items across the whole album rather than per
         # volume, so each volume is offset by the last number before it.
         # A volume that already restarts its numbering is kept as is.
@@ -221,7 +240,13 @@ class TidalMediaManager:
         last_number = volume_offset = 0
         async for doc in self.api.paginate_jsonapi(
             f"albums/{prov_album_id}/relationships/items",
-            include=["items.artists", "items.albums.coverArt"],
+            include=[
+                "items.artists",
+                "items.albums.coverArt",
+                "items.genres",
+                "items.credits",
+                "items.credits.artist",
+            ],
             replace_media="items",
         ):
             for item in doc.data_list:
@@ -238,13 +263,25 @@ class TidalMediaManager:
                 # yield an id that 404s on playback and shift trackNumber.
                 if item.get("type") != "tracks":
                     continue
-                if not (resource := doc.resolve(item)):
-                    continue
-                if (track := _parse_or_skip(parse_track_v2, self.provider, doc, resource)) is None:
-                    continue
-                track.track_number = item_number - volume_offset if item_number else 0
-                track.disc_number = item_meta.get("volumeNumber", 0) or 0
-                tracks.append(track)
+                if resource := doc.resolve(item):
+                    track_number = item_number - volume_offset if item_number else 0
+                    disc_number = item_meta.get("volumeNumber", 0) or 0
+                    items.append((doc, resource, track_number, disc_number))
+        # whether the album is classical is decided by all of its tracks together
+        album_tracks = [(doc, resource) for doc, resource, _, _ in items]
+        classical_album = is_classical_album(album_tracks)
+        parser = partial(
+            parse_track_v2,
+            classical_album=classical_album,
+            composer_first=lists_composers_first(album_tracks) if classical_album else None,
+        )
+        tracks: list[Track] = []
+        for doc, resource, track_number, disc_number in items:
+            if (track := _parse_or_skip(parser, self.provider, doc, resource)) is None:
+                continue
+            track.track_number = track_number
+            track.disc_number = disc_number
+            tracks.append(track)
         return tracks
 
     async def get_artist_albums(self, prov_artist_id: str) -> list[Album]:

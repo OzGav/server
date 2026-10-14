@@ -1429,13 +1429,16 @@ async def _refresh_composer(
     entity_type: ArtistEntityType = ArtistEntityType.PERSON,
     is_classical_composer: bool = True,
     period: Period | None = None,
+    country: str | None = None,
 ) -> Artist:
     """Refresh an artist whose metadata provider reports the given life span and return it."""
     # is_classical_composer is whether the library holds the artist as a classical composer
     enrichment = _enrichment()
     provider = _metadata_provider("musicbrainz", ProviderFeature.ARTIST_METADATA)
     provider.get_artist_metadata = AsyncMock(
-        return_value=MediaItemMetadata(artist_entity_type=entity_type, life_span=life_span)
+        return_value=MediaItemMetadata(
+            artist_entity_type=entity_type, life_span=life_span, country=country
+        )
     )
     enrichment.providers = [provider]  # type: ignore[misc]
     _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
@@ -1482,6 +1485,14 @@ async def test_artist_refresh_keeps_the_period_of_the_tags() -> None:
     )
 
     assert artist.period == Period.ROMANTIC
+
+
+@pytest.mark.asyncio
+async def test_artist_refresh_stores_the_composer_country() -> None:
+    """A composer keeps the country MusicBrainz reports along with their period."""
+    artist = await _refresh_composer(LifeSpan(begin="1810", end="1849", ended=True), country="PL")
+
+    assert (artist.period, artist.metadata.country) == (Period.ROMANTIC, "PL")
 
 
 @pytest.mark.asyncio

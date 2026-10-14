@@ -8,12 +8,12 @@ import pathlib
 import re
 from time import time
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 from uuid import uuid4
 
 import pytest
 from music_assistant_models.enums import ArtistEntityType, ArtistRole, ExternalID, Period, WorkType
-from music_assistant_models.errors import InvalidDataError
+from music_assistant_models.errors import InvalidDataError, MediaNotFoundError
 from music_assistant_models.media_items import (
     Artist,
     Credit,
@@ -25,14 +25,20 @@ from music_assistant_models.media_items import (
 )
 from music_assistant_models.media_items.metadata import LifeSpan, MediaItemMetadata
 
+from music_assistant.constants import DB_TABLE_TRACK_ARTISTS, DB_TABLE_WORK_ARTISTS
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.constants import REFRESH_INTERVAL
-from music_assistant.controllers.metadata.controller import _works_to_enrich_query
+from music_assistant.controllers.metadata.controller import (
+    _composers_to_identify_query,
+    _works_to_enrich_query,
+)
+from music_assistant.controllers.metadata.helpers import composer_period
 from music_assistant.helpers.compare import is_named_by
 from music_assistant.helpers.work_titles import parse_catalog_numbers
 from music_assistant.providers.musicbrainz.models import (
     MusicBrainzAlias,
     MusicBrainzArtist,
+    MusicBrainzLifeSpan,
     MusicBrainzRelation,
     MusicBrainzUrl,
     MusicBrainzWork,
@@ -132,7 +138,7 @@ async def _add_artist(
             item_id=uuid4().hex,
             provider=PROVIDER_INSTANCE,
             name=name,
-            provider_mappings={_mapping()},
+            provider_mappings=kwargs.pop("provider_mappings", {_mapping()}),
             external_ids={(ExternalID.MB_ARTIST, mbid)} if mbid else set(),
             **kwargs,
         )
@@ -283,6 +289,21 @@ async def test_movement_id_identifies_the_parent_work_and_fills_it(mass: MusicAs
     assert stored.metadata.last_musicbrainz_lookup is not None
     # the work type makes its tracks classical
     assert (await mass.music.tracks.get_library_item(track.item_id)).is_classical
+
+
+async def test_work_stores_the_movements_musicbrainz_lists(mass: MusicAssistant) -> None:
+    """The parts MusicBrainz lists for the work are stored as its movements."""
+    works = _musicbrainz_works("symphony_5", "symphony_5_movement_1")
+    work = await _add_work(mass, f"Symphony no. 5 {_token()}")
+    await _add_track(mass, work, [works["symphony_5_movement_1"].id])
+
+    stored = await _enrich(_controller(mass, works.values()), work)
+
+    assert stored.metadata.movements == works["symphony_5"].movements
+    assert [(x.number, x.name) for x in stored.metadata.movements or []] == [
+        (1, "I. Allegro con brio"),
+        (2, "II. Andante con moto"),
+    ]
 
 
 async def test_work_type_comes_from_the_top_level_work(mass: MusicAssistant) -> None:
@@ -1260,6 +1281,23 @@ async def test_library_composers_are_added_to_a_work_without_them_and_its_tracks
     assert _scheduled(ctrl) == [(composer.name, False)]
 
 
+async def test_work_musicbrainz_knows_is_not_given_its_tracks_composers(
+    mass: MusicAssistant,
+) -> None:
+    """A work with a MusicBrainz work id, its own or a track's, waits for MusicBrainz's composers."""
+    token = _token()
+    composer = await _add_artist(mass, f"Composer {token}")
+    identified = await _add_work(mass, f"Identified {token}", mbid=str(uuid4()))
+    by_track = await _add_work(mass, f"By track {token}")
+
+    await _add_track(mass, identified, composer=composer)
+    await _add_track(mass, by_track, [str(uuid4())])
+    await _add_track(mass, by_track, composer=composer)
+
+    assert not (await mass.music.works.get_library_item(identified.item_id)).composers
+    assert not (await mass.music.works.get_library_item(by_track.item_id)).composers
+
+
 async def test_composer_without_a_musicbrainz_id_is_found_by_its_exact_name(
     mass: MusicAssistant,
 ) -> None:
@@ -1479,6 +1517,367 @@ async def test_composer_holding_the_musicbrainz_id_is_kept(mass: MusicAssistant)
 
 
 # --------------------------------------------------------------------------- #
+#  composers identified by their own links                                     #
+# --------------------------------------------------------------------------- #
+
+
+async def _add_classical_composer(
+    mass: MusicAssistant, name: str, mbid: str | None = None, **kwargs: Any
+) -> Artist:
+    """Store a library artist credited as composer on a classical track only."""
+    composer = await _add_artist(mass, name, mbid, **kwargs)
+    work = await _add_work(mass, f"Symphony {_token()}", [composer], work_type=WorkType.SYMPHONY)
+    track = await _add_track(mass, work, composer=composer)
+    assert (await mass.music.tracks.get_library_item(track.item_id)).is_classical
+    return await mass.music.artists.get_library_item(composer.item_id)
+
+
+async def _due_composers(mass: MusicAssistant) -> set[str]:
+    """Return the ids of the library artists the composers phase would select now."""
+    selected = await mass.music.artists.get_library_items_by_query(
+        limit=0,
+        extra_query_parts=[_composers_to_identify_query()],
+        extra_query_params={"stale": int(time() - REFRESH_INTERVAL)},
+    )
+    return {x.item_id for x in selected}
+
+
+async def _identify_composer(
+    ctrl: MetaDataController, composer: Artist, mb_artist: MusicBrainzArtist | None
+) -> tuple[Artist, AsyncMock]:
+    """
+    Run the composers phase on a library artist, asserting no music provider is asked.
+
+    Returns the stored artist and the stand-in alias join.
+
+    :param ctrl: The controller to run the phase on.
+    :param composer: The library artist.
+    :param mb_artist: The MusicBrainz artist its streaming service links lead to, if any.
+    """
+    mass = ctrl.mass
+    musicbrainz = cast("Mock", ctrl._musicbrainz_provider())
+    musicbrainz.resolve_artist = AsyncMock(return_value=mb_artist)
+    musicbrainz.get_artists_by_name = AsyncMock(return_value=[])
+    alias_join = AsyncMock()
+    provider, provider_item, top_tracks = Mock(), AsyncMock(), AsyncMock()
+    with (
+        patch.object(mass.music, "get_provider_instances", _spotify_instances()),
+        patch.object(
+            MetaDataController,
+            "link_providers_via_musicbrainz",
+            new_callable=PropertyMock,
+            return_value=True,
+        ),
+        patch.object(ctrl, "_merge_composer_by_aliases", alias_join),
+        patch.object(mass, "get_provider", Mock(return_value=provider)),
+        patch.object(mass.music.artists, "get_provider_item", provider_item),
+        patch.object(mass.music.artists, "top_tracks", top_tracks),
+    ):
+        assert await ctrl._identify_composer(composer)
+    musicbrainz.resolve_artist.assert_awaited_once_with(composer, [], [])
+    assert provider.mock_calls == []
+    provider_item.assert_not_awaited()
+    top_tracks.assert_not_awaited()
+    return await mass.music.artists.get_library_item(composer.item_id), alias_join
+
+
+async def test_composers_phase_selects_unidentified_composers_of_classical_tracks(
+    mass: MusicAssistant,
+) -> None:
+    """A composer without an id is due until looked up; an identified or performing one is not."""
+    stale = int(time()) - REFRESH_INTERVAL - 1
+    never = await _add_classical_composer(mass, f"Haydn {_token()}")
+    stale_unknown = await _add_classical_composer(
+        mass, f"Liszt {_token()}", metadata=MediaItemMetadata(last_musicbrainz_lookup=stale)
+    )
+    fresh = await _add_classical_composer(
+        mass, f"Rossini {_token()}", metadata=MediaItemMetadata(last_musicbrainz_lookup=int(time()))
+    )
+    identified = await _add_classical_composer(mass, f"Fauré {_token()}", mbid=str(uuid4()))
+    work = await _add_work(mass, f"Symphony {_token()}", work_type=WorkType.SYMPHONY)
+    track = await _add_track(mass, work)
+    performer = track.artists[0]
+
+    due = await _due_composers(mass)
+
+    assert {never.item_id, stale_unknown.item_id} <= due
+    assert not {fresh.item_id, identified.item_id, performer.item_id} & due
+
+
+async def test_composer_is_identified_by_its_own_streaming_link(mass: MusicAssistant) -> None:
+    """The artist's own links give its id, links, life dates, country and period, then the join."""
+    token = _token()
+    composer = await _add_classical_composer(mass, f"Shostakovich {token}")
+    spotify_id = uuid4().hex[:22]
+    mb_artist = _linked_to_spotify(
+        MusicBrainzArtist(id=str(uuid4()), name=composer.name, sort_name=composer.name), spotify_id
+    )
+    mb_artist.type = "Person"
+    mb_artist.life_span = MusicBrainzLifeSpan(begin="1906-09-25", end="1975-08-09", ended=True)
+    mb_artist.country = "RU"
+    ctrl = _controller(mass, [], [mb_artist])
+
+    stored, alias_join = await _identify_composer(ctrl, composer, mb_artist)
+
+    assert stored.mbid == mb_artist.id
+    assert stored.metadata.last_musicbrainz_lookup is not None
+    assert ("spotify", spotify_id) in {
+        (x.provider_instance, x.item_id) for x in stored.provider_mappings
+    }
+    assert stored.metadata.artist_entity_type == ArtistEntityType.PERSON
+    assert stored.metadata.life_span == LifeSpan(begin="1906-09-25", end="1975-08-09", ended=True)
+    assert stored.metadata.country == "RU"
+    assert stored.period == composer_period(1906, 1975)
+    alias_join.assert_awaited_once_with(mb_artist.id, mb_artist)
+    assert _scheduled(ctrl) == []
+
+
+async def test_composer_its_links_do_not_identify_is_marked_looked_up(mass: MusicAssistant) -> None:
+    """A composer MusicBrainz does not know by its links is only marked as looked up."""
+    composer = await _add_classical_composer(mass, f"Mussorgsky {_token()}")
+    ctrl = _controller(mass, [])
+
+    stored, alias_join = await _identify_composer(ctrl, composer, None)
+
+    assert stored.mbid is None
+    assert stored.metadata.last_musicbrainz_lookup is not None
+    assert stored.provider_mappings == composer.provider_mappings
+    alias_join.assert_not_awaited()
+    assert _scheduled(ctrl) == []
+    assert composer.item_id not in await _due_composers(mass)
+
+
+async def test_placeholder_composer_is_marked_looked_up_without_a_lookup(
+    mass: MusicAssistant,
+) -> None:
+    """A placeholder credited as composer is never looked up on MusicBrainz nor logged."""
+    composer = await _add_classical_composer(mass, f"[traditional {_token()}]")
+    ctrl = _controller(mass, [])
+    musicbrainz = cast("Mock", ctrl._musicbrainz_provider())
+
+    assert await ctrl._identify_composer(composer)
+
+    stored = await mass.music.artists.get_library_item(composer.item_id)
+    assert stored.metadata.last_musicbrainz_lookup is not None
+    assert musicbrainz.mock_calls == []
+    assert cast("Mock", ctrl.logger).mock_calls == []
+    assert composer.item_id not in await _due_composers(mass)
+
+
+def _albinoni(token: str) -> MusicBrainzArtist:
+    """Return a MusicBrainz composer carrying a shorter spelling of its name as an alias."""
+    return MusicBrainzArtist(
+        id=str(uuid4()),
+        name=f"Tomaso Giovanni Albinoni {token}",
+        sort_name=f"Albinoni, Tomaso Giovanni {token}",
+        type="Person",
+        aliases=[
+            MusicBrainzAlias(
+                f"Tomaso Albinoni {token}", f"Albinoni, Tomaso {token}", type="Artist name"
+            )
+        ],
+    )
+
+
+def _tidal_mapping(tidal_id: str) -> ProviderMapping:
+    """Create a Tidal provider mapping."""
+    return ProviderMapping(item_id=tidal_id, provider_domain="tidal", provider_instance="tidal")
+
+
+async def _identify_by_name(
+    mass: MusicAssistant, composer: Artist, persons: Sequence[MusicBrainzArtist]
+) -> list[str]:
+    """
+    Run the composers phase on a composer its links do not identify, returning the debug lines.
+
+    :param composer: The library composer.
+    :param persons: The MusicBrainz artists a name search finds.
+    """
+    ctrl = _controller(mass, [], persons)
+    musicbrainz = cast("Mock", ctrl._musicbrainz_provider())
+    musicbrainz.resolve_artist = AsyncMock(return_value=None)
+    musicbrainz.get_artists_by_name = AsyncMock(return_value=list(persons))
+    assert await ctrl._identify_composer(composer)
+    debug = cast("Mock", ctrl.logger).debug
+    return [call.args[0] % call.args[1:] for call in debug.call_args_list]
+
+
+async def test_composer_takes_the_id_of_the_one_person_of_its_name(mass: MusicAssistant) -> None:
+    """A composer named like the one person a library composer holds the id of merges into it."""
+    token = _token()
+    albinoni = _albinoni(token)
+    confirmed = await _add_classical_composer(mass, albinoni.name, albinoni.id)
+    composer = await _add_classical_composer(mass, f"Tomaso Albinoni {token}")
+
+    lines = await _identify_by_name(mass, composer, [albinoni])
+
+    holders = await mass.music.artists.get_library_items_by_external_id(
+        albinoni.id, ExternalID.MB_ARTIST, limit=None
+    )
+    assert [x.item_id for x in holders] == [confirmed.item_id]
+    with pytest.raises(MediaNotFoundError):
+        await mass.music.artists.get_library_item(composer.item_id)
+    assert not [x for x in lines if "is not on MusicBrainz" in x]
+
+
+async def test_composer_named_like_two_persons_is_not_joined(mass: MusicAssistant) -> None:
+    """A name two MusicBrainz persons carry leaves the composer apart, with a search link."""
+    token = _token()
+    albinoni = _albinoni(token)
+    namesake = MusicBrainzArtist(
+        id=str(uuid4()), name=f"Tomaso Albinoni {token}", sort_name="Albinoni", type="Person"
+    )
+    await _add_classical_composer(mass, albinoni.name, albinoni.id)
+    composer = await _add_classical_composer(
+        mass, f"Tomaso Albinoni {token}", provider_mappings={_tidal_mapping("1")}
+    )
+
+    lines = await _identify_by_name(mass, composer, [albinoni, namesake])
+
+    assert (await mass.music.artists.get_library_item(composer.item_id)).mbid is None
+    assert (
+        f'Composer "Tomaso Albinoni {token}" is not on MusicBrainz through '
+        "https://tidal.com/artist/1, add https://tidal.com/artist/1 to their "
+        f"MusicBrainz page: https://musicbrainz.org/search?type=artist&query=Tomaso+Albinoni+{token}"
+    ) in lines
+
+
+async def test_composer_named_like_a_person_no_library_composer_holds_is_not_joined(
+    mass: MusicAssistant,
+) -> None:
+    """A person no library composer holds gives no id, only a link to their MusicBrainz page."""
+    token = _token()
+    albinoni = _albinoni(token)
+    composer = await _add_classical_composer(
+        mass, f"Tomaso Albinoni {token}", provider_mappings={_tidal_mapping("2")}
+    )
+
+    lines = await _identify_by_name(mass, composer, [albinoni])
+
+    assert (await mass.music.artists.get_library_item(composer.item_id)).mbid is None
+    assert not await mass.music.artists.get_library_items_by_external_id(
+        albinoni.id, ExternalID.MB_ARTIST, limit=None
+    )
+    assert (
+        f'Composer "Tomaso Albinoni {token}" is not on MusicBrainz through '
+        "https://tidal.com/artist/2, add https://tidal.com/artist/2 to their "
+        f"MusicBrainz page: https://musicbrainz.org/artist/{albinoni.id}"
+    ) in lines
+
+
+async def test_composer_named_like_another_confirmed_composer_is_not_joined(
+    mass: MusicAssistant,
+) -> None:
+    """A name another confirmed composer carries every word of leaves the composer apart."""
+    token = _token()
+    albinoni = _albinoni(token)
+    await _add_classical_composer(mass, albinoni.name, albinoni.id)
+    await _add_classical_composer(mass, f"Tomaso Albinoni {token} the Younger", str(uuid4()))
+    composer = await _add_classical_composer(mass, f"Tomaso Albinoni {token}")
+
+    await _identify_by_name(mass, composer, [albinoni])
+
+    assert (await mass.music.artists.get_library_item(composer.item_id)).mbid is None
+
+
+async def _add_joined_track(mass: MusicAssistant, name: str, joined: Artist) -> Track:
+    """Store a library track crediting a joined name as composer and main artist."""
+    return await mass.music.tracks.add_item_to_library(
+        Track(
+            item_id=_token(),
+            provider=PROVIDER_INSTANCE,
+            name=name,
+            provider_mappings={_mapping()},
+            artists=UniqueList([joined]),
+            credits=[Credit(artist=joined, role=ArtistRole.COMPOSER)],
+        )
+    )
+
+
+async def test_confirmed_composer_splits_the_joined_credits_of_stored_tracks(
+    mass: MusicAssistant,
+) -> None:
+    """A composer confirmed after a track was stored replaces the joined name it starts."""
+    token = _token()
+    chopin = await _add_classical_composer(mass, f"Frédéric Chopin {token}")
+    joined = await _add_artist(mass, f"Frédéric Chopin {token} & Sarah Ainsworth {token}")
+    band = await _add_artist(mass, f"Frédéric Chopin {token} & Friends")
+    nocturne = await _add_joined_track(mass, f"Chopin {token}: Nocturne No. 2", joined)
+    party = await _add_joined_track(mass, "Party Mix", band)
+    mb_chopin = MusicBrainzArtist(id=str(uuid4()), name=chopin.name, sort_name=chopin.name)
+    chopin.mbid = mb_chopin.id
+    await mass.music.artists.update_item_in_library(chopin.item_id, chopin)
+    ctrl = _controller(mass, [], [mb_chopin])
+    musicbrainz = cast("Mock", ctrl._musicbrainz_provider())
+    musicbrainz.get_artists_by_name = AsyncMock(return_value=[mb_chopin])
+
+    await ctrl._merge_composer_by_aliases(mb_chopin.id)
+
+    stored = await mass.music.tracks.get_library_item(nocturne.item_id)
+    assert _composer_ids(stored) == [chopin.item_id]
+    assert [x.item_id for x in stored.artists] == [chopin.item_id]
+    untouched = await mass.music.tracks.get_library_item(party.item_id)
+    assert _composer_ids(untouched) == [band.item_id]
+    assert [x.item_id for x in untouched.artists] == [band.item_id]
+
+
+async def _split_by_alias(
+    mass: MusicAssistant, token: str, other: str | None = None
+) -> tuple[Artist, Track]:
+    """
+    Confirm "Fryderyk Chopin" known as "Frédéric Chopin", return it and its joined track.
+
+    :param token: The word unique to the test.
+    :param other: The name of another confirmed composer added after the track, if any.
+    """
+    mb_chopin = MusicBrainzArtist(
+        id=str(uuid4()),
+        name=f"Fryderyk Chopin {token}",
+        sort_name=f"Chopin {token}, Fryderyk",
+        aliases=[
+            MusicBrainzAlias(
+                f"Frédéric Chopin {token}", f"Chopin {token}, Frédéric", type="Artist name"
+            )
+        ],
+    )
+    chopin = await _add_classical_composer(mass, mb_chopin.name, mb_chopin.id)
+    joined = await _add_artist(mass, f"Frédéric Chopin {token} & Sarah Ainsworth {token}")
+    nocturne = await _add_joined_track(mass, f"Chopin {token}: Nocturne No. 2", joined)
+    if other:
+        await _add_classical_composer(mass, other, str(uuid4()))
+    ctrl = _controller(mass, [], [mb_chopin])
+    musicbrainz = cast("Mock", ctrl._musicbrainz_provider())
+    musicbrainz.get_artists_by_name = AsyncMock(return_value=[mb_chopin])
+
+    await ctrl._merge_composer_by_aliases(mb_chopin.id)
+
+    return chopin, await mass.music.tracks.get_library_item(nocturne.item_id)
+
+
+async def test_confirmed_composer_splits_joined_credits_naming_it_by_an_alias(
+    mass: MusicAssistant,
+) -> None:
+    """A joined name starting with a MusicBrainz alias of the composer is split to it."""
+    chopin, stored = await _split_by_alias(mass, _token())
+
+    assert _composer_ids(stored) == [chopin.item_id]
+    assert [x.item_id for x in stored.artists] == [chopin.item_id]
+
+
+async def test_alias_split_leaves_a_name_another_confirmed_composer_carries(
+    mass: MusicAssistant,
+) -> None:
+    """A joined name another confirmed composer carries every word of stays as it is."""
+    token = _token()
+    joined = f"Frédéric Chopin {token} & Sarah Ainsworth {token}"
+
+    _chopin, stored = await _split_by_alias(mass, token, f"Frédéric Chopin {token} the Younger")
+
+    assert _composers(stored) == [joined]
+    assert [x.name for x in stored.artists] == [joined]
+
+
+# --------------------------------------------------------------------------- #
 #  composer periods                                                            #
 # --------------------------------------------------------------------------- #
 
@@ -1684,3 +2083,43 @@ async def test_works_that_are_the_same_work_are_joined_once(music_mass: MusicAss
     duplicate = await create("Matthäus-Passion, BWV 244, Part 2", bach, english)
     await ctrl._join_same_works_once()
     assert duplicate.item_id in await _library_work_ids(mass)
+
+
+# TEMP(classical 5c work composers): remove before release
+async def test_works_without_composers_get_their_tracks_composers_once(
+    music_mass: MusicAssistant,
+) -> None:
+    """The works without composers take the composers their tracks credit, once."""
+    mass = music_mass
+    first = await _add_artist(mass, "First")
+    second = await _add_artist(mass, "Second")
+    composer = await _add_artist(mass, "Composer")
+    without = await _add_work(mass, f"Without {_token()}")
+    composed = await _add_work(mass, f"Composed {_token()}", [composer])
+    await _add_track(mass, without, composer=first)
+    await _add_track(mass, without, composer=second)
+    await _add_track(mass, without, composer=first)
+    bare = await _add_track(mass, without)
+    await _add_track(mass, composed, composer=first)
+    # stored the way an earlier version left them, without composers
+    await mass.music.database.delete(DB_TABLE_WORK_ARTISTS, {"work_id": int(without.item_id)})
+    await mass.music.database.delete(
+        DB_TABLE_TRACK_ARTISTS, {"track_id": int(bare.item_id), "role": ArtistRole.COMPOSER.value}
+    )
+    ctrl = _controller(mass, [])
+
+    await ctrl._credit_track_composers_once()
+
+    stored = await mass.music.works.get_library_item(without.item_id)
+    assert [x.item_id for x in stored.composers] == [first.item_id, second.item_id]
+    stored_bare = await mass.music.tracks.get_library_item(bare.item_id)
+    assert [x.artist.item_id for x in stored_bare.credits if x.role == ArtistRole.COMPOSER] == [
+        first.item_id,
+        second.item_id,
+    ]
+    kept = await mass.music.works.get_library_item(composed.item_id)
+    assert [x.item_id for x in kept.composers] == [composer.item_id]
+
+    await mass.music.database.delete(DB_TABLE_WORK_ARTISTS, {"work_id": int(without.item_id)})
+    await ctrl._credit_track_composers_once()
+    assert not (await mass.music.works.get_library_item(without.item_id)).composers

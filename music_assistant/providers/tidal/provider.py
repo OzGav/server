@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import suppress
 from datetime import datetime
 from sqlite3 import OperationalError
 from typing import TYPE_CHECKING, Any
@@ -23,8 +25,9 @@ from music_assistant_models.media_items import (
     UniqueList,
 )
 
-from music_assistant.constants import CONF_ENTRY_UNOFFICIAL_PROVIDER
+from music_assistant.constants import CLASSICAL_GENRE_NAME, CONF_ENTRY_UNOFFICIAL_PROVIDER
 from music_assistant.controllers.cache import use_cache
+from music_assistant.helpers.library_reread import reread_library_albums, update_library_album
 from music_assistant.models.music_provider import MusicProvider
 from music_assistant.models.recommendation_payload import RecommendationPayloadMixin
 
@@ -33,10 +36,12 @@ from .auth_manager import TidalAuthManager
 from .constants import (
     CACHE_CATEGORY_ISRC_MAP,
     CONF_AUTH_TOKEN,
+    CONF_CLASSICAL_REREAD_DONE,
     CONF_EXPIRY_TIME,
     CONF_QUALITY,
     CONF_REFRESH_TOKEN,
     CONF_USER_ID,
+    PARSED_ITEM_CACHE_CHECKSUM,
 )
 from .library import TidalLibraryManager
 from .media import TidalMediaManager
@@ -85,6 +90,7 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
 
     # Tidal playlists reject adding a track that is already in the playlist
     playlist_duplicates_supported = False
+    _classical_reread_task: asyncio.Task[None] | None = None
 
     def __init__(self, mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig):
         """Initialize Tidal provider."""
@@ -160,6 +166,27 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
         logged_in_user = await self.get_user(str(user_info.get("userId")))
         await self.auth.update_user_info(logged_in_user, str(user_info.get("sessionId")))
 
+    async def loaded_in_mass(self) -> None:
+        """Call after the provider has been loaded."""
+        # TEMP(classical 5c catch-up): remove before release
+        if not self.mass.config.get_raw_provider_config_value(
+            self.instance_id, CONF_CLASSICAL_REREAD_DONE, False
+        ):
+            self._classical_reread_task = self.mass.create_task(
+                self._reread_library_albums(),
+                task_id=f"tidal_classical_reread_{self.instance_id}",
+                task_name="tidal_classical_reread",
+            )
+
+    async def unload(self, is_removed: bool = False) -> None:
+        """Handle close/cleanup of the provider."""
+        # TEMP(classical 5c catch-up): remove before release
+        if self._classical_reread_task and not self._classical_reread_task.done():
+            self._classical_reread_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._classical_reread_task
+        await super().unload(is_removed)
+
     async def get_user(self, prov_user_id: str) -> dict[str, Any]:
         """Get user information."""
         return await self.api.get(f"users/{prov_user_id}")
@@ -186,24 +213,24 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
         """Get artist details for given artist id."""
         return await self.media.get_artist(prov_artist_id)
 
-    @use_cache(3600 * 24 * 30)
+    @use_cache(3600 * 24 * 30, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM)
     async def get_album(self, prov_album_id: str) -> Album:
         """Get album details for given album id."""
         return await self.media.get_album(prov_album_id)
 
-    @use_cache(3600 * 24 * 30)
+    @use_cache(3600 * 24 * 30, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM)
     async def get_track(self, prov_track_id: str) -> Track:
         """Get track details for given track id."""
         return await self.media.get_track(prov_track_id)
 
-    @use_cache(3600 * 24 * 7, allow_expired_cache=True)
+    @use_cache(3600 * 24 * 7, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True)
     async def get_track_by_external_id(
         self, external_id: str, external_id_type: ExternalID
     ) -> Track | None:
         """Retrieve track by external ID (ISRC)."""
         return await self.media.get_track_by_external_id(external_id, external_id_type)
 
-    @use_cache(3600 * 24 * 7, allow_expired_cache=True)
+    @use_cache(3600 * 24 * 7, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True)
     async def get_album_by_external_id(
         self, external_id: str, external_id_type: ExternalID
     ) -> Album | None:
@@ -215,7 +242,7 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
         """Get playlist details for given playlist id."""
         return await self.media.get_playlist(prov_playlist_id)
 
-    @use_cache(3600 * 24 * 30, allow_expired_cache=True)
+    @use_cache(3600 * 24 * 30, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True)
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get album tracks for given album id."""
         return await self.media.get_album_tracks(prov_album_id)
@@ -450,6 +477,30 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
         )
         if lib_track:
             await self._heal_track_mapping(lib_track.item_id, stale_id, live_id)
+
+    async def _reread_library_albums(self) -> None:
+        """Read this account's library albums again once, for the classical details they give."""
+        # TEMP(classical 5c catch-up): remove before release
+        if await reread_library_albums(self, self._reread_library_album):
+            self._update_config_value(CONF_CLASSICAL_REREAD_DONE, True, immediate=True)
+
+    async def _reread_library_album(self, library_id: int, prov_album_id: str) -> None:
+        """
+        Update a classical library album and its library tracks with what Tidal gives for them.
+
+        :param library_id: The library id of the album.
+        :param prov_album_id: The Tidal id of the album.
+        """
+        # TEMP(classical 5c catch-up): remove before release
+        album = await self.media.get_album(prov_album_id)
+        if CLASSICAL_GENRE_NAME not in (album.metadata.genres or ()):
+            return
+        await update_library_album(self, library_id, album)
+        for track in await self.media.get_album_tracks(prov_album_id):
+            if library_track := await self.mass.music.tracks.get_library_item_by_prov_id(
+                track.item_id, self.instance_id
+            ):
+                await self.mass.music.tracks.update_item_in_library(library_track.item_id, track)
 
     async def _fetch_recommendation_payload(self) -> list[RecommendationFolder]:
         """Fetch and parse the full recommendations payload (folders WITH items)."""

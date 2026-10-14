@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
@@ -36,23 +37,35 @@ from music_assistant_models.media_items import (
     Track,
     UniqueList,
     Work,
+    WorkMovement,
     WorkSummary,
 )
 from music_assistant_models.media_items.metadata import IMAGE_PROXY_ID_RESOLVER
 
-from music_assistant.constants import DB_TABLE_ALBUM_TRACKS
+from music_assistant.constants import (
+    DB_TABLE_ALBUM_TRACKS,
+    DB_TABLE_EXTERNAL_ID_LOOKUP,
+    DB_TABLE_TRACKS,
+    DB_TABLE_WORKS,
+)
 from music_assistant.controllers.music.classical import (
     _Appearance,
     _group_performances,
+    _Movements,
     _performer_row,
     _recording_sort_key,
     _refined_roles,
     _title_work_type,
+    _track_movements,
     _with_title_work_type,
     _WorkTrack,
 )
+from music_assistant.helpers.json import json_dumps
 from music_assistant.mass import MusicAssistant
 from tests.common import set_music_source_access
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 PROVIDER_INSTANCE = "classical_api_instance"
 # a music source private to another user
@@ -118,6 +131,7 @@ async def test_composers(library: _Library) -> None:
         ("Antonio Vivaldi", 2, 2),
     ]
     assert [x.artist.period for x in rows] == [Period.CLASSICAL, None]
+    assert [x.country for x in rows] == ["DE", None]
 
 
 @pytest.mark.parametrize(
@@ -1243,6 +1257,32 @@ class TestPartsOfWorks:
         assert habanera.parent_work is not None
         assert habanera.parent_work.item_id == parts_library.work_id("Carmen")
 
+    async def test_parts_are_the_movements_of_a_work_without_any(
+        self, parts_library: _Library
+    ) -> None:
+        """A work without movements lists its parts, and their recordings cover them."""
+        lakme = parts_library.work_id("Lakme")
+        work = await parts_library.mass.music.classical.work(lakme)
+        recordings = await parts_library.mass.music.classical.recordings(lakme)
+
+        assert [(x.number, x.name) for x in work.movements] == [
+            (1, "Bell Song"),
+            (2, "Flower Duet"),
+        ]
+        assert not work.movements_from_musicbrainz
+        assert [(x.work.name, x.movement_numbers, x.complete) for x in recordings] == [
+            ("Lakme", [], None),
+            ("Bell Song", [1], None),
+            ("Flower Duet", [2], None),
+            ("Flower Duet", [2], None),
+        ]
+        assert [[x.movement_number for x in r.tracks] for r in recordings] == [
+            [None],
+            [1],
+            [2],
+            [2],
+        ]
+
     async def test_composer_counts_a_work_with_parts_once(self, parts_library: _Library) -> None:
         """A composer's work count holds the opera once, its recordings those of the arias."""
         [row] = await parts_library.mass.music.classical.composers(
@@ -1250,6 +1290,272 @@ class TestPartsOfWorks:
         )
 
         assert (row.work_count, row.recording_count) == (1, 4)
+
+
+@pytest.fixture(scope="class", name="staged_library")
+async def staged_library_fixture(music_mass_class: MusicAssistant) -> _Library:
+    """Return a class-scoped library of an opera with acts and arias and a Passion in parts."""
+    mass = music_mass_class
+    lib = _Library(mass=mass)
+    for key in ("puccini", "bach", "karajan", "richter"):
+        lib.artists[key] = await _add_named_artist(mass, key.title())
+    a = lib.artists
+    mbids = {"vissi": str(uuid4()), "ed_io": str(uuid4())}
+    for key, name, composer, parent, work_type in (
+        ("Tosca", "Tosca", "puccini", None, WorkType.OPERA),
+        ("Act I", "Tosca, Act I", "puccini", "Tosca", None),
+        ("Recondita", "Tosca: Act I: Recondita armonia", "puccini", "Act I", None),
+        ("Act II", "Tosca, Act II", "puccini", "Tosca", None),
+        ("Vissi", "Tosca: Act II: Vissi d'arte", "puccini", "Act II", None),
+        ("Ed io", "Tosca: Act II: Ed io venivo a lei", "puccini", "Act II", None),
+        ("Act III", "Tosca, Act III", "puccini", "Tosca", None),
+        ("Passion", "St Matthew Passion", "bach", None, None),
+        ("Part II", "St Matthew Passion, Part II", "bach", "Passion", None),
+        ("Part I", "St Matthew Passion, Part I", "bach", "Passion", None),
+    ):
+        mbid = mbids.get(key.lower().replace(" ", "_"))
+        lib.works[key] = await mass.music.works.add_item_to_library(
+            Work(
+                item_id=uuid4().hex,
+                provider=WORK_SOURCE,
+                name=name,
+                provider_mappings=set(),
+                composers=UniqueList([a[composer]]),
+                parent_work=ItemMapping.from_item(lib.works[parent]) if parent else None,
+                work_type=work_type,
+                external_ids={(ExternalID.MB_WORK, mbid)} if mbid else set(),
+            )
+        )
+    for key, name, work, conductor, movement in (
+        ("opera_recondita", "Tosca: Recondita armonia", "Tosca", "karajan", None),
+        ("opera_vissi", "Tosca: Vissi d'arte", "Tosca", "karajan", None),
+        ("act_ii", "Tosca, Act II: Scene", "Act II", "karajan", None),
+        ("recondita", "Tosca: Act I: Recondita armonia", "Recondita", "richter", None),
+        ("vissi", "Tosca: Act II: Vissi d'arte", "Vissi", "richter", None),
+        ("ed_io", "Tosca: Act II: Ed io venivo a lei", "Ed io", "richter", None),
+        ("part_i_1", "St Matthew Passion, Part I: No. 1 Kommt", "Part I", "richter", 1),
+        ("part_i_2", "St Matthew Passion, Part I: No. 2 Da Jesus", "Part I", "richter", 2),
+        ("part_ii", "St Matthew Passion, Part II: No. 63 Wahrlich", "Part II", "richter", 63),
+    ):
+        lib.tracks[key] = await mass.music.tracks.add_item_to_library(
+            Track(
+                item_id="0",
+                provider="library",
+                name=name,
+                provider_mappings={_mapping()},
+                artists=UniqueList([a[conductor]]),
+                credits=[Credit(artist=a[conductor], role=ArtistRole.CONDUCTOR)],
+                work=ItemMapping.from_item(lib.works[work]),
+                movement_number=movement,
+                classical_tag=True,
+            )
+        )
+    return lib
+
+
+class TestPartsAsMovements:
+    """A staged work, or one whose parts have parts, lists its parts with tracks as movements."""
+
+    async def test_parts_of_parts_count_in_their_top_work_row(
+        self, staged_library: _Library
+    ) -> None:
+        """Only the top works are rows, each counting the recordings of its parts at any depth."""
+        rows = await staged_library.mass.music.classical.works()
+        [composer] = await staged_library.mass.music.classical.composers(
+            artist_id=staged_library.artist_id("puccini")
+        )
+
+        assert {(x.work.name, x.recording_count) for x in rows} == {
+            ("Tosca", 5),
+            ("St Matthew Passion", 2),
+        }
+        assert (composer.work_count, composer.recording_count) == (1, 5)
+
+    @pytest.mark.parametrize(
+        ("composer", "performer", "search"),
+        [("puccini", None, None), (None, "richter", "recondita"), (None, None, "vissi")],
+    )
+    async def test_filters_find_the_top_work_of_a_part_of_a_part(
+        self,
+        staged_library: _Library,
+        composer: str | None,
+        performer: str | None,
+        search: str | None,
+    ) -> None:
+        """A composer, performer or search matching an aria of an act finds the opera."""
+        rows = await staged_library.mass.music.classical.works(
+            composer_id=staged_library.artist_id(composer) if composer else None,
+            performer_id=staged_library.artist_id(performer) if performer else None,
+            search=search,
+        )
+
+        assert [x.work.name for x in rows] == ["Tosca"]
+
+    async def test_opera_lists_its_parts_with_tracks_in_work_order(
+        self, staged_library: _Library
+    ) -> None:
+        """Acts come by number, arias after their act by the order MusicBrainz gives them."""
+        # MusicBrainz lists the arias of the second act against the order of their names
+        await _set_musicbrainz_movements(
+            staged_library,
+            "Act II",
+            [
+                WorkMovement(
+                    number=1, name="Vissi d'arte", mbid=staged_library.works["Vissi"].mbid
+                ),
+                WorkMovement(number=2, name="Ed io", mbid=staged_library.works["Ed io"].mbid),
+            ],
+        )
+        work = await staged_library.mass.music.classical.work(staged_library.work_id("Tosca"))
+
+        assert [(x.number, x.name, x.mbid) for x in work.movements] == [
+            (1, "Recondita armonia", None),
+            (2, "Act II", None),
+            (3, "Vissi d'arte", staged_library.works["Vissi"].mbid),
+            (4, "Ed io venivo a lei", staged_library.works["Ed io"].mbid),
+        ]
+        # an aria sits under its act when that is listed, at the top when its act has no tracks
+        assert [x.parent for x in work.movements] == [None, None, 2, 2]
+        assert not work.movements_from_musicbrainz
+
+    async def test_opera_recordings_cover_the_parts_their_tracks_hold(
+        self, staged_library: _Library
+    ) -> None:
+        """A recording of an aria covers that aria, one of the whole opera each aria it holds."""
+        recordings = await staged_library.mass.music.classical.recordings(
+            staged_library.work_id("Tosca")
+        )
+
+        assert {x.work.name: (x.movement_numbers, x.complete) for x in recordings} == {
+            "Tosca": ([1, 3], None),
+            "Tosca: Act I: Recondita armonia": ([1], None),
+            "Tosca, Act II": ([2], None),
+            "Tosca: Act II: Vissi d'arte": ([3], None),
+            "Tosca: Act II: Ed io venivo a lei": ([4], None),
+        }
+        opera = next(x for x in recordings if x.work.name == "Tosca")
+        assert {(x.name, x.movement_number, x.movement_name) for x in opera.tracks} == {
+            ("Tosca: Recondita armonia", 1, "Recondita armonia"),
+            ("Tosca: Vissi d'arte", 3, "Vissi d'arte"),
+        }
+
+    async def test_passion_lists_its_parts(self, staged_library: _Library) -> None:
+        """The parts of a Passion are its movements, each track showing under its part."""
+        passion = staged_library.work_id("Passion")
+        work = await staged_library.mass.music.classical.work(passion)
+        recordings = await staged_library.mass.music.classical.recordings(passion)
+
+        assert [(x.number, x.name) for x in work.movements] == [(1, "Part I"), (2, "Part II")]
+        assert {
+            x.work.name: (x.movement_numbers, [t.movement_number for t in x.tracks])
+            for x in recordings
+        } == {
+            "St Matthew Passion, Part I": ([1], [1, 1]),
+            "St Matthew Passion, Part II": ([2], [2]),
+        }
+
+
+@pytest.fixture(scope="class", name="aria_library")
+async def aria_library_fixture(music_mass_class: MusicAssistant) -> _Library:
+    """Return a class-scoped library of an opera whose act lists arias MusicBrainz names."""
+    mass = music_mass_class
+    lib = _Library(mass=mass)
+    for key in ("puccini", "kaufmann", "karajan", "richter"):
+        lib.artists[key] = await _add_named_artist(mass, key.title())
+    a = lib.artists
+    for key, name, parent, work_type in (
+        ("Bohème", "La bohème", None, WorkType.OPERA),
+        ("Act I", "La bohème, Act I", "Bohème", None),
+        ("Gelida", 'Atto I, no. 6. "Che gelida manina!" (Rodolfo)', "Act I", None),
+        # MusicBrainz names some arias after the opera they are in
+        ("Soave", 'La bohème: Atto I, no. 9. "O soave fanciulla" (Rodolfo, Mimì)', "Act I", None),
+        ("Act II", "La bohème, Act II", "Bohème", None),
+    ):
+        lib.works[key] = await mass.music.works.add_item_to_library(
+            Work(
+                item_id=uuid4().hex,
+                provider=WORK_SOURCE,
+                name=name,
+                provider_mappings=set(),
+                composers=UniqueList([a["puccini"]]),
+                parent_work=ItemMapping.from_item(lib.works[parent]) if parent else None,
+                work_type=work_type,
+            )
+        )
+    for key, name, work, conductor in (
+        ("kaufmann_gelida", "La bohème, Act I: Che gelida manina", "Act I", "kaufmann"),
+        ("kaufmann_soave", "La bohème, Act I: O soave fanciulla", "Act I", "kaufmann"),
+        ("karajan_mar", "La bohème, Act I: Questo Mar Rosso", "Act I", "karajan"),
+        ("karajan_gelida", "La bohème, Act I: Che gelida manina", "Act I", "karajan"),
+        ("karajan_soave", "La bohème, Act I: O soave fanciulla", "Act I", "karajan"),
+        ("karajan_act_ii", "La bohème, Act II: Viva Parpignol!", "Act II", "karajan"),
+        ("richter_gelida", "Che gelida manina!", "Gelida", "richter"),
+        ("richter_soave", "O soave fanciulla", "Soave", "richter"),
+    ):
+        lib.tracks[key] = await mass.music.tracks.add_item_to_library(
+            Track(
+                item_id="0",
+                provider="library",
+                name=name,
+                provider_mappings={_mapping()},
+                artists=UniqueList([a[conductor]]),
+                credits=[Credit(artist=a[conductor], role=ArtistRole.CONDUCTOR)],
+                work=ItemMapping.from_item(lib.works[work]),
+                classical_tag=True,
+            )
+        )
+    return lib
+
+
+class TestAriasOfAnAct:
+    """A track of an act that is one of the arias listed with it counts for that aria."""
+
+    async def test_arias_sit_under_their_act(self, aria_library: _Library) -> None:
+        """Each aria comes after its act and names it as its parent."""
+        work = await aria_library.mass.music.classical.work(aria_library.work_id("Bohème"))
+
+        assert [(x.number, x.name, x.parent) for x in work.movements] == [
+            (1, "Act I", None),
+            (2, 'Atto I, no. 6. "Che gelida manina!" (Rodolfo)', 1),
+            (3, 'Atto I, no. 9. "O soave fanciulla" (Rodolfo, Mimì)', 1),
+            (4, "Act II", None),
+        ]
+        assert [x.work_id for x in work.movements[:3]] == [
+            aria_library.work_id(key) for key in ("Act I", "Gelida", "Soave")
+        ]
+
+    async def test_act_tracks_count_for_the_arias_they_are(self, aria_library: _Library) -> None:
+        """Arias of an act count for the aria, its other tracks for the act."""
+        recordings = await aria_library.mass.music.classical.recordings(
+            aria_library.work_id("Bohème")
+        )
+        by_conductor = {
+            (x.work.name, x.credits[0].artist.name): (
+                x.movement_numbers,
+                [t.movement_number for t in x.tracks],
+            )
+            for x in recordings
+        }
+
+        assert by_conductor == {
+            ("La bohème, Act I", "Kaufmann"): ([2, 3], [2, 3]),
+            ("La bohème, Act I", "Karajan"): ([1, 2, 3], [1, 2, 3]),
+            ("La bohème, Act II", "Karajan"): ([4], [4]),
+            ('Atto I, no. 6. "Che gelida manina!" (Rodolfo)', "Richter"): ([2], [2]),
+            ('La bohème: Atto I, no. 9. "O soave fanciulla" (Rodolfo, Mimì)', "Richter"): (
+                [3],
+                [3],
+            ),
+        }
+
+    async def test_act_names_its_arias_as_its_opera_does(self, aria_library: _Library) -> None:
+        """An act page leaves the names of the act and of its opera off its arias."""
+        work = await aria_library.mass.music.classical.work(aria_library.work_id("Act I"))
+
+        assert [(x.number, x.name) for x in work.movements] == [
+            (1, 'Atto I, no. 6. "Che gelida manina!" (Rodolfo)'),
+            (2, 'Atto I, no. 9. "O soave fanciulla" (Rodolfo, Mimì)'),
+        ]
 
 
 @pytest.fixture(scope="class", name="main_artist_library")
@@ -1554,6 +1860,212 @@ async def test_recordings_read_the_recording_year_of_their_tracks(library: _Libr
     ]
 
 
+async def test_work_movements_come_from_its_tracks(library: _Library) -> None:
+    """Without MusicBrainz movements, the tracks give them their most common name."""
+    names = {"k1": "I. Allegro con brio", "b1": "I. Allegro con brio", "k2": "Andante"}
+    names |= {"comp_k2": "II. Andante con moto", "b2": "II. Andante con moto"}
+    for key, name in names.items():
+        await _set_movement_name(library, key, name)
+    try:
+        work = await library.mass.music.classical.work(library.work_id("Fifth"))
+        recordings = await library.mass.music.classical.recordings(library.work_id("Fifth"))
+    finally:
+        for key in names:
+            await _set_movement_name(library, key, None)
+
+    assert [(x.number, x.name, x.mbid) for x in work.movements] == [
+        (1, "I. Allegro con brio", None),
+        (2, "II. Andante con moto", None),
+        (3, "", None),
+        (4, "", None),
+    ]
+    assert not work.movements_from_musicbrainz
+    assert [(x.movement_numbers, x.complete) for x in recordings] == [
+        ([1, 2, 3, 4], None),
+        ([1, 2, 3, 4], None),
+    ]
+
+
+async def test_work_movements_come_from_musicbrainz(library: _Library) -> None:
+    """The movements MusicBrainz lists win over the tracks and tell complete recordings."""
+    movements = [WorkMovement(number=x, name=f"Movement {x}", mbid=str(uuid4())) for x in (4, 1)]
+    movements += [WorkMovement(number=x, name=f"Movement {x}") for x in (3, 2)]
+    await _set_musicbrainz_movements(library, "Fifth", movements)
+    try:
+        work = await library.mass.music.classical.work(library.work_id("Fifth"))
+        recordings = await library.mass.music.classical.recordings(library.work_id("Fifth"))
+    finally:
+        await _set_musicbrainz_movements(library, "Fifth", None)
+
+    assert [x.number for x in work.movements] == [1, 2, 3, 4]
+    assert work.movements[0] == movements[1]
+    assert work.movements_from_musicbrainz
+    assert [(x.movement_numbers, x.complete) for x in recordings] == [
+        ([1, 2, 3, 4], True),
+        ([1, 2, 3, 4], True),
+    ]
+
+
+async def test_recording_covers_the_movement_of_its_musicbrainz_work(library: _Library) -> None:
+    """A track's MusicBrainz work names the movement it covers, missing movements show."""
+    movements = [WorkMovement(number=x, name=f"Movement {x}", mbid=str(uuid4())) for x in (1, 2, 3)]
+    await _set_musicbrainz_movements(library, "Emperor", movements)
+    keys = ("emperor_2", "emperor_box_2")
+    await _set_musicbrainz_work(library, keys, movements[2].mbid)
+    try:
+        (recording,) = await library.mass.music.classical.recordings(library.work_id("Emperor"))
+    finally:
+        await _set_musicbrainz_movements(library, "Emperor", None)
+        await _set_musicbrainz_work(library, keys, None)
+
+    assert recording.movement_numbers == [1, 3]
+    assert recording.complete is False
+
+
+async def test_staged_work_has_no_movements(library: _Library) -> None:
+    """An opera without parts that have tracks has no movements, not even those MusicBrainz lists."""
+    await _set_musicbrainz_movements(library, "Fifth", [WorkMovement(number=1, name="Act I")])
+    database = library.mass.music.database
+    work_id = int(library.work_id("Fifth"))
+    await database.execute_write(
+        f"UPDATE {DB_TABLE_WORKS} SET work_type = :work_type WHERE item_id = :work_id",
+        {"work_type": WorkType.OPERA.value, "work_id": work_id},
+    )
+    try:
+        work = await library.mass.music.classical.work(str(work_id))
+        recordings = await library.mass.music.classical.recordings(str(work_id))
+    finally:
+        await _set_musicbrainz_movements(library, "Fifth", None)
+        await database.execute_write(
+            f"UPDATE {DB_TABLE_WORKS} SET work_type = NULL WHERE item_id = :work_id",
+            {"work_id": work_id},
+        )
+
+    assert work.movements == []
+    assert not work.movements_from_musicbrainz
+    assert {x.complete for x in recordings} == {None}
+
+
+async def test_track_matched_by_musicbrainz_work_carries_its_movement(
+    library: _Library,
+) -> None:
+    """A track without a movement number shows under the movement its MusicBrainz work is."""
+    movements = [
+        WorkMovement(number=x, name=f"{numeral}. Movement", mbid=str(uuid4()))
+        for x, numeral in enumerate(("I", "II", "III", "IV"), 1)
+    ]
+    await _set_musicbrainz_movements(library, "Fifth", movements)
+    await _set_movement_name(library, "b1", "Mvt. I Allegro con brio")
+    await _set_movement_number(library, "b1", None)
+    await _set_musicbrainz_work(library, ["b1"], movements[0].mbid)
+    try:
+        recordings = await library.mass.music.classical.recordings(library.work_id("Fifth"))
+    finally:
+        await _set_musicbrainz_movements(library, "Fifth", None)
+        await _set_movement_name(library, "b1", None)
+        await _set_movement_number(library, "b1", 1)
+        await _set_musicbrainz_work(library, ["b1"], None)
+
+    bernstein = next(x for x in recordings if "Bernstein I" in _track_names(x))
+    track = next(x for x in bernstein.tracks if x.name == "Bernstein I")
+    assert (track.movement_number, track.movement_name) == (1, "Mvt. I Allegro con brio")
+    assert (bernstein.movement_numbers, bernstein.complete) == ([1, 2, 3, 4], True)
+    # the tracks of each movement are as many as the recordings covering it
+    assert Counter(x.movement_number for r in recordings for x in r.tracks)[1] == len(
+        [x for x in recordings if 1 in x.movement_numbers]
+    )
+
+
+GOLDBERG = [
+    WorkMovement(number=1, name="Aria"),
+    WorkMovement(number=2, name="Variatio 1. a 1 Clav."),
+    WorkMovement(number=5, name="Variatio 4. a 1 Clav."),
+    WorkMovement(number=32, name="Aria da capo"),
+]
+
+
+@pytest.mark.parametrize(
+    ("movement_name", "name", "movements", "expected"),
+    [
+        ("Aria", "Aria", GOLDBERG, [1]),
+        (None, "Goldberg Variations, BWV 988: Aria", GOLDBERG, [1]),
+        ("Variation No. 1", "Variation No. 1", GOLDBERG, [2]),
+        ("Var. 1", "Var. 1", GOLDBERG, [2]),
+        ("Variation IV", "Variation IV", GOLDBERG, [5]),
+        ("ARIA DA CAPO!", "Aria da capo", GOLDBERG, [32]),
+        ("Variation No. 2", "Variation No. 2", GOLDBERG, []),
+        # a name several movements go by matches none of them
+        (
+            "Allegro",
+            "Allegro",
+            [WorkMovement(number=1, name="Allegro"), WorkMovement(number=3, name="Allegro")],
+            [],
+        ),
+        (
+            "Allegro",
+            "Allegro",
+            [
+                WorkMovement(number=1, name="I. Allegro con brio"),
+                WorkMovement(number=4, name="IV. Allegro"),
+            ],
+            [],
+        ),
+    ],
+)
+def test_track_matches_a_movement_by_name(
+    movement_name: str | None, name: str, movements: list[WorkMovement], expected: list[int]
+) -> None:
+    """A track without a movement id or number matches the one movement its name names."""
+    track = Track(
+        item_id="1",
+        provider="library",
+        name=name,
+        provider_mappings=set(),
+        movement_name=movement_name,
+    )
+
+    assert [x.number for x in _track_movements(track, _Movements(movements=movements), None)] == (
+        expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("movement_name", "name", "expected"),
+    [
+        (None, "La bohème, Act I: Che gelida manina", [2]),
+        ('"O soave fanciulla"', "O soave fanciulla", [3]),
+        (None, "Act I: Mi chiamano Mimì", [4]),
+        (None, "Act I: Questo Mar Rosso", [1]),
+        # a name two arias go by falls back to the act
+        (None, "Act I: Sì, mi chiamano Mimì", [1]),
+    ],
+)
+def test_act_track_matches_an_aria_by_its_quoted_name(
+    movement_name: str | None, name: str, expected: list[int]
+) -> None:
+    """A track of an act matches the one aria whose quoted name it is, else the act."""
+    act = WorkMovement(number=1, name="Act I")
+    movements = [
+        act,
+        WorkMovement(number=2, name='No. 6. "Che gelida manina!" (Rodolfo)', parent=1),
+        WorkMovement(number=3, name="No. 9. «O soave fanciulla»", parent=1),
+        WorkMovement(number=4, name="No. 7. 'Mi chiamano Mimì'", parent=1),
+        WorkMovement(number=5, name="“Sì, mi chiamano Mimì” (Mimì)", parent=1),
+        WorkMovement(number=6, name="“Sì, mi chiamano Mimì” (reprise)", parent=1),
+    ]
+    track = Track(
+        item_id="1",
+        provider="library",
+        name=name,
+        provider_mappings=set(),
+        movement_name=movement_name,
+    )
+
+    assert [x.number for x in _track_movements(track, _Movements(movements=movements), act)] == (
+        expected
+    )
+
+
 def test_recording_order_settles_ties_on_ensemble() -> None:
     """Recordings of one year and conductor come by ensemble name, ignoring case."""
     work = ItemMapping(media_type=MediaType.WORK, item_id="1", provider="library", name="Work")
@@ -1597,6 +2109,52 @@ def _work_track(
         performers=performers,
         leaders=leaders or set(),
         appearances=[_Appearance(album_id=track_id, year=year, disc_number=1, track_number=1)],
+    )
+
+
+async def _set_movement_name(library: _Library, key: str, name: str | None) -> None:
+    """Store the movement name of a seeded track."""
+    await library.mass.music.database.execute_write(
+        f"UPDATE {DB_TABLE_TRACKS} SET movement_name = :name WHERE item_id = :track_id",
+        {"name": name, "track_id": int(library.tracks[key].item_id)},
+    )
+
+
+async def _set_movement_number(library: _Library, key: str, number: int | None) -> None:
+    """Store the movement number of a seeded track."""
+    await library.mass.music.database.execute_write(
+        f"UPDATE {DB_TABLE_TRACKS} SET movement_number = :number WHERE item_id = :track_id",
+        {"number": number, "track_id": int(library.tracks[key].item_id)},
+    )
+
+
+async def _set_musicbrainz_work(library: _Library, keys: Sequence[str], mbid: str | None) -> None:
+    """Give seeded tracks a MusicBrainz work id, removing theirs when None."""
+    database = library.mass.music.database
+    for key in keys:
+        lookup = {
+            "media_type": MediaType.TRACK.value,
+            "external_id_type": ExternalID.MB_WORK.value,
+            "item_id": int(library.tracks[key].item_id),
+        }
+        if mbid:
+            await database.insert(DB_TABLE_EXTERNAL_ID_LOOKUP, {**lookup, "external_id": mbid})
+        else:
+            await database.delete(DB_TABLE_EXTERNAL_ID_LOOKUP, lookup)
+
+
+async def _set_musicbrainz_movements(
+    library: _Library, key: str, movements: list[WorkMovement] | None
+) -> None:
+    """Store the MusicBrainz movements of a seeded work, removing them when None."""
+    params: dict[str, int | str] = {"work_id": int(library.work_id(key))}
+    if movements is None:
+        query = "json_remove(metadata, '$.movements')"
+    else:
+        query = "json_set(metadata, '$.movements', json(:movements))"
+        params["movements"] = json_dumps([x.to_dict() for x in movements])
+    await library.mass.music.database.execute_write(
+        f"UPDATE {DB_TABLE_WORKS} SET metadata = {query} WHERE item_id = :work_id", params
     )
 
 
@@ -1721,7 +2279,8 @@ async def _seed_library(mass: MusicAssistant) -> _Library:
                 sort_name=sort_name,
                 provider_mappings={_mapping()},
                 metadata=MediaItemMetadata(
-                    images=UniqueList(_image(*x) for x in ARTIST_IMAGES.get(key, ())) or None
+                    images=UniqueList(_image(*x) for x in ARTIST_IMAGES.get(key, ())) or None,
+                    country="DE" if key == "beethoven" else None,
                 ),
                 period=Period.CLASSICAL if key == "beethoven" else None,
             )

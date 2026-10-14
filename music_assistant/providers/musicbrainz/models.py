@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mashumaro import DataClassDictMixin
 from music_assistant_models.enums import ArtistRole, WorkType
+from music_assistant_models.media_items import WorkMovement
+
+from music_assistant.constants import OPERA_WORK_TYPES
 
 from .constants import (
     ARRANGEMENT_RELATION_TYPES,
@@ -76,6 +79,13 @@ class MusicBrainzLifeSpan(DataClassDictMixin):
     begin: str | None = None
     end: str | None = None
     ended: bool = False
+
+
+@dataclass
+class MusicBrainzArea(DataClassDictMixin):
+    """Model for a (basic) Area object from MusicBrainz."""
+
+    iso_3166_2_codes: list[str] | None = None  # set when the area is a country subdivision
 
 
 @dataclass
@@ -177,6 +187,19 @@ class MusicBrainzArtist(DataClassDictMixin):
     genres: list[MusicBrainzTag] | None = None
     relations: list[MusicBrainzRelation] | None = None
     life_span: MusicBrainzLifeSpan | None = None
+    country: str | None = None  # ISO 3166-1 code, only set when the area is a whole country
+    area: MusicBrainzArea | None = None
+
+    @property
+    def country_code(self) -> str | None:
+        """Return the ISO 3166-1 code of the country the artist is from, if known."""
+        if self.country:
+            # Worldwide and Europe are MusicBrainz pseudo countries
+            return None if self.country in ("XW", "XE") else self.country
+        # a subdivision code such as GB-ENG starts with its country's code
+        if self.area and self.area.iso_3166_2_codes:
+            return self.area.iso_3166_2_codes[0].split("-")[0]
+        return None
 
     @classmethod
     def from_raw(cls, data: Any) -> MusicBrainzArtist:
@@ -440,6 +463,33 @@ class MusicBrainzWork(DataClassDictMixin):
         )
 
     @property
+    def movements(self) -> list[WorkMovement]:
+        """
+        Return the parts of the work as its movements, in order.
+
+        A staged work, such as an opera, and a work whose parts are staged works have none.
+        """
+        parts = [
+            relation
+            for relation in self.relations
+            if relation.type == "parts" and relation.direction == "forward" and relation.work
+        ]
+        if self.work_type in OPERA_WORK_TYPES or any(
+            x.work and x.work.work_type in OPERA_WORK_TYPES for x in parts
+        ):
+            return []
+        parts.sort(key=lambda x: (x.ordering_key is None, x.ordering_key or 0))
+        return [
+            WorkMovement(
+                number=relation.ordering_key or position,
+                name=_part_name(relation.work.title, self.title),
+                mbid=relation.work.id,
+            )
+            for position, relation in enumerate(parts, 1)
+            if relation.work
+        ]
+
+    @property
     def arrangement_of_relations(self) -> list[MusicBrainzRelation]:
         """Return the relations to the works this work is an arrangement of, as ``work``."""
         return self._arrangement_relations("backward")
@@ -535,3 +585,10 @@ class MusicBrainzBarcodeRelease(DataClassDictMixin):
         if TYPE_CHECKING:
             alt_data = cast("dict[str, Any]", alt_data)
         return MusicBrainzBarcodeRelease.from_dict(alt_data)
+
+
+def _part_name(title: str, parent_title: str) -> str:
+    """Return the title of a part without the title of its work it starts with, if any."""
+    if not title.casefold().startswith(parent_title.casefold()):
+        return title
+    return title[len(parent_title) :].lstrip(" :,-") or title

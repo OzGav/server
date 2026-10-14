@@ -19,6 +19,7 @@ from music_assistant_models.background_task import TaskSchedule
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import (
     AlbumType,
+    ArtistEntityType,
     ArtistRole,
     ConfigEntryType,
     EventType,
@@ -29,8 +30,13 @@ from music_assistant_models.enums import (
     SortDirection,
     SortField,
 )
-from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
+from music_assistant_models.errors import (
+    InvalidDataError,  # TEMP(classical 6a country catch-up, 5c movements catch-up)
+    MediaNotFoundError,
+    MusicAssistantError,
+)
 from music_assistant_models.media_items import Album, Artist, BrowseFolder, Track, Work
+from music_assistant_models.media_items.metadata import LifeSpan
 
 from music_assistant.constants import (
     CONF_LANGUAGE,
@@ -40,6 +46,7 @@ from music_assistant.constants import (
     DB_TABLE_ARTISTS,
     DB_TABLE_PLAYLISTS,
     DB_TABLE_PROVIDER_MAPPINGS,
+    DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACKS,
     DB_TABLE_WORK_ARTISTS,  # TEMP(classical 5b catch-up)
     DB_TABLE_WORKS,
@@ -60,13 +67,15 @@ from music_assistant.helpers.compare import (
 from music_assistant.helpers.images import cleanup_thumb_cache
 from music_assistant.helpers.lyrics import extract_lrc_lyrics, normalize_lrc_lyrics
 from music_assistant.helpers.throttle_retry import Throttler
-from music_assistant.helpers.util import try_parse_int
+from music_assistant.helpers.util import is_placeholder_artist, try_parse_int
 from music_assistant.models.core_controller import CoreController
 from music_assistant.models.music_provider import MusicProvider
 
 from .constants import (
     ALBUM_RECONCILIATION_TASK_ID,
+    COMPOSER_LOOKUP_RETRY_INTERVAL,
     CONF_ALIAS_JOIN_DONE,  # TEMP(classical 5b alias join)
+    CONF_COMPOSER_COUNTRIES_DONE,  # TEMP(classical 6a country catch-up)
     CONF_COMPOSERLESS_WORKS_CATCH_UP_DONE,  # TEMP(classical 5b catch-up)
     CONF_ENABLE_ONLINE_METADATA,
     CONF_ENABLE_RADIO_METADATA_LOOKUP,
@@ -76,6 +85,8 @@ from .constants import (
     CONF_RECORDING_WORKS_CATCH_UP_DONE,
     CONF_SAME_WORKS_JOIN_DONE,  # TEMP(classical 5b work join)
     CONF_THUMB_CACHE_MAX_SIZE,
+    CONF_WORK_MOVEMENTS_DONE,  # TEMP(classical 5c movements catch-up)
+    CONF_WORK_TRACK_COMPOSERS_DONE,  # TEMP(classical 5c work composers)
     DEFAULT_LANGUAGE,
     DEFAULT_THUMB_CACHE_MAX_SIZE_MB,
     LOCALES,
@@ -108,6 +119,7 @@ if TYPE_CHECKING:
     from music_assistant.controllers.music.media.base import MediaControllerBase
     from music_assistant.helpers.json import SerializableType
     from music_assistant.models.metadata_provider import MetadataProvider
+    from music_assistant.providers.musicbrainz.models import MusicBrainzArtist
 
 # the errors one item of a maintenance scan may fail with without ending the scan
 _SCAN_ITEM_ERRORS = (MusicAssistantError, aiohttp.ClientError, TimeoutError)
@@ -226,9 +238,30 @@ class MetaDataController(
                 required=False,
                 hidden=True,
             ),
+            # TEMP(classical 5c work composers): remove before release
+            ConfigEntry(
+                key=CONF_WORK_TRACK_COMPOSERS_DONE,
+                type=ConfigEntryType.BOOLEAN,
+                required=False,
+                hidden=True,
+            ),
             # TEMP(classical 5b alias join): remove before release
             ConfigEntry(
                 key=CONF_ALIAS_JOIN_DONE,
+                type=ConfigEntryType.BOOLEAN,
+                required=False,
+                hidden=True,
+            ),
+            # TEMP(classical 6a country catch-up): remove before release
+            ConfigEntry(
+                key=CONF_COMPOSER_COUNTRIES_DONE,
+                type=ConfigEntryType.BOOLEAN,
+                required=False,
+                hidden=True,
+            ),
+            # TEMP(classical 5c movements catch-up): remove before release
+            ConfigEntry(
+                key=CONF_WORK_MOVEMENTS_DONE,
                 type=ConfigEntryType.BOOLEAN,
                 required=False,
                 hidden=True,
@@ -796,10 +829,16 @@ class MetaDataController(
         await self._queue_recording_works_catch_up()
         # TEMP(classical 5b catch-up): remove before release
         await self._queue_composerless_works_catch_up()
+        # TEMP(classical 5c work composers): remove before release
+        await self._credit_track_composers_once()
         # TEMP(classical 5b work join): remove before release
         await self._join_same_works_once()
         # TEMP(classical 5b alias join): remove before release
         await self._merge_composers_by_aliases_once()
+        # TEMP(classical 6a country catch-up): remove before release
+        await self._fill_composer_countries_once()
+        # TEMP(classical 5c movements catch-up): remove before release
+        await self._fill_work_movements_once()
         linked_domains = self._refresh_musicbrainz_linked_domains()
         processed: dict[str, int] = {}
         linked = not_found = failed = 0
@@ -884,6 +923,34 @@ class MetaDataController(
         # the identity step leaves the marker unset when it gave up
         return item.metadata.last_musicbrainz_lookup is not None
 
+    async def _identify_composer(self, artist: Artist) -> bool:
+        """Identify a composer by its own streaming service links, return whether it could."""
+        if not (musicbrainz := self._musicbrainz_provider()):
+            return False
+        artists = self.mass.music.artists
+        # a placeholder such as "D.R." names no composer to look up
+        if is_placeholder_artist(artist.name):
+            artist.metadata.last_musicbrainz_lookup = int(time())
+            await artists.update_item_in_library(artist.item_id, artist)
+            return True
+        # without reference items only the artist's own streaming service links are looked up
+        if mb_artist := await musicbrainz.resolve_artist(artist, [], []):
+            artist.mbid = mb_artist.id
+            await self._link_artist_to_musicbrainz(artist)
+            _fill_artist_from_musicbrainz(artist, mb_artist)
+        artist.metadata.last_musicbrainz_lookup = int(time())
+        await artists.update_item_in_library(artist.item_id, artist)
+        if not mb_artist:
+            await self._join_composer_by_name(musicbrainz, artist)
+            return True
+        await self._merge_composer_by_aliases(mb_artist.id, mb_artist)
+        # read again, as the join may have merged the artist into another
+        holders = await artists.get_library_items_by_external_id(
+            mb_artist.id, ExternalID.MB_ARTIST, limit=None
+        )
+        await self.set_composer_periods(int(holder.item_id) for holder in holders)
+        return True
+
     def _musicbrainz_link_phases(self, linked_domains: dict[str, int]) -> list[_LinkPhase]:
         """
         Return the selections a MusicBrainz link run works through, in order.
@@ -944,6 +1011,17 @@ class MetaDataController(
                 _works_to_enrich_query(),
                 {"stale": int(time() - REFRESH_INTERVAL)},
                 identify,
+            )
+        )
+        # a composer is rarely an album's main artist, so it is identified on its own
+        phases.append(
+            _LinkPhase(
+                "composers",
+                artists,
+                DB_TABLE_ARTISTS,
+                _composers_to_identify_query(),
+                {"stale": int(time() - COMPOSER_LOOKUP_RETRY_INTERVAL)},
+                self._identify_composer,
             )
         )
         # an album's release names the performers of all its tracks in one lookup
@@ -1077,6 +1155,33 @@ class MetaDataController(
             return
         self.mass.config.set_raw_core_config_value(self.domain, CONF_SAME_WORKS_JOIN_DONE, True)
 
+    # TEMP(classical 5c work composers): remove before release
+    async def _credit_track_composers_once(self) -> None:
+        """Give the library works without composers the composers credited on their tracks, once."""
+        if self.mass.config.get_raw_core_config_value(
+            self.domain, CONF_WORK_TRACK_COMPOSERS_DONE, False
+        ):
+            return
+        try:
+            rows = await self.mass.music.database.get_rows_from_query(
+                f"SELECT DISTINCT t.work_id FROM {DB_TABLE_TRACKS} t "
+                f"JOIN {DB_TABLE_TRACK_ARTISTS} ta ON ta.track_id = t.item_id "
+                "AND ta.role = :composer WHERE t.work_id IS NOT NULL "
+                f"AND NOT EXISTS (SELECT 1 FROM {DB_TABLE_WORK_ARTISTS} wa "
+                "WHERE wa.work_id = t.work_id AND wa.role = :composer)",
+                {"composer": ArtistRole.COMPOSER.value},
+                limit=0,
+            )
+            for row in rows:
+                await self.mass.music.works.credit_track_composers(row["work_id"])
+                await self.mass.music.tracks.credit_work_composers(row["work_id"])
+        except Exception as err:
+            self.logger.warning("Could not give the works their tracks' composers: %s", err)
+            return
+        self.mass.config.set_raw_core_config_value(
+            self.domain, CONF_WORK_TRACK_COMPOSERS_DONE, True
+        )
+
     # TEMP(classical 5b alias join): remove before release
     async def _merge_composers_by_aliases_once(self) -> None:
         """Run the alias-based composer merge for all existing confirmed composers, once."""
@@ -1091,6 +1196,66 @@ class MetaDataController(
             return
         self.mass.config.set_raw_core_config_value(self.domain, CONF_ALIAS_JOIN_DONE, True)
 
+    # TEMP(classical 6a country catch-up): remove before release
+    async def _fill_composer_countries_once(self) -> None:
+        """Give the composers with a MusicBrainz id but no country their country, once."""
+        if self.mass.config.get_raw_core_config_value(
+            self.domain, CONF_COMPOSER_COUNTRIES_DONE, False
+        ):
+            return
+        if not (musicbrainz := self._musicbrainz_provider()):
+            return
+        artists = self.mass.music.artists
+        try:
+            for artist in await artists.get_library_composers(with_mbid=True):
+                if not artist.mbid or artist.metadata.country:
+                    continue
+                try:
+                    details = await musicbrainz.get_artist_details(artist.mbid)
+                except InvalidDataError:
+                    continue
+                if country := details.country_code:
+                    artist.metadata.country = country
+                    await artists.update_item_in_library(artist.item_id, artist)
+        except Exception as err:
+            self.logger.warning("Could not give the composers their country: %s", err)
+            return
+        self.mass.config.set_raw_core_config_value(self.domain, CONF_COMPOSER_COUNTRIES_DONE, True)
+
+    # TEMP(classical 5c movements catch-up): remove before release
+    async def _fill_work_movements_once(self) -> None:
+        """Give the works with a MusicBrainz id the movements MusicBrainz lists for them, once."""
+        if self.mass.config.get_raw_core_config_value(self.domain, CONF_WORK_MOVEMENTS_DONE, False):
+            return
+        if not (musicbrainz := self._musicbrainz_provider()):
+            return
+        works = self.mass.music.works
+        identified = has_musicbrainz_id(
+            f"{DB_TABLE_WORKS}.item_id", MediaType.WORK, ExternalID.MB_WORK
+        )
+        try:
+            rows = await self.mass.music.database.get_rows_from_query(
+                f"SELECT item_id FROM {DB_TABLE_WORKS} "
+                f"WHERE {_valid_metadata_guard(DB_TABLE_WORKS)} AND {identified} "
+                f"AND json_extract({DB_TABLE_WORKS}.metadata, '$.movements') IS NULL",
+                limit=0,
+            )
+            for row in rows:
+                work = await works.get_library_item(row["item_id"])
+                if not work.mbid:
+                    continue
+                try:
+                    mb_work = await musicbrainz.get_work_details(work.mbid)
+                except InvalidDataError:
+                    continue
+                if mb_work and (movements := mb_work.movements):
+                    work.metadata.movements = movements
+                    await works.update_item_in_library(work.item_id, work)
+        except Exception as err:
+            self.logger.warning("Could not give the works their movements: %s", err)
+            return
+        self.mass.config.set_raw_core_config_value(self.domain, CONF_WORK_MOVEMENTS_DONE, True)
+
     async def _pending_musicbrainz_link_counts(self) -> dict[str, int]:
         """Return how many items each MusicBrainz link step still has to look up."""
         counts: dict[str, int] = {}
@@ -1100,11 +1265,17 @@ class MetaDataController(
             ("artists", DB_TABLE_ARTISTS, _artists_to_identify_query()),
             ("tracks", DB_TABLE_TRACKS, _tracks_to_identify_query()),
             ("works", DB_TABLE_WORKS, _works_to_enrich_query()),
+            ("composers", DB_TABLE_ARTISTS, _composers_to_identify_query()),
             ("album performers", DB_TABLE_ALBUMS, _albums_with_recordings_to_read_query()),
             ("track performers", DB_TABLE_TRACKS, _tracks_with_recording_to_read_query()),
         ):
+            params = (
+                {"stale": int(time() - COMPOSER_LOOKUP_RETRY_INTERVAL)}
+                if name == "composers"
+                else stale
+            )
             counts[name] = await self.mass.music.database.get_count_from_query(
-                f"SELECT 1 FROM {table} WHERE {_valid_metadata_guard(table)} AND {query}", stale
+                f"SELECT 1 FROM {table} WHERE {_valid_metadata_guard(table)} AND {query}", params
             )
         return counts
 
@@ -1237,6 +1408,21 @@ def _missing_metadata_query(table: str, *, description: bool = False) -> str:
     return f"({' OR '.join(missing)}) AND {never_refreshed}"
 
 
+def _fill_artist_from_musicbrainz(artist: Artist, mb_artist: MusicBrainzArtist) -> None:
+    """Fill an artist's empty entity type, life span and country in from its MusicBrainz artist."""
+    metadata = artist.metadata
+    if not metadata.artist_entity_type and mb_artist.type:
+        entity_type = ArtistEntityType(mb_artist.type.lower())
+        if entity_type != ArtistEntityType.UNKNOWN:
+            metadata.artist_entity_type = entity_type
+    if not metadata.life_span and (life_span := mb_artist.life_span):
+        metadata.life_span = LifeSpan(
+            begin=life_span.begin, end=life_span.end, ended=life_span.ended
+        )
+    if not metadata.country:
+        metadata.country = mb_artist.country_code
+
+
 def _musicbrainz_lookup_marker(table: str) -> str:
     """Return the SQL expression of when an item was last looked up on MusicBrainz."""
     return f"json_extract({table}.metadata,'$.last_musicbrainz_lookup')"
@@ -1269,6 +1455,22 @@ def _artists_to_identify_query() -> str:
         f"AND {album_identified})"
     )
     return f"({marker} ISNULL AND NOT {identified} AND {has_identified_album})"
+
+
+def _composers_to_identify_query() -> str:
+    """Return a query part selecting classical composers due for a lookup (param ``stale``)."""
+    marker = _musicbrainz_lookup_marker(DB_TABLE_ARTISTS)
+    identified = has_musicbrainz_id(
+        f"{DB_TABLE_ARTISTS}.item_id", MediaType.ARTIST, ExternalID.MB_ARTIST
+    )
+    composes_classical = (
+        f"EXISTS (SELECT 1 FROM {DB_TABLE_TRACK_ARTISTS} ta "
+        f"JOIN {DB_TABLE_TRACKS} t ON t.item_id = ta.track_id "
+        f"WHERE ta.artist_id = {DB_TABLE_ARTISTS}.item_id "
+        f"AND ta.role = '{ArtistRole.COMPOSER.value}' AND t.is_classical = 1)"
+    )
+    # a composer MusicBrainz did not identify is looked up again once its lookup is stale
+    return f"(({marker} ISNULL OR {marker} < :stale) AND NOT {identified} AND {composes_classical})"
 
 
 def _tracks_to_identify_query() -> str:

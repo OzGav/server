@@ -19,6 +19,7 @@ from music_assistant_models.enums import (
     CrossfadeMode,
     MediaType,
     PlayerFeature,
+    WorkType,
 )
 from music_assistant_models.media_items import (
     Audiobook,
@@ -1120,3 +1121,8 @@ EXTERNAL_SOURCES: Final[set[str]] = {
 }
 
 COLLECTION_ITEM_ID_SEPARATOR = "___"
+
+# the types of a staged work, whose parts are acts and scenes rather than movements
+OPERA_WORK_TYPES: Final[frozenset[WorkType]] = frozenset(
+    {WorkType.OPERA, WorkType.OPERETTA, WorkType.ZARZUELA}
+)

@@ -1073,6 +1073,42 @@ async def test_new_work_composers_reach_its_tracks(mass: MusicAssistant) -> None
     assert (await mass.music.artists.get_library_item(composer.item_id)).is_classical
 
 
+async def test_work_without_composers_gets_its_tracks_composers(mass: MusicAssistant) -> None:
+    """A work without composers takes the composers a track of it credits, for all its tracks."""
+    first = await _add_artist(mass, "First")
+    second = await _add_artist(mass, "Second")
+    work = await _add_work(mass, f"Work {_token()}")
+    bare = await _add_track(mass, work)
+    track = await _add_track(mass, work)
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.credits = [
+        Credit(artist=first, role=ArtistRole.COMPOSER, position=0),
+        Credit(artist=second, role=ArtistRole.COMPOSER, position=1),
+    ]
+
+    await mass.music.tracks.update_item_in_library(track.item_id, update)
+
+    stored = await mass.music.works.get_library_item(work.item_id)
+    assert _ids(stored.composers) == [first.item_id, second.item_id]
+    stored_bare = await mass.music.tracks.get_library_item(bare.item_id)
+    assert _composer_ids(stored_bare) == [first.item_id, second.item_id]
+
+
+async def test_work_with_composers_keeps_them_for_a_track_crediting_others(
+    mass: MusicAssistant,
+) -> None:
+    """A work with composers keeps them when a track of it credits another composer."""
+    composer = await _add_artist(mass, "Composer")
+    other = await _add_artist(mass, "Other")
+    work = await _add_work(mass, f"Work {_token()}", [composer])
+
+    await _add_track(mass, work, item_credits=[Credit(artist=other, role=ArtistRole.COMPOSER)])
+
+    stored = await mass.music.works.get_library_item(work.item_id)
+    assert _ids(stored.composers) == [composer.item_id]
+
+
 async def test_removing_a_work_unlinks_it(mass: MusicAssistant) -> None:
     """Removing a work keeps its tracks and other works, without their links to it."""
     composer = await _add_artist(mass, "Composer")
@@ -1432,9 +1468,39 @@ async def test_streaming_update_drops_the_joined_composer_it_replaces(
     update.credits = [Credit(artist=joined, role=ArtistRole.COMPOSER)]
 
     stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+    stored_work = await mass.music.works.get_library_item(work.item_id)
 
     assert _composer_ids(stored) == [beethoven.item_id]
+    assert _ids(stored_work.composers) == [beethoven.item_id]
     assert _ids(stored.artists) == [performer.item_id, beethoven.item_id]
+
+
+async def test_streaming_update_drops_the_performing_credit_of_the_composer(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A performer that becomes the composer on a streaming update loses its stored credit."""
+    vivaldi = await _add_artist(mass, "Antonio Vivaldi")
+    composers = AsyncMock(return_value=[])
+    monkeypatch.setattr(mass.music.artists, "get_library_composers", composers)
+    work = await _add_work(mass, f"Le quattro stagioni {_token()}", work_type=WorkType.CONCERTO)
+    track = await _add_track(
+        mass, work, item_credits=[Credit(artist=vivaldi, role=ArtistRole.ORCHESTRA)]
+    )
+    composers.return_value = [vivaldi]
+    streaming = Mock(spec=MusicProvider, is_streaming_provider=True)
+    monkeypatch.setattr(mass, "get_provider", Mock(return_value=streaming))
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.credits = [Credit(artist=vivaldi, role=ArtistRole.ORCHESTRA)]
+    update.metadata.performers = {"Dr, Composer", f"{vivaldi.name}, Orchestra"}
+
+    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+    stored_work = await mass.music.works.get_library_item(work.item_id)
+
+    assert [
+        (x.artist.item_id, x.role) for x in stored.credits if x.role != ArtistRole.MAIN_ARTIST
+    ] == [(vivaldi.item_id, ArtistRole.COMPOSER)]
+    assert _ids(stored_work.composers) == [vivaldi.item_id]
 
 
 async def test_movement_of_a_numbered_piece_keeps_its_own_work(mass: MusicAssistant) -> None:
