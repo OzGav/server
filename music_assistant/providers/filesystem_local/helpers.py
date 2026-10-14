@@ -396,12 +396,6 @@ def parse_track_work(tags: AudioTags) -> TrackWork | None:
     return TrackWork(works[index], paired_ids[index])
 
 
-def is_placeholder_artist(name: str) -> bool:
-    """Return whether a credited name is a MusicBrainz placeholder such as [anonymous]."""
-    # MusicBrainz names its special purpose artists in square brackets, like [traditional]
-    return name.startswith("[") and name.endswith("]")
-
-
 def performer_credit_role(role: str | None) -> tuple[ArtistRole, str | None]:
     """
     Return the credit role and instrument for the role or instrument of a performer credit.

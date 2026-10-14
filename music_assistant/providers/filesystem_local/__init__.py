@@ -102,6 +102,7 @@ from music_assistant.helpers.uri import create_uri
 from music_assistant.helpers.util import (
     TaskManager,
     detect_charset,
+    is_placeholder_artist,
     parse_title_and_version,
     try_parse_int,
 )
@@ -167,7 +168,6 @@ from .helpers import (
     is_disc_dir,
     is_image_file,
     is_metadata_file,
-    is_placeholder_artist,
     open_real_path,
     parse_nfo_root,
     parse_track_work,

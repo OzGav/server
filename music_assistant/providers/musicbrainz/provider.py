@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -18,8 +19,13 @@ from music_assistant_models.enums import (
     LinkType,
     MediaType,
 )
-from music_assistant_models.errors import InvalidDataError
-from music_assistant_models.media_items import MediaItemLink, MediaItemMetadata, UniqueList
+from music_assistant_models.errors import InvalidDataError, MediaNotFoundError
+from music_assistant_models.media_items import (
+    ItemMapping,
+    MediaItemLink,
+    MediaItemMetadata,
+    UniqueList,
+)
 from music_assistant_models.media_items.metadata import LifeSpan
 
 from music_assistant.constants import VARIOUS_ARTISTS_MBID, VARIOUS_ARTISTS_NAME
@@ -44,6 +50,7 @@ from .constants import (
     MAX_REF_ITEMS,
     MAX_REVERSE_URL_LOOKUPS,
     MIN_FIRST_RELEASE_CORRECTION_YEARS,
+    MUSICBRAINZ_WEB_URL,
     PRIMARY_TYPE_MAPPING,
     RECORDING_LENGTH_TOLERANCE_MS,
     RELEASE_BROWSE_MAX_PAGES,
@@ -78,7 +85,6 @@ if TYPE_CHECKING:
         Album,
         Artist,
         BrowseFolder,
-        ItemMapping,
         MediaItemType,
         RecommendationFolder,
         Track,
@@ -323,6 +329,29 @@ class MusicbrainzProvider(MetadataProvider):
                 raise InvalidDataError from err
         msg = "Invalid MusicBrainz Artist ID provided"
         raise InvalidDataError(msg)
+
+    async def get_artists_by_name(self, name: str) -> list[MusicBrainzArtist]:
+        """
+        Return the MusicBrainz artists that carry a name as their name or one of their aliases.
+
+        :param name: The name, compared ignoring case, accents, punctuation and spacing.
+        """
+        searchname = re.sub(LUCENE_SPECIAL, r"\\\1", name)
+        result = await self._api_client.get_data(
+            "artist", query=f'artist:"{searchname}" OR alias:"{searchname}"', limit="25"
+        )
+        if not result or "artists" not in result:
+            return []
+        found: list[MusicBrainzArtist] = []
+        for raw_artist in result["artists"]:
+            with suppress(MissingField):
+                found.append(MusicBrainzArtist.from_raw(raw_artist))
+        return [
+            x
+            for x in found
+            if compare_strings(x.name, name)
+            or any(compare_strings(alias.name, name) for alias in x.aliases or [])
+        ]
 
     async def resolve_artists_from_mbids(
         self, mbids: tuple[str, ...]
@@ -1098,13 +1127,19 @@ class MusicbrainzProvider(MetadataProvider):
 
     async def _recording_by_isrc(self, isrc: str, track: Track) -> MusicBrainzRecording | None:
         """Return the recording carrying an ISRC that is the given track, if any."""
-        # an ISRC is occasionally reused, so the recording must also match the track's
-        # title and length
+        recordings = await self.get_recordings_by_isrc(isrc)
+        if not recordings:
+            await self._log_unknown_isrc(isrc, track)
+            return None
+        # an ISRC is occasionally reused, so the recording must also match the track's length
+        # and title; an ISRC naming one recording only is enough without the title, which a
+        # streaming service may give as the movement alone, when the checks below run
+        sole_recording = len(recordings) == 1 and bool(track.artists)
         candidates = [
             recording
-            for recording in await self.get_recordings_by_isrc(isrc)
-            if compare_strings(recording.title, track.name, strict=False)
-            and _length_matches(recording, track)
+            for recording in recordings
+            if _length_matches(recording, track)
+            and (sole_recording or compare_strings(recording.title, track.name, strict=False))
         ]
         if not candidates:
             return None
@@ -1126,10 +1161,65 @@ class MusicbrainzProvider(MetadataProvider):
             )
         )
         if chosen is None:
+            # a compilation may name the composer where MusicBrainz credits the performers,
+            # so a recording on the release the track's album is identified as counts too
+            chosen = await self._recording_on_album_release(isrc, candidates, track)
+        if chosen is None:
             return None
         with suppress(InvalidDataError):
             return await self.get_recording_details(chosen.id)
         return None
+
+    async def _recording_on_album_release(
+        self, isrc: str, recordings: list[MusicBrainzRecording], track: Track
+    ) -> MusicBrainzRecording | None:
+        """Return the first recording on the MusicBrainz release of the track's album, if any."""
+        album = await self._full_album(track)
+        if not album:
+            return None
+        if not (release_id := album.get_external_id(ExternalID.MB_ALBUM)):
+            self.logger.debug(
+                'ISRC %s of "%s" is on MusicBrainz recording %s, which credits other artists, '
+                'so it needs album "%s" identified, add its streaming link or barcode to the '
+                "release of that recording",
+                isrc,
+                track.name,
+                f"{MUSICBRAINZ_WEB_URL}/recording/{recordings[0].id}",
+                album.name,
+            )
+            return None
+        try:
+            release = await self.get_release_details(release_id)
+        except InvalidDataError:
+            return None
+        on_release = release.recordings_by_id()
+        return next(
+            (recording for recording in recordings if recording.id.casefold() in on_release),
+            None,
+        )
+
+    async def _full_album(self, track: Track) -> Album | ItemMapping | None:
+        """Return the track's album, with its ids for a library track."""
+        album = track.album
+        if isinstance(album, ItemMapping) and album.provider == "library":
+            # a library track only carries a summary of its album, without its ids
+            with suppress(MediaNotFoundError):
+                album = await self.mass.music.albums.get_library_item(album.item_id)
+        return album
+
+    async def _log_unknown_isrc(self, isrc: str, track: Track) -> None:
+        """Log that MusicBrainz has no recording with a track's ISRC, with where to add it."""
+        if not self.logger.isEnabledFor(logging.DEBUG):
+            return
+        album = await self._full_album(track)
+        release_id = album.get_external_id(ExternalID.MB_ALBUM) if album else None
+        self.logger.debug(
+            'ISRC %s of "%s"%s is not on MusicBrainz, add it to the track\'s recording%s',
+            isrc,
+            track.name,
+            f' (album "{album.name}")' if album else "",
+            f": {MUSICBRAINZ_WEB_URL}/release/{release_id}" if release_id else "",
+        )
 
     @staticmethod
     def _reverse_lookup_urls(item: Artist | Album | Track) -> list[str]:

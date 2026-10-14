@@ -2019,6 +2019,14 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         ):
             if await self._confirm_library_candidate(db_item, item):
                 return int(db_item.item_id)
+        return await self._get_library_item_by_other_match(item)
+
+    async def _get_library_item_by_other_match(self, item: ItemCls | ItemMapping) -> int | None:
+        """
+        Return the library id of an item that neither its ids nor its name matched, if any.
+
+        Override in a subclass when a media type knows other evidence of the same item.
+        """
         return None
 
     def _library_match_names(self, item: ItemCls | ItemMapping) -> list[str]:

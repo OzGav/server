@@ -1519,12 +1519,18 @@ def _release_group_ids(
 
 
 def _recording_matches_track(recording: MusicBrainzRecording, track: Track) -> bool:
-    """Return whether a release's recording is the given library track, by title and length."""
-    if not compare_strings(recording.title, track.name, strict=False):
-        return False
-    if recording.length is None or not track.duration:
-        return True
-    return abs(recording.length / 1000 - track.duration) <= _TRACK_DURATION_TOLERANCE
+    """Return whether a release's recording is the given library track, by title or ISRC."""
+    if recording.length is not None and track.duration:
+        if abs(recording.length / 1000 - track.duration) > _TRACK_DURATION_TOLERANCE:
+            return False
+    # a streaming title may name only the movement ("I. Allegro con brio") where MusicBrainz
+    # names the work as well, so a shared ISRC identifies the recording too
+    recording_isrcs = {
+        normalize_external_id(ExternalID.ISRC, x) for x in recording.isrcs or [] if is_valid_isrc(x)
+    }
+    return compare_strings(recording.title, track.name, strict=False) or bool(
+        recording_isrcs & _isrcs(track)
+    )
 
 
 def _matching_provider_track(db_track: Track, provider_tracks: Sequence[Track]) -> Track | None:

@@ -8,7 +8,9 @@ was recorded and the ids of the works it is a performance of. A credited artist 
 on the recording by its name, its MusicBrainz id, or the music provider artist MusicBrainz
 links it to. A track whose only performers are its track artists gets their exact performing
 roles. Credits are never renamed, changed or removed, and a performer the track does not
-credit is never added.
+credit is only added to a track that credits no artist but its composers. Such a track gets
+the performers the recording names, taken from the library's own artists or added to the
+library when MusicBrainz links them to a loaded music provider.
 """
 
 from __future__ import annotations
@@ -20,7 +22,11 @@ from music_assistant_models.enums import ArtistRole, ExternalID, MediaType
 from music_assistant_models.errors import InvalidDataError
 from music_assistant_models.media_items import Credit, ItemMapping
 
-from music_assistant.constants import DB_TABLE_TRACKS
+from music_assistant.constants import (
+    DB_TABLE_EXTERNAL_ID_LOOKUP,
+    DB_TABLE_TRACKS,
+    DB_TABLE_WORKS,
+)
 from music_assistant.controllers.music.classical import PERFORMING_ROLES
 from music_assistant.controllers.music.helpers import provider_mappings_from_urls
 from music_assistant.helpers.compare import compare_strings
@@ -36,6 +42,7 @@ if TYPE_CHECKING:
 
     from music_assistant import MusicAssistant
     from music_assistant.providers.musicbrainz.models import (
+        MusicBrainzArtist,
         MusicBrainzRecording,
         MusicBrainzRelation,
     )
@@ -54,7 +61,8 @@ class PerformerEnrichmentMixin:
     MusicBrainz performer enrichment for the MetaDataController.
 
     Expects to be mixed with a class providing ``mass``, ``logger``,
-    ``schedule_update_metadata`` and ``_musicbrainz_provider``.
+    ``schedule_update_metadata``, ``_musicbrainz_provider``, ``_match_library_artist`` and
+    ``_add_musicbrainz_artist``.
     """
 
     if TYPE_CHECKING:
@@ -66,6 +74,10 @@ class PerformerEnrichmentMixin:
         ) -> None: ...
 
         def _musicbrainz_provider(self) -> MusicbrainzProvider | None: ...
+
+        async def _match_library_artist(self, mb_artist: MusicBrainzArtist) -> Artist | None: ...
+
+        async def _add_musicbrainz_artist(self, mb_artist: MusicBrainzArtist) -> Artist | None: ...
 
     async def _link_album_performers(self, album: Album) -> bool:
         """Read the recordings of an album's classical tracks, return whether it could."""
@@ -137,12 +149,21 @@ class PerformerEnrichmentMixin:
                 if credit.role == ArtistRole.MAIN_ARTIST:
                     main_artists[credit.artist.item_id] = (artist, naming)
             await self._credit_performing_main_artists(track, main_artists)
+            await self._credit_recording_performers(track, relations)
         await self._mark_recording_read(
             int(track.item_id), recording.recording_year if recording else None
         )
 
     async def _store_recording_works(self, track: Track, recording: MusicBrainzRecording) -> None:
-        """Give a track without MusicBrainz work ids those of the works its recording performs."""
+        """
+        Give a track without MusicBrainz work ids those of the works its recording performs.
+
+        The track's library work, when MusicBrainz has not identified it, is looked up again
+        on the next link run.
+
+        :param track: The library track.
+        :param recording: The track's MusicBrainz recording.
+        """
         if not (work_ids := recording.performance_work_ids) or any(
             id_type == ExternalID.MB_WORK for id_type, _ in track.external_ids
         ):
@@ -150,6 +171,21 @@ class PerformerEnrichmentMixin:
         await self.mass.music.tracks.set_external_ids(
             track.item_id,
             {*track.external_ids, *((ExternalID.MB_WORK, work_id) for work_id in work_ids)},
+        )
+        await self.mass.music.database.execute_write(
+            f"UPDATE {DB_TABLE_WORKS} "
+            "SET metadata = json_remove(metadata, '$.last_musicbrainz_lookup') "
+            f"WHERE item_id = (SELECT work_id FROM {DB_TABLE_TRACKS} WHERE item_id = :track_id) "
+            "AND json_valid(metadata) AND NOT EXISTS ("
+            f"SELECT 1 FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} "
+            f"WHERE {DB_TABLE_EXTERNAL_ID_LOOKUP}.media_type = :media_type "
+            f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.external_id_type = :id_type "
+            f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.item_id = {DB_TABLE_WORKS}.item_id)",
+            {
+                "track_id": int(track.item_id),
+                "media_type": MediaType.WORK.value,
+                "id_type": ExternalID.MB_WORK.value,
+            },
         )
 
     async def _relations_linking(
@@ -253,6 +289,35 @@ class PerformerEnrichmentMixin:
                     )
                 )
         await self.mass.music.tracks.add_credits(int(track.item_id), new_credits)
+
+    async def _credit_recording_performers(
+        self, track: Track, relations: Sequence[MusicBrainzRelation]
+    ) -> None:
+        """Credit a track naming no artist but its composers with its recording's performers."""
+        composers = {x.artist.item_id for x in track.credits if x.role == ArtistRole.COMPOSER}
+        if any(
+            credit.role in PERFORMING_ROLES
+            or (credit.role == ArtistRole.MAIN_ARTIST and credit.artist.item_id not in composers)
+            for credit in track.credits
+        ):
+            return
+        new_credits: list[Credit] = []
+        for position, relation in enumerate(relations):
+            assert relation.artist is not None  # for type checking
+            assert relation.performing_role is not None  # for type checking
+            if not (artist := await self._match_library_artist(relation.artist)):
+                artist = await self._add_musicbrainz_artist(relation.artist)
+            if artist:
+                new_credits.append(
+                    Credit(
+                        artist=ItemMapping.from_item(artist),
+                        role=relation.performing_role,
+                        instrument=relation.performing_instrument,
+                        position=position,
+                    )
+                )
+        if new_credits:
+            await self.mass.music.tracks.add_credits(int(track.item_id), new_credits)
 
     async def _mark_recording_read(self, track_id: int, recording_year: int | None) -> None:
         """Store a track's recording year and when its recording was read."""

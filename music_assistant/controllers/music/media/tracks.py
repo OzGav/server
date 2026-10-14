@@ -1585,9 +1585,7 @@ class TracksController(MediaControllerBase[Track]):
             item.metadata.lrc_lyrics or extract_lrc_lyrics(item.metadata.lyrics)
         )
         await self._split_joined_composers(item)
-        work_id = (
-            await self.mass.music.works.get_or_add_library_work_id(item.work) if item.work else None
-        )
+        work_id = await self._get_or_add_work_id(item)
         db_id = await self.mass.music.database.insert(
             self.db_table,
             {
@@ -1673,7 +1671,7 @@ class TracksController(MediaControllerBase[Track]):
         cur_work_id = int(cur_item.work.item_id) if cur_item.work else None
         # a merge keeps the stored work, so the update's work is not added to the library then
         new_work_id = (
-            await self.mass.music.works.get_or_add_library_work_id(update.work)
+            await self._get_or_add_work_id(update)
             if update.work and (overwrite or not cur_work_id)
             else None
         )
@@ -1808,6 +1806,26 @@ class TracksController(MediaControllerBase[Track]):
                 self.logger.warning("Ignoring request to clear all artists of track id %s", db_id)
             return
         await self._set_main_artists(db_id, all_artists, overwrite=overwrite)
+
+    async def _get_or_add_work_id(self, track: Track) -> int | None:
+        """
+        Return the library id of a track's work, adding the work if needed, None without a work.
+
+        A track that is a numbered piece of an opus the library holds, as "K 331, No. 3" of the
+        "K. 331" sonata, becomes a movement of that work, with the number and name of the piece.
+        """
+        if not track.work:
+            return None
+        # a numbered movement of its own is a movement of the piece, not the piece
+        if (
+            isinstance(track.work, Work)
+            and track.movement_number is None
+            and (opus := await self.mass.music.works.get_opus_work_id(track.work))
+        ):
+            work_id, track.movement_number, movement_name = opus
+            track.movement_name = movement_name or track.movement_name
+            return work_id
+        return await self.mass.music.works.get_or_add_library_work_id(track.work)
 
     async def _split_joined_composers(self, track: Track) -> set[str]:
         """

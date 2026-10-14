@@ -33,6 +33,7 @@ from music_assistant_models.media_items import (
 
 from music_assistant.constants import DB_TABLE_WORK_ARRANGEMENTS, DB_TABLE_WORK_ARTISTS
 from music_assistant.controllers.webserver.helpers.auth_middleware import current_user
+from music_assistant.helpers.work_titles import parse_catalog_numbers
 from music_assistant.mass import MusicAssistant
 from music_assistant.models.music_provider import MusicProvider
 
@@ -394,6 +395,45 @@ async def test_composerless_work_never_matches_a_composed_work(mass: MusicAssist
     assert composed_again.item_id == composed.item_id
 
 
+async def test_numbered_piece_of_a_library_opus_is_a_movement_of_it(mass: MusicAssistant) -> None:
+    """A track of a numbered piece of an opus the library holds is a movement of that work."""
+    mozart = await _add_artist(mass, "Wolfgang Amadeus Mozart")
+    sonata = await _add_work(
+        mass, "Piano Sonata No. 11 in A Major, K. 331", [mozart], catalog_numbers=["K. 331"]
+    )
+    name = "Piano Sonata No. 11 in A major, K 331, No. 3 Rondo Alla Turca"
+
+    track = await _add_track(mass, _work(name, [mozart], catalog_numbers=["K 331, No. 3"]))
+
+    assert track.work is not None
+    assert track.work.item_id == sonata.item_id
+    assert (track.movement_number, track.movement_name) == (3, "Rondo Alla Turca")
+
+
+@pytest.mark.parametrize(
+    ("stored", "composer_name"),
+    [("Nocturne, Op. 15, No. 2", "Frédéric Chopin"), ("Nocturnes, Op. 15", "Other Composer")],
+    ids=["no_bare_opus_work", "other_composer"],
+)
+async def test_numbered_piece_without_its_library_opus_is_a_work_of_its_own(
+    mass: MusicAssistant, stored: str, composer_name: str
+) -> None:
+    """A numbered piece is a work of its own without a library work of its bare opus number."""
+    chopin = await _add_artist(mass, "Frédéric Chopin")
+    composer = (
+        chopin if composer_name == "Frédéric Chopin" else await _add_artist(mass, composer_name)
+    )
+    work = await _add_work(mass, stored, [composer], catalog_numbers=parse_catalog_numbers(stored))
+    name = "Nocturne, Op. 15, No. 7"
+
+    track = await _add_track(mass, _work(name, [chopin], catalog_numbers=["Op. 15, No. 7"]))
+
+    assert track.work is not None
+    assert track.work.item_id != work.item_id
+    assert track.work.name == name
+    assert track.movement_number is None
+
+
 async def test_update_with_overwrite_keeps_composers_without_new_ones(
     mass: MusicAssistant,
 ) -> None:
@@ -723,6 +763,207 @@ async def test_provider_work_is_added_under_its_parent(mass: MusicAssistant) -> 
     parent = await mass.music.works.get_library_item(act_one.parent_work.item_id)
     assert parent.name == opera
     assert _ids(parent.composers) == [composer.item_id]
+
+
+async def _add_part(mass: MusicAssistant, name: str, parent: Work, composer: Artist) -> Work:
+    """Add a work that is a part of a library work."""
+    return await _add_work(mass, name, [composer], parent_work=ItemMapping.from_item(parent))
+
+
+@pytest.mark.parametrize(
+    ("stored", "added"),
+    [
+        ("Matthäus-Passion, BWV 244, Part 1", "St. Matthew Passion, BWV 244, Part I"),
+        ("Messiah, HWV 56, Pt. 2", "The Messiah, Part II"),
+        ("La bohème, Act II", "La Bohème, Act 2"),
+        ("Matthäus-Passion, BWV 244, Anhang", "St. Matthew Passion, BWV 244, Anhang"),
+    ],
+)
+async def test_part_matches_the_same_part_of_its_work(
+    mass: MusicAssistant, stored: str, added: str
+) -> None:
+    """A part matches the part of its work with the same number, or the same unnumbered label."""
+    composer = await _add_artist(mass, "Composer")
+    parent = await _add_work(mass, f"Work {_token()}", [composer])
+    part = await _add_part(mass, stored, parent, composer)
+
+    assert (await _add_part(mass, added, parent, composer)).item_id == part.item_id
+
+
+@pytest.mark.parametrize(
+    ("stored", "added"),
+    [
+        ("Matthäus-Passion, BWV 244, Part 1", "Matthäus-Passion, BWV 244, Part 2"),
+        ("Opera, Act 1", "Opera, Part 1"),
+        ("Passion, Anhang", "Passion, Appendix"),
+        ("Opera, Act 1", "Opera, Scene 1"),
+    ],
+)
+async def test_part_never_matches_another_part(
+    mass: MusicAssistant, stored: str, added: str
+) -> None:
+    """A part never matches a part of its work with another number or label."""
+    composer = await _add_artist(mass, "Composer")
+    parent = await _add_work(mass, f"Work {_token()}", [composer])
+    part = await _add_part(mass, stored, parent, composer)
+
+    assert (await _add_part(mass, added, parent, composer)).item_id != part.item_id
+
+
+async def test_part_never_matches_the_part_of_another_work(mass: MusicAssistant) -> None:
+    """A part only matches the parts of its own work."""
+    composer = await _add_artist(mass, "Composer")
+    first = await _add_work(mass, f"First {_token()}", [composer])
+    second = await _add_work(mass, f"Second {_token()}", [composer])
+    part = await _add_part(mass, "First Opera, Act I", first, composer)
+
+    assert (await _add_part(mass, "Second Opera, Act 1", second, composer)).item_id != (
+        part.item_id
+    )
+
+
+async def test_part_never_matches_a_different_musicbrainz_work(mass: MusicAssistant) -> None:
+    """A part never matches the same part number of its work holding another MusicBrainz id."""
+    composer = await _add_artist(mass, "Composer")
+    parent = await _add_work(mass, f"Work {_token()}", [composer])
+    part = await _add_work(
+        mass, "Opera, Act 1", [composer], _mbid(), parent_work=ItemMapping.from_item(parent)
+    )
+    added = await _add_work(
+        mass, "Opera, Act I", [composer], _mbid(), parent_work=ItemMapping.from_item(parent)
+    )
+
+    assert added.item_id != part.item_id
+
+
+async def test_work_matches_the_work_with_its_composer_and_catalog_numbers(
+    mass: MusicAssistant,
+) -> None:
+    """A work matches the one top-level work with the same composers and catalog numbers."""
+    composer = await _add_artist(mass, "Composer")
+    stored = await _add_work(
+        mass, "Concerto in E major, op. 8 no. 1", [composer], catalog_numbers=["op. 8 no. 1"]
+    )
+
+    added = await _add_work(
+        mass, "Violin Concerto in E Major, Op. 8 No. 1", [composer], catalog_numbers=["Op. 8 No.1"]
+    )
+
+    assert added.item_id == stored.item_id
+
+
+@pytest.mark.parametrize(
+    ("stored_numbers", "added_numbers"),
+    [
+        (["Op. 8"], ["Op. 8 No. 1"]),
+        (["Op. 8 No. 1", "RV 269"], ["Op. 8 No. 1"]),
+        (["Op. 8 No. 1"], ["Op. 8 No. 2"]),
+        ([], []),
+    ],
+)
+async def test_work_never_matches_other_catalog_numbers(
+    mass: MusicAssistant, stored_numbers: list[str], added_numbers: list[str]
+) -> None:
+    """A work never matches a work with only some, other or no catalog numbers."""
+    composer = await _add_artist(mass, "Composer")
+    stored = await _add_work(mass, "Concerto", [composer], catalog_numbers=stored_numbers)
+
+    added = await _add_work(mass, "Violin Concerto", [composer], catalog_numbers=added_numbers)
+
+    assert added.item_id != stored.item_id
+
+
+async def test_catalog_match_needs_the_same_composer(mass: MusicAssistant) -> None:
+    """A work never matches another composer's work with the same catalog numbers."""
+    stored = await _add_work(
+        mass, "Symphony", [await _add_artist(mass, "Composer")], catalog_numbers=["Op. 1"]
+    )
+
+    added = await _add_work(
+        mass, "Sinfonie", [await _add_artist(mass, "Other")], catalog_numbers=["Op. 1"]
+    )
+
+    assert added.item_id != stored.item_id
+
+
+async def test_catalog_match_never_joins_different_musicbrainz_works(
+    mass: MusicAssistant,
+) -> None:
+    """A work never matches a work with its catalog numbers holding another MusicBrainz id."""
+    composer = await _add_artist(mass, "Composer")
+    stored = await _add_work(mass, "Symphony", [composer], _mbid(), catalog_numbers=["Op. 1"])
+
+    added = await _add_work(mass, "Sinfonie", [composer], _mbid(), catalog_numbers=["Op. 1"])
+
+    assert added.item_id != stored.item_id
+
+
+async def test_catalog_match_needs_a_single_candidate(mass: MusicAssistant) -> None:
+    """A work matches none of several works with its composers and catalog numbers."""
+    composer = await _add_artist(mass, "Composer")
+    # works the library keeps apart, as an add would have matched the first
+    stored = [
+        await mass.music.works.create_library_item(
+            _work(name, [composer], catalog_numbers=["BWV 244"])
+        )
+        for name in ("Matthäus-Passion, BWV 244", "St. Matthew Passion, BWV 244")
+    ]
+
+    added = await _add_work(mass, "Passion selon saint Matthieu", [composer])
+
+    assert added.item_id not in _ids(stored)
+
+
+async def test_catalog_match_skips_a_work_titled_as_a_part(mass: MusicAssistant) -> None:
+    """A whole work never matches a top-level work titled as an act or part of it."""
+    composer = await _add_artist(mass, "Composer")
+    part = await mass.music.works.create_library_item(
+        _work("Swan Lake, Act II, Op. 20", [composer], catalog_numbers=["Op. 20"])
+    )
+
+    added = await _add_work(mass, "Le Lac des cygnes, Op. 20", [composer])
+
+    assert added.item_id != part.item_id
+
+
+async def test_provider_works_in_two_languages_share_their_work_and_parts(
+    mass: MusicAssistant,
+) -> None:
+    """The parts of a work its provider names in two languages join under one work."""
+    composer = await _add_artist(mass, "Bach")
+
+    def part(name: str) -> Work:
+        parent = name.rsplit(", ", 1)[0]
+        return _work(
+            name,
+            [composer],
+            catalog_numbers=["BWV 244"],
+            parent_work=ItemMapping(
+                media_type=MediaType.WORK, item_id=parent, provider=WORK_SOURCE, name=parent
+            ),
+        )
+
+    tracks = [
+        await _add_track(mass, part(name))
+        for name in (
+            "Matthäus-Passion, BWV 244, Part I",
+            "Matthäus-Passion, BWV 244, Part II",
+            "Matthäus-Passion, BWV 244, Anhang",
+            "St. Matthew Passion, BWV 244, Part 1",
+            "St. Matthew Passion, BWV 244, Part II",
+            "St. Matthew Passion, BWV 244, Anhang",
+        )
+    ]
+
+    work_ids = [x.work.item_id for x in tracks if x.work]
+    assert work_ids[3:] == work_ids[:3]
+    assert len(set(work_ids)) == 3
+    parts = [await mass.music.works.get_library_item(x) for x in work_ids[:3]]
+    parent_ids = {x.parent_work.item_id for x in parts if x.parent_work}
+    assert len(parent_ids) == 1
+    parent = await mass.music.works.get_library_item(parent_ids.pop())
+    assert parent.name == "Matthäus-Passion, BWV 244"
+    assert parent.parent_work is None
 
 
 async def test_merging_track_update_adds_no_provider_work(mass: MusicAssistant) -> None:
@@ -1194,3 +1435,21 @@ async def test_streaming_update_drops_the_joined_composer_it_replaces(
 
     assert _composer_ids(stored) == [beethoven.item_id]
     assert _ids(stored.artists) == [performer.item_id, beethoven.item_id]
+
+
+async def test_movement_of_a_numbered_piece_keeps_its_own_work(mass: MusicAssistant) -> None:
+    """A track that is a numbered movement of a numbered piece never joins the bare opus."""
+    beethoven = await _add_artist(mass, "Ludwig van Beethoven")
+    opus = await _add_work(mass, "Piano Sonatas, Op. 27", [beethoven], catalog_numbers=["Op. 27"])
+    name = "Piano Sonata No. 14 in C-sharp minor, Op. 27 No. 2"
+
+    track = await _add_track(
+        mass,
+        _work(name, [beethoven], catalog_numbers=["Op. 27 No. 2"]),
+        movement_number=1,
+        movement_name="I. Adagio sostenuto",
+    )
+
+    assert track.work is not None
+    assert track.work.item_id != opus.item_id
+    assert (track.movement_number, track.movement_name) == (1, "I. Adagio sostenuto")

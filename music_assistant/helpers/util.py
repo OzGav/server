@@ -618,6 +618,8 @@ _TITLE_WITH_CREDIT_PATTERNS = (
     _TITLE_HYPHEN_WITH_CREDIT_PATTERN,
 )
 
+_RIGHTS_RESERVED_NAMES = frozenset({"dr", "droitsreserves", "droitsréservés"})
+
 # Keywords for aggressive search cleaning (includes featuring).
 _VERSION_PATTERN = "|".join(re.escape(v) for v in VERSION_PARTS)
 _FEAT_PATTERN = r"feat(?:uring)?|ft"
@@ -710,6 +712,20 @@ def normalize_unicode(value: str | None) -> str | None:
     if value is None:
         return None
     return unicodedata.normalize("NFC", value)
+
+
+def is_placeholder_artist(name: str) -> bool:
+    """
+    Return whether a credited name is a placeholder rather than an artist.
+
+    :param name: The credited name, such as "[anonymous]" or "D.R.".
+    """
+    name = name.strip()
+    # MusicBrainz names its special purpose artists in square brackets, like [traditional]
+    if name.startswith("[") and name.endswith("]"):
+        return True
+    # labels write "D.R." (droits réservés, rights reserved) where they name no artist
+    return re.sub(r"[\s.]", "", name).casefold() in _RIGHTS_RESERVED_NAMES
 
 
 @functools.lru_cache(maxsize=2048)
