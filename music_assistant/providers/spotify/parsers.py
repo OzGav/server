@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 from music_assistant_models.enums import (
     AlbumType,
-    ArtistRole,
     ContentType,
     ExternalID,
     ImageType,
@@ -18,7 +17,6 @@ from music_assistant_models.media_items import (
     Artist,
     Audiobook,
     AudioFormat,
-    Credit,
     MediaItemImage,
     Playlist,
     Podcast,
@@ -30,7 +28,11 @@ from music_assistant_models.unique_list import UniqueList
 
 from music_assistant.constants import CLASSICAL_GENRE_NAME, DEFAULT_AUDIOBOOK_PODCAST_GENRE
 from music_assistant.helpers.util import infer_album_type, parse_title_and_version
-from music_assistant.helpers.work_titles import parse_work_title, set_track_work
+from music_assistant.helpers.work_titles import (
+    composers_listed_first,
+    parse_work_title,
+    set_listed_composer_work,
+)
 
 if TYPE_CHECKING:
     from .provider import SpotifyProvider
@@ -203,7 +205,7 @@ def parse_track(
         composer = composer or artist_parsed
         if artist_parsed and artist_parsed.item_id not in {x.item_id for x in track.artists}:
             track.artists.append(artist_parsed)
-    _set_classical_details(track, name, composer, composer_first)
+    set_listed_composer_work(track, name, composer, composer_first)
 
     track.metadata.explicit = track_obj["explicit"]
     if "preview_url" in track_obj:
@@ -244,19 +246,16 @@ def lists_composers_first(track_objs: list[dict[str, Any]]) -> bool | None:
     """
     if not has_work_titles(track_objs):
         return None
-    work_titles = [
-        work_title
-        for x in track_objs
-        if x
-        and x.get("name")
-        and (
-            work_title := parse_work_title(
+    return composers_listed_first(
+        [
+            (
                 parse_title_and_version(x["name"])[0],
                 x["artists"][0].get("name") if x.get("artists") else None,
             )
-        )
-    ]
-    return sum(1 for x in work_titles if x.other_composer) * 2 <= len(work_titles)
+            for x in track_objs
+            if x and x.get("name")
+        ]
+    )
 
 
 def parse_playlist(playlist_obj: dict[str, Any], provider: SpotifyProvider) -> Playlist:
@@ -473,17 +472,3 @@ def parse_audiobook(audiobook_obj: dict[str, Any], provider: SpotifyProvider) ->
             audiobook.metadata.release_date = datetime.fromisoformat(date_str)
 
     return audiobook
-
-
-def _set_classical_details(
-    track: Track, title: str, composer: Artist | None, composer_first: bool | None
-) -> None:
-    """Set the composer credit, work and movement a classical track's title and album give."""
-    track_work = parse_work_title(title, composer.name if composer else None)
-    if composer_first is False or (track_work and track_work.other_composer):
-        # the titles name the composers, so the first artist is a performer
-        composer = None
-    if composer and (track_work or composer_first):
-        track.credits.append(Credit(artist=composer, role=ArtistRole.COMPOSER))
-    if track_work:
-        set_track_work(track, track_work, composer)

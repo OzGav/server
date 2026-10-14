@@ -97,4 +97,4 @@ SCOPE = [
 LIKED_SONGS_FAKE_PLAYLIST_ID_PREFIX = "liked_songs"
 # Bump when the parsed form of a cached album or track changes, so that old cache rows are
 # fetched again
-PARSED_ITEM_CACHE_CHECKSUM = "classical_v4"
+PARSED_ITEM_CACHE_CHECKSUM = "classical_v7"

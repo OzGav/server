@@ -7,10 +7,12 @@ import re
 from collections.abc import Mapping
 from contextlib import suppress
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from music_assistant_models.enums import (
     AlbumType,
+    ArtistRole,
     ContentType,
     ExternalID,
     ImageType,
@@ -30,8 +32,19 @@ from music_assistant_models.media_items import (
     UniqueList,
 )
 
-from music_assistant.helpers.util import infer_album_type, parse_title_and_version
+from music_assistant.constants import CLASSICAL_GENRE_NAME
+from music_assistant.helpers.util import (
+    infer_album_type,
+    is_placeholder_artist,
+    parse_title_and_version,
+)
+from music_assistant.helpers.work_titles import (
+    parse_work_title,
+    set_listed_composer_work,
+    set_track_work,
+)
 
+from .classical import is_classical_album, is_classical_track, track_credits
 from .constants import (
     BIT_DEPTH_HIRES,
     BIT_DEPTH_LOSSLESS,
@@ -171,6 +184,9 @@ def parse_album(provider: TidalProvider, doc: JsonApiDocument, resource: dict[st
         album.metadata.popularity = _scale_popularity(attributes["popularity"])
     if genres := _parse_genres(doc, resource):
         album.metadata.genres = genres
+    # a full album comes with the first page of its tracks
+    if is_classical_album([(doc, x) for x in _related_tracks(doc, resource)]):
+        album.metadata.genres = {*(album.metadata.genres or ()), CLASSICAL_GENRE_NAME}
     if links := _parse_links(attributes):
         album.metadata.links = links
     if image := _resolve_image(provider, doc, resource, "coverArt"):
@@ -179,8 +195,23 @@ def parse_album(provider: TidalProvider, doc: JsonApiDocument, resource: dict[st
     return album
 
 
-def parse_track(provider: TidalProvider, doc: JsonApiDocument, resource: dict[str, Any]) -> Track:
-    """Parse an official Tidal track resource to a generic Track."""
+def parse_track(
+    provider: TidalProvider,
+    doc: JsonApiDocument,
+    resource: dict[str, Any],
+    classical_album: bool = False,
+    composer_first: bool | None = None,
+) -> Track:
+    """
+    Parse an official Tidal track resource to a generic Track.
+
+    :param provider: The Tidal provider instance.
+    :param doc: The JSON:API document holding the track.
+    :param resource: The track resource.
+    :param classical_album: Whether the track is on a classical album.
+    :param composer_first: True on a classical album that lists each track's composer as its
+        first artist, False on one whose titles name the composers instead, None when unknown.
+    """
     track_id = str(resource["id"])
     attributes: TracksAttributes = resource.get("attributes", {})
     name, version = _split_title_version(
@@ -227,10 +258,15 @@ def parse_track(provider: TidalProvider, doc: JsonApiDocument, resource: dict[st
 
     if genres := _parse_genres(doc, resource):
         track.metadata.genres = genres
+    is_classical = is_classical_track(doc, resource)
+    if is_classical:
+        track.metadata.genres = {*(track.metadata.genres or ()), CLASSICAL_GENRE_NAME}
     if links := _parse_links(attributes):
         track.metadata.links = links
     if performers := _parse_credits(doc, resource):
         track.metadata.performers = performers
+    if is_classical or classical_album:
+        _set_classical_details(provider, doc, resource, track, composer_first)
 
     bpm = attributes.get("bpm")
     musical_key = _parse_musical_key(attributes.get("key"), attributes.get("keyScale"))
@@ -365,6 +401,44 @@ def _parse_or_skip[ItemT](
         return None
 
 
+def _set_classical_details(
+    provider: TidalProvider,
+    doc: JsonApiDocument,
+    resource: dict[str, Any],
+    track: Track,
+    composer_first: bool | None,
+) -> None:
+    """Set the credits, work and movement Tidal gives for a classical track."""
+    if not doc.related(resource, "credits"):
+        # a track without credits lists its composer first, as compilations do
+        first_artist = track.artists[0] if track.artists else None
+        set_listed_composer_work(
+            track,
+            track.name,
+            first_artist if isinstance(first_artist, Artist) else None,
+            composer_first,
+        )
+        return
+    track.credits.extend(
+        track_credits(doc, resource, track.artists, partial(parse_artist, provider, doc))
+    )
+    composer = next(
+        (
+            x.artist
+            for x in track.credits
+            if x.role == ArtistRole.COMPOSER and isinstance(x.artist, Artist)
+        ),
+        None,
+    )
+    if classical_work := parse_work_title(track.name, composer.name if composer else None):
+        set_track_work(track, classical_work, composer)
+
+
+def _related_tracks(doc: JsonApiDocument, resource: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the included tracks of an album's items, leaving out its music videos."""
+    return [x for x in doc.related(resource, "items") if x.get("type") == "tracks"]
+
+
 def _split_title_version(title: str, version: str | None) -> tuple[str, str]:
     """
     Split a title into (name, version).
@@ -391,11 +465,16 @@ def _clean_biography(text: str) -> str:
 
 def _parse_credits(doc: JsonApiDocument, resource: dict[str, Any]) -> set[str] | None:
     """Resolve the credits relationship to a set of contributor names."""
-    names = {
-        name
-        for credit in doc.related(resource, "credits")
-        if (name := credit.get("attributes", {}).get("name"))
-    }
+    names: set[str] = set()
+    for credit in doc.related(resource, "credits"):
+        attributes = credit.get("attributes", {})
+        if not (name := attributes.get("name")):
+            continue
+        # a placeholder keeps its role, as in "Dr, Composer", so the track still tells that its
+        # source named a placeholder composer
+        if is_placeholder_artist(name) and (role := attributes.get("role")):
+            name = f"{name}, {role}"
+        names.add(name)
     return names or None
 
 

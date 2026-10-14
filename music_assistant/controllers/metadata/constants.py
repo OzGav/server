@@ -70,6 +70,9 @@ REFRESH_INTERVAL = 60 * 60 * 24 * 90  # 90 days
 
 # a refresh that a metadata provider failed temporarily is due again after this
 REFRESH_RETRY_INTERVAL = 60 * 60 * 24 * 7  # 7 days
+# a composer MusicBrainz did not identify is tried again after the MusicBrainz cache expired,
+# so a link added on MusicBrainz meanwhile is picked up within a month
+COMPOSER_LOOKUP_RETRY_INTERVAL = 60 * 60 * 24 * 30  # 30 days
 
 CONF_ENABLE_ONLINE_METADATA = "enable_online_metadata"
 
@@ -97,9 +100,22 @@ CONF_COMPOSERLESS_WORKS_CATCH_UP_DONE = "classical_composerless_works_catch_up_d
 # core config key recording that the library works that are the same work were joined once
 CONF_SAME_WORKS_JOIN_DONE = "classical_same_works_join_done"
 
+# TEMP(classical 5c work composers): remove before release
+# core config key recording that the library works without composers were given the
+# composers credited on their tracks once
+CONF_WORK_TRACK_COMPOSERS_DONE = "classical_work_track_composers_done"
+
 # TEMP(classical 5b alias join): remove before release
 # core config key recording that the alias-based composer merge ran once for existing composers
 CONF_ALIAS_JOIN_DONE = "classical_alias_join_done"
+
+# TEMP(classical 6a country catch-up): remove before release
+# core config key recording that the composers with a MusicBrainz id were given their country once
+CONF_COMPOSER_COUNTRIES_DONE = "classical_composer_countries_done"
+
+# TEMP(classical 5c movements catch-up): remove before release
+# core config key recording that the works with a MusicBrainz id were given their movements once
+CONF_WORK_MOVEMENTS_DONE = "classical_work_movements_done"
 
 # keeps its historical artist-only id (and task domain) so existing schedules survive
 MISSING_METADATA_SCAN_TASK_ID = "metadata_missing_artist_metadata_scan_v2"

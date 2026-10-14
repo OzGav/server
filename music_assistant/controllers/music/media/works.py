@@ -27,6 +27,8 @@ from music_assistant_models.media_items import (
 )
 
 from music_assistant.constants import (
+    DB_TABLE_EXTERNAL_ID_LOOKUP,
+    DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACKS,
     DB_TABLE_WORK_ARRANGEMENTS,
     DB_TABLE_WORK_ARTISTS,
@@ -54,6 +56,14 @@ FIRST_COMPOSER_SORT_NAME = f"""(SELECT artists.search_sort_name FROM {DB_TABLE_W
     WHERE {DB_TABLE_WORK_ARTISTS}.work_id = {DB_TABLE_WORKS}.item_id
     AND {DB_TABLE_WORK_ARTISTS}.role = '{ArtistRole.COMPOSER.value}'
     ORDER BY {DB_TABLE_WORK_ARTISTS}.position, {DB_TABLE_WORK_ARTISTS}.rowid LIMIT 1)"""
+
+# each work with the work it is listed as, the top work it is a part of or else itself, as a
+# subquery selecting item_id and root_id
+WORK_ROOTS: Final[str] = f"""WITH RECURSIVE roots(item_id, root_id) AS (
+        SELECT item_id, item_id FROM {DB_TABLE_WORKS} WHERE parent_work_id IS NULL
+        UNION ALL SELECT p.item_id, roots.root_id FROM {DB_TABLE_WORKS} p
+        JOIN roots ON p.parent_work_id = roots.item_id)
+    SELECT item_id, root_id FROM roots"""
 
 # The json_object arguments of a slim work mapping, selected from the works table aliased as w.
 SUMMARY_WORK_FIELDS = "'item_id', w.item_id, 'name', w.name, 'sort_name', w.sort_name"
@@ -100,8 +110,8 @@ def work_search_sql(search_term: str, query_params: dict[str, Any]) -> str:
     # the unaliased works table of the subquery is the one the match refers to
     match = search_name_match_clause(DB_TABLE_WORKS, search_term, "search", query_params)
     return (
-        f"{DB_TABLE_WORKS}.item_id IN (SELECT COALESCE(parent_work_id, item_id) "
-        f"FROM {DB_TABLE_WORKS} WHERE {match})"
+        f"{DB_TABLE_WORKS}.item_id IN (SELECT r.root_id FROM ({WORK_ROOTS}) r "
+        f"JOIN {DB_TABLE_WORKS} ON {DB_TABLE_WORKS}.item_id = r.item_id WHERE {match})"
     )
 
 
@@ -349,6 +359,39 @@ class WorksController(MediaControllerBase[Work]):
             f"INSERT OR IGNORE INTO {DB_TABLE_WORK_ARRANGEMENTS}(work_id, source_work_id) "
             "VALUES (:work_id, :source_work_id)",
             {"work_id": work_id, "source_work_id": source_work_id},
+        )
+
+    async def credit_track_composers(self, work_id: int) -> None:
+        """
+        Give a library work without composers the composers credited on its library tracks.
+
+        A work MusicBrainz knows, by its own or a track's MusicBrainz work id, is left out:
+        MusicBrainz's composers take precedence and are filled in by the MusicBrainz link run.
+
+        :param work_id: Library id of the work.
+        """
+        # each composer once, in the order the work's tracks first credit them
+        await self.mass.music.database.execute_write(
+            f"INSERT OR IGNORE INTO {DB_TABLE_WORK_ARTISTS}(work_id, artist_id, role, position) "
+            "SELECT :work_id, artist_id, :composer, "
+            "ROW_NUMBER() OVER (ORDER BY track_id, position) - 1 FROM ("
+            "SELECT ta.artist_id, ta.track_id, ta.position, ROW_NUMBER() OVER "
+            "(PARTITION BY ta.artist_id ORDER BY ta.track_id, ta.position) AS credit_number "
+            f"FROM {DB_TABLE_TRACK_ARTISTS} ta JOIN {DB_TABLE_TRACKS} t ON t.item_id = ta.track_id "
+            "WHERE t.work_id = :work_id AND ta.role = :composer) "
+            f"WHERE credit_number = 1 AND NOT EXISTS (SELECT 1 FROM {DB_TABLE_WORK_ARTISTS} "
+            "WHERE work_id = :work_id AND role = :composer) "
+            f"AND NOT EXISTS (SELECT 1 FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} x "
+            "WHERE x.external_id_type = :mb_work AND ((x.media_type = :work AND "
+            "x.item_id = :work_id) OR (x.media_type = :track AND x.item_id IN "
+            f"(SELECT item_id FROM {DB_TABLE_TRACKS} WHERE work_id = :work_id))))",
+            {
+                "work_id": work_id,
+                "composer": ArtistRole.COMPOSER.value,
+                "mb_work": ExternalID.MB_WORK.value,
+                "work": MediaType.WORK.value,
+                "track": MediaType.TRACK.value,
+            },
         )
 
     async def get_library_work_id(self, work: Work | ItemMapping) -> int | None:
@@ -832,11 +875,9 @@ class WorksController(MediaControllerBase[Work]):
         return f"""({DB_TABLE_WORKS}.parent_work_id IS NULL
             AND (NOT EXISTS (SELECT 1 FROM {DB_TABLE_WORKS} p
                 WHERE p.parent_work_id = {DB_TABLE_WORKS}.item_id)
-            OR EXISTS (SELECT 1 FROM {DB_TABLE_TRACKS}
-                WHERE {DB_TABLE_TRACKS}.work_id = {DB_TABLE_WORKS}.item_id AND {visible})
-            OR EXISTS (SELECT 1 FROM {DB_TABLE_WORKS} p
-                JOIN {DB_TABLE_TRACKS} ON {DB_TABLE_TRACKS}.work_id = p.item_id
-                WHERE p.parent_work_id = {DB_TABLE_WORKS}.item_id AND {visible})))"""
+            OR {DB_TABLE_WORKS}.item_id IN (SELECT r.root_id FROM ({WORK_ROOTS}) r
+                JOIN {DB_TABLE_TRACKS} ON {DB_TABLE_TRACKS}.work_id = r.item_id
+                WHERE {visible})))"""
 
     def _search_filter_clause(self, search: str, query_params: dict[str, Any]) -> str:
         """Return the search condition, which a work also meets through a matching part."""

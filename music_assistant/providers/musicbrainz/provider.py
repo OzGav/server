@@ -379,7 +379,7 @@ class MusicbrainzProvider(MetadataProvider):
         return results
 
     async def get_artist_metadata(self, artist: Artist) -> MediaItemMetadata | None:
-        """Surface MusicBrainz artist type, life span, and URL relations."""
+        """Surface MusicBrainz artist type, life span, country and URL relations."""
         if not artist.mbid:
             return None
         try:
@@ -400,13 +400,15 @@ class MusicbrainzProvider(MetadataProvider):
             )
         links = self._links_from_relations(details.relations)
         genres = _genre_names(details.genres)
-        if not artist_entity_type and not life_span and not links and not genres:
+        country = details.country_code
+        if not artist_entity_type and not life_span and not links and not genres and not country:
             return None
         return MediaItemMetadata(
             links=links,
             genres=genres,
             artist_entity_type=artist_entity_type,
             life_span=life_span,
+            country=country,
         )
 
     async def get_album_metadata(self, album: Album) -> MediaItemMetadata | None:

@@ -28,6 +28,7 @@ from music_assistant_models.media_items import (
     ProviderMapping,
     Track,
     UniqueList,
+    WorkMovement,
 )
 
 from music_assistant.constants import VARIOUS_ARTISTS_MBID
@@ -2343,6 +2344,39 @@ async def test_artist_metadata_includes_genres_and_current_typed_links() -> None
     }
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ({"country": "PL"}, "PL"),
+        ({"country": "XW"}, None),
+        ({"area": {"name": "England", "iso-3166-2-codes": ["GB-ENG"]}}, "GB"),
+        ({"area": {"name": "Warsaw"}}, None),
+        ({}, None),
+    ],
+)
+def test_artist_country_is_read_from_the_country_or_its_subdivision(
+    raw: dict[str, Any], expected: str | None
+) -> None:
+    """An artist's country is its ISO code, else that of the country subdivision it is from."""
+    artist = MusicBrainzArtist.from_raw({**_artist_lookup(), **raw})
+
+    assert artist.country_code == expected
+
+
+async def test_artist_metadata_includes_the_country() -> None:
+    """An artist gets the country MusicBrainz reports for them."""
+    provider, _ = _routed_provider(
+        {f"artist/{RADIOHEAD_MBID}": {**_artist_lookup(), "country": "GB"}}
+    )
+
+    metadata = await provider.get_artist_metadata(
+        _artist_item(external_ids={(ExternalID.MB_ARTIST, RADIOHEAD_MBID)})
+    )
+
+    assert metadata is not None
+    assert metadata.country == "GB"
+
+
 # ---------------------------------------------------------------------------
 # browse_release_groups_by_artist
 # ---------------------------------------------------------------------------
@@ -2638,6 +2672,49 @@ def test_work_parent_relation_is_the_backward_parts_relation() -> None:
         1,
     )
     assert _work("symphony_5").parent_relation is None
+
+
+def test_work_movements_are_its_parts_without_its_title() -> None:
+    """The parts of a work are its movements in order, named without the work's title."""
+    assert _work("symphony_5").movements == [
+        WorkMovement(
+            number=1, name="I. Allegro con brio", mbid="b6f9ecc3-24d1-38ed-b8a0-091f7cd0c6b2"
+        ),
+        WorkMovement(
+            number=2, name="II. Andante con moto", mbid="3bc742da-f67b-36c9-b31e-6ed09fdbdadd"
+        ),
+    ]
+    assert _work("symphony_5_movement_1").movements == []
+
+
+def test_work_movements_follow_the_ordering_key_else_their_position() -> None:
+    """Parts come by ordering key, those without one numbered by their position."""
+    data = _work_lookup("symphony_5")
+    parts = [x for x in data["relations"] if x["type"] == "parts"]
+    parts[0]["ordering-key"], parts[1]["ordering-key"] = 2, 1
+    parts[0]["work"]["title"] = "Finale"
+    parts.append({"type": "parts", "direction": "forward", "work": {"id": "x", "title": "Coda"}})
+    data["relations"].append(parts[-1])
+
+    assert [(x.number, x.name) for x in MusicBrainzWork.from_raw(data).movements] == [
+        (1, "II. Andante con moto"),
+        (2, "Finale"),
+        (3, "Coda"),
+    ]
+
+
+@pytest.mark.parametrize(("work_type", "part_type"), [("Opera", None), (None, "Operetta")])
+def test_staged_work_has_no_movements(work_type: str | None, part_type: str | None) -> None:
+    """An opera, and a work whose parts are operas, have no movements."""
+    part = MusicBrainzWork(id="p", title="Part", type=part_type)
+    work = MusicBrainzWork(
+        id="w",
+        title="Work",
+        type=work_type,
+        relations=[MusicBrainzRelation(type="parts", direction="forward", work=part)],
+    )
+
+    assert work.movements == []
 
 
 def test_work_arrangement_relations_point_at_its_arrangements() -> None:

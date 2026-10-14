@@ -3,7 +3,7 @@ MusicBrainz work enrichment for the Metadata Controller.
 
 Provides the WorkEnrichmentMixin, mixed into the MetaDataController, which fills the empty
 fields of library works in from MusicBrainz: their MusicBrainz id, type, year, language,
-catalog numbers, key and composers. A work is found through its own MusicBrainz id or
+catalog numbers, key, movements and composers. A work is found through its own MusicBrainz id or
 through the ids on its tracks, which mostly name one of its movements. The composers
 MusicBrainz names for a work without any are taken from the library's own artists, or added
 to the library when MusicBrainz links them to a loaded music provider, and are credited on
@@ -25,9 +25,10 @@ from __future__ import annotations
 
 from time import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
 from music_assistant_models.enums import ArtistRole, ExternalID, MediaType
-from music_assistant_models.errors import InvalidDataError
+from music_assistant_models.errors import InvalidDataError, MediaNotFoundError
 from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import Artist, ItemMapping, UniqueList, Work
 from music_assistant_models.media_items.metadata import MediaItemMetadata
@@ -43,7 +44,7 @@ from music_assistant.controllers.music.helpers import provider_mappings_from_url
 from music_assistant.helpers.compare import compare_strings, is_named_by
 from music_assistant.helpers.work_titles import parse_catalog_numbers
 from music_assistant.providers.musicbrainz.constants import GROUP_ARTIST_TYPES, MUSICBRAINZ_WEB_URL
-from music_assistant.providers.musicbrainz.provider import relation_urls
+from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider, relation_urls
 
 from .constants import MAX_MUSICBRAINZ_WORK_DEPTH, MUSICBRAINZ_LINK_DOMAINS
 
@@ -60,7 +61,6 @@ if TYPE_CHECKING:
         MusicBrainzRelation,
         MusicBrainzWork,
     )
-    from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider
 
 
 class WorkEnrichmentMixin:
@@ -570,6 +570,58 @@ class WorkEnrichmentMixin:
             self.logger.debug("Joining the artists holding the id of %s", details.name)
             # the oldest of the artists sharing the id survives
             await artists.merge_library_artists_by_mbid(int((approved or holders)[0].item_id), mbid)
+        # tracks saved before the composer was confirmed may still credit it joined with others
+        for holder in await artists.get_library_items_by_external_id(
+            mbid, ExternalID.MB_ARTIST, limit=None
+        ):
+            await self.mass.music.tracks.split_joined_composer_credits(holder, alias_names)
+
+    async def _join_composer_by_name(
+        self, musicbrainz: MusicbrainzProvider, artist: Artist
+    ) -> None:
+        """
+        Join a composer its own links did not identify to the confirmed composer of its name.
+
+        Only the one MusicBrainz person carrying the exact name qualifies, when a library
+        composer holds that person's id, under the rules of the alias join. Without a join,
+        where to add the composer's streaming link on MusicBrainz is logged.
+
+        :param musicbrainz: The MusicBrainz provider.
+        :param artist: The library composer without a MusicBrainz id.
+        """
+        # a composer is a person, so a band of the same name is never them
+        persons = [
+            x
+            for x in await musicbrainz.get_artists_by_name(artist.name)
+            if x.type not in GROUP_ARTIST_TYPES
+        ]
+        person = persons[0] if len(persons) == 1 else None
+        artists = self.mass.music.artists
+        if person and await artists.get_library_items_by_external_id(
+            person.id, ExternalID.MB_ARTIST, limit=None
+        ):
+            await self._merge_composer_by_aliases(person.id)
+            try:
+                if (await artists.get_library_item(artist.item_id)).mbid:
+                    return
+            except MediaNotFoundError:
+                # merged into the composer holding the id
+                return
+            person = None
+        if not (urls := MusicbrainzProvider._reverse_lookup_urls(artist)):
+            return
+        link = (
+            f"{MUSICBRAINZ_WEB_URL}/artist/{person.id}"
+            if person
+            else f"{MUSICBRAINZ_WEB_URL}/search?{urlencode({'type': 'artist', 'query': artist.name})}"
+        )
+        self.logger.debug(
+            'Composer "%s" is not on MusicBrainz through %s, add %s to their MusicBrainz page: %s',
+            artist.name,
+            ", ".join(urls),
+            urls[0],
+            link,
+        )
 
     async def _carries_only_composer_name(
         self, musicbrainz: MusicbrainzProvider, name: str, alias_names: set[str], mbid: str
@@ -615,6 +667,8 @@ def _fill_work_from_musicbrainz(work: Work, hierarchy: Sequence[MusicBrainzWork]
     work.musical_key = work.musical_key or mb_work.musical_key
     if not work.catalog_numbers:
         work.catalog_numbers = mb_work.catalog_numbers
+    if not work.metadata.movements:
+        work.metadata.movements = mb_work.movements or None
 
 
 def _nearest_typed_parent(hierarchy: Sequence[MusicBrainzWork]) -> MusicBrainzWork | None:

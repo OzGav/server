@@ -8,9 +8,11 @@ from music_assistant.helpers.work_titles import (
     TrackWork,
     joined_composer_name,
     numbered_piece,
+    parent_work_name,
     parse_catalog_numbers,
     parse_work_title,
     part_key,
+    word_and_number,
 )
 
 # real Spotify titles, with the first artist Spotify lists for them
@@ -133,6 +135,22 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
             ),
         ),
         (
+            "La bohème, SC 67 / Act 1: Che gelida manina",
+            PUCCINI,
+            TrackWork(
+                "La bohème, SC 67 / Act 1",
+                None,
+                "Che gelida manina",
+                None,
+                "La bohème, SC 67",
+            ),
+        ),
+        (
+            "Messiah, HWV 56 / Part 2: Hallelujah",
+            "Georg Friedrich Händel",
+            TrackWork("Messiah, HWV 56 / Part 2", None, "Hallelujah", None, "Messiah, HWV 56"),
+        ),
+        (
             "St. Matthew Passion, BWV 244, Anhang: Aria",
             "Johann Sebastian Bach",
             TrackWork(
@@ -158,7 +176,7 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
 def test_act_or_part_comes_with_its_work(
     title: str, composer: str | None, expected: TrackWork
 ) -> None:
-    """A work that is an act or part, after a comma, comes with the work it is part of."""
+    """A work that is an act or part, after a comma or slash, comes with the work it is part of."""
     assert parse_work_title(title, composer) == expected
 
 
@@ -336,6 +354,8 @@ def test_catalog_number_keeps_its_number_within_the_opus(title: str, expected: l
         ("Matthäus-Passion, BWV 244, Part 1", "St. Matthew Passion, BWV 244, Part I"),
         ("Messiah, HWV 56, Pt. 2", "Messiah, HWV 56, Part II"),
         ("La bohème, Act II", "La Bohème, Act 2"),
+        ("La bohème, SC 67 / Act 1", "La bohème, SC 67, Act I"),
+        ("Messiah, HWV 56 / Part 2", "Messiah, HWV 56, Pt. 2"),
         ("Swan Lake, Act II, Op. 20, TH 12", "Swan Lake, Act 2"),
         ("Matthäus-Passion, BWV 244, Anhang", "St. Matthew Passion, BWV 244, Anhang"),
     ],
@@ -344,6 +364,12 @@ def test_same_part_written_differently(first: str, second: str) -> None:
     """The same act or part written differently has one key."""
     assert part_key(first) is not None
     assert part_key(first) == part_key(second)
+
+
+def test_slashed_act_is_part_of_the_same_work() -> None:
+    """An act after a slash is part of the work the same act after a comma is part of."""
+    assert parent_work_name("La bohème, SC 67 / Act 1") == "La bohème, SC 67"
+    assert parent_work_name("La bohème, SC 67, Act I") == "La bohème, SC 67"
 
 
 @pytest.mark.parametrize(
@@ -406,3 +432,23 @@ def test_joined_composer_name(name: str, title: str, expected: str | None) -> No
 def test_numbered_piece(work: str, expected: tuple[str, int, str | None] | None) -> None:
     """A work titled as a numbered piece of an opus gives its opus, number and name."""
     assert numbered_piece(work) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Variation No. 1", ("variation", 1)),
+        ("Variatio 1. a 1 Clav.", ("variatio", 1)),
+        ("Var. 1", ("var", 1)),
+        ("Variation nr. 12", ("variation", 12)),
+        ("Variation IV", ("variation", 4)),
+        ("Étude 3", ("etude", 3)),
+        ("No. 1 Kommt", None),
+        ("I. Allegro con brio", None),
+        ("Aria", None),
+        ("Andante vivace", None),
+    ],
+)
+def test_word_and_number(name: str, expected: tuple[str, int] | None) -> None:
+    """A name starting with a word and a number gives the word, lowercase, and the number."""
+    assert word_and_number(name) == expected

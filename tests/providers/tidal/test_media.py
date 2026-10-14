@@ -148,7 +148,8 @@ async def test_get_album(
 
     assert album.item_id == "1"
     provider_mock.api.get_jsonapi.assert_called_with(
-        "albums/1", include=["artists", "coverArt", "genres"]
+        "albums/1",
+        include=["artists", "coverArt", "genres", "items", "items.genres", "items.credits.artist"],
     )
     mock_parse_album.assert_called_once_with(provider_mock, doc, doc.data)
 
@@ -169,7 +170,8 @@ async def test_get_track(
 
     assert result.item_id == "1"
     provider_mock.api.get_jsonapi.assert_called_with(
-        "tracks/1", include=["artists", "albums", "albums.coverArt", "genres", "credits"]
+        "tracks/1",
+        include=["artists", "albums", "albums.coverArt", "genres", "credits", "credits.artist"],
     )
     provider_mock.api.get.assert_called_with("tracks/1/lyrics")
     assert track.metadata.lyrics == "Test Lyrics"
