@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
 RELEASE_ID = "5d9c6e8a-1c3b-4f2e-9a7d-2b8c4e6f0a11"
-
 RECORDING_ID = "0c1d2e3f-4a5b-4c6d-9e8f-7a6b5c4d3e22"
 OTHER_RECORDING_ID = "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c33"
 SPOTIFY_ALBUM_URL = "https://open.spotify.com/album/7eyQXxuf2nGj9d2367Gi5f"

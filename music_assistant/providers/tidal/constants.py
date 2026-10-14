@@ -38,6 +38,9 @@ CONF_USER_ID = "user_id"
 CONF_EXPIRY_TIME = "expiry_time"
 CONF_QUALITY = "quality"
 
+# Bump when the shape of parsed albums or tracks changes, so cached items are re-parsed
+PARSED_ITEM_CACHE_CHECKSUM: Final[str] = "classical_v6"
+
 # Cache keys
 CACHE_CATEGORY_RECOMMENDATIONS: Final[int] = 1
 CACHE_CATEGORY_ISRC_MAP: Final[int] = 2

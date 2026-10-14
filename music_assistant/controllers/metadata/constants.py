@@ -70,6 +70,9 @@ REFRESH_INTERVAL = 60 * 60 * 24 * 90  # 90 days
 
 # a refresh that a metadata provider failed temporarily is due again after this
 REFRESH_RETRY_INTERVAL = 60 * 60 * 24 * 7  # 7 days
+# a classical composer or performer MusicBrainz did not identify is tried again after the
+# MusicBrainz cache expired, so a link added on MusicBrainz meanwhile is picked up within a month
+ARTIST_LOOKUP_RETRY_INTERVAL = 60 * 60 * 24 * 30  # 30 days
 
 CONF_ENABLE_ONLINE_METADATA = "enable_online_metadata"
 

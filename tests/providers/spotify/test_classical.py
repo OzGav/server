@@ -188,6 +188,32 @@ async def test_album_tracks_of_a_classical_album_credit_the_composer() -> None:
     assert notturno.work is None
 
 
+async def test_album_titles_naming_their_composers_credit_no_performer() -> None:
+    """On an album whose titles name the composers, no track credits its first artist."""
+    provider = _make_provider()
+    titles = (
+        "L'homme Armé",
+        "Plainchant: Gaudeamus Omnes",
+        "Josquin: Missa L'homme Armé Super Voces Musicales - 1a. Kyrie 1",
+        "Josquin: Missa L'homme Armé Super Voces Musicales - 1b. Christe",
+        "Josquin: Missa L'homme Armé Super Voces Musicales - 1c. Kyrie 2",
+    )
+    provider._get_all_items = MagicMock(  # type: ignore[method-assign]
+        return_value=_iterate(
+            [_track_obj(title, ("The Tallis Scholars", "Peter Phillips")) for title in titles]
+        )
+    )
+
+    tracks = await SpotifyProvider.get_album_tracks.__wrapped__(provider, "album-1")  # type: ignore[attr-defined]
+
+    assert all(_composer_names(x) == [] for x in tracks)
+    assert [x.work.name if x.work else None for x in tracks] == [
+        None,
+        "Plainchant",
+        *["Missa L'homme Armé Super Voces Musicales"] * 3,
+    ]
+
+
 @pytest.mark.parametrize(
     ("titles", "artist"),
     [((*FIFTY_SECOND_STREET, "Interlude: Reprise"), "Billy Joel"), (AUDIOBOOK, "Rufus Beck")],

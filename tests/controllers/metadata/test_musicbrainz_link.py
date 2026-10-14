@@ -19,7 +19,9 @@ from music_assistant_models.enums import (
     SortField,
     TaskStatus,
 )
-from music_assistant_models.errors import MusicAssistantError
+from music_assistant_models.errors import (
+    MusicAssistantError,
+)
 from music_assistant_models.event import MassEvent
 from music_assistant_models.media_items import (
     Album,
@@ -35,6 +37,7 @@ from music_assistant_models.media_items import (
 from music_assistant.constants import DB_TABLE_ALBUMS, DB_TABLE_TRACKS
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.constants import (
+    ARTIST_LOOKUP_RETRY_INTERVAL,
     CONF_LINK_PROVIDERS_VIA_MUSICBRAINZ,
     CONF_MUSICBRAINZ_LINKED_DOMAINS,
     CONF_THUMB_CACHE_MAX_SIZE,
@@ -48,6 +51,8 @@ from music_assistant.controllers.metadata.controller import (
     _albums_with_recordings_to_reread_query,
     _artists_to_identify_query,
     _classical_artists_to_reread_query,
+    _composers_to_identify_query,
+    _performers_to_identify_query,
     _relink_query,
     _tracks_to_identify_query,
     _tracks_with_recording_to_read_query,
@@ -212,6 +217,12 @@ def _queue(
             if kwargs["extra_query_parts"][0] in reread_queries:
                 queried.append(f"{name} re-reads")
                 return []
+            if kwargs["extra_query_parts"][0] == _composers_to_identify_query():
+                queried.append("composers")
+                return []
+            if kwargs["extra_query_parts"][0] == _performers_to_identify_query():
+                queried.append("performers")
+                return []
             if "domain" in params:
                 queried.append(f"relink {name} {params['domain']}")
                 return list(relink_items)[: kwargs["limit"]]
@@ -262,6 +273,11 @@ def _provider_instances(loaded: Sequence[str] = (), unavailable: Sequence[str] =
     return Mock(side_effect=_instances)
 
 
+# --------------------------------------------------------------------------- #
+#  phases and budget                                                           #
+# --------------------------------------------------------------------------- #
+
+
 async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
     """Each phase selects its items by its own query, newest first."""
     ctrl = _controller()
@@ -274,9 +290,13 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
         "albums",
         "artists",
         "tracks",
+        "performers",
         "albums performers",
         "tracks performers",
         "works",
+        "composers",
+        "albums re-reads",
+        "tracks re-reads",
         "artists re-reads",
         "works re-reads",
     ]
@@ -285,9 +305,30 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
         (music.albums, _albums_to_identify_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.artists, _artists_to_identify_query(), {}),
         (music.tracks, _tracks_to_identify_query(), {}),
+        (
+            music.artists,
+            _performers_to_identify_query(),
+            {"stale": NOW - ARTIST_LOOKUP_RETRY_INTERVAL},
+        ),
         (music.albums, _albums_with_recordings_to_read_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.tracks, _tracks_with_recording_to_read_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.works, _works_to_enrich_query(), {}),
+        (
+            music.artists,
+            _composers_to_identify_query(),
+            {"stale": NOW - ARTIST_LOOKUP_RETRY_INTERVAL},
+        ),
+        # read again 90 days after their last read
+        (
+            music.albums,
+            _albums_with_recordings_to_reread_query(),
+            {"stale": NOW - REFRESH_INTERVAL},
+        ),
+        (
+            music.tracks,
+            _tracks_with_recording_to_reread_query(),
+            {"stale": NOW - REFRESH_INTERVAL},
+        ),
         (music.artists, _classical_artists_to_reread_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.works, _works_to_reread_query(), {"stale": NOW - REFRESH_INTERVAL}),
     ):
@@ -505,6 +546,11 @@ async def test_link_run_without_a_musicbrainz_provider_returns_early() -> None:
     _mass(ctrl).config.set_raw_core_config_value.assert_not_called()
 
 
+# --------------------------------------------------------------------------- #
+#  relinking for a provider loaded later                                       #
+# --------------------------------------------------------------------------- #
+
+
 async def test_link_run_relinks_for_a_provider_loaded_since_the_previous_run() -> None:
     """A new provider starts now, one no longer loaded is dropped, and each kept gets a relink phase."""
     ctrl = _controller(
@@ -527,9 +573,13 @@ async def test_link_run_relinks_for_a_provider_loaded_since_the_previous_run() -
         "relink artists spotify",
         "relink albums tidal",
         "relink artists tidal",
+        "performers",
         "albums performers",
         "tracks performers",
         "works",
+        "composers",
+        "albums re-reads",
+        "tracks re-reads",
         "artists re-reads",
         "works re-reads",
     ]
@@ -738,21 +788,30 @@ async def test_link_item_hands_a_work_to_the_work_step() -> None:
     _mass(ctrl).music.works.update_item_in_library.assert_not_awaited()
 
 
+# --------------------------------------------------------------------------- #
+#  diagnostics                                                                 #
+# --------------------------------------------------------------------------- #
+
+
 async def test_diagnostics_report_the_last_run_and_the_pending_counts() -> None:
     """Diagnostics carry the last run summary and how many items each phase still has."""
     ctrl = _controller()
-    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[6, 5, 4, 3, 2, 1])
+    _mass(ctrl).music.database.get_count_from_query = AsyncMock(
+        side_effect=[8, 7, 6, 5, 4, 3, 2, 1]
+    )
 
     assert await ctrl.get_diagnostics() == {
         "musicbrainz_link": {
             "last_run": None,
             "pending": {
-                "albums": 6,
-                "artists": 5,
-                "tracks": 4,
-                "album performers": 3,
-                "track performers": 2,
-                "works": 1,
+                "albums": 8,
+                "artists": 7,
+                "tracks": 6,
+                "performers": 5,
+                "album performers": 4,
+                "track performers": 3,
+                "works": 2,
+                "composers": 1,
             },
         }
     }
@@ -771,6 +830,7 @@ async def test_classical_link_progress_is_zero_while_nothing_is_looked_up(
         "albums": 0,
         "recordings": 0,
         "works": 0,
+        "composers": 0,
     }
     _mass(ctrl).music.database.get_count_from_query.assert_not_awaited()
 
@@ -885,6 +945,8 @@ async def test_link_run_selects_albums_by_their_lookup_marker(mass: MusicAssista
             "artists": 0,
             "tracks": 0,
             "works": 0,
+            "composers": 0,
+            "performers": 0,
             "album performers": 0,
             "track performers": 0,
         },
@@ -1018,3 +1080,35 @@ async def _set_classical(mass: MusicAssistant, table: str, item_id: str, classic
         f"UPDATE {table} SET is_classical = :classical WHERE item_id = :item_id",
         {"classical": int(classical), "item_id": int(item_id)},
     )
+
+
+async def test_classical_link_progress_counts_only_the_classical_items(
+    mass: MusicAssistant,
+) -> None:
+    """Classical albums, recordings and composers count, those of pop music do not."""
+    symphonies = await _add_album(mass, "Symphonies", looked_up=None)
+    hits = await _add_album(mass, "Hits", looked_up=None)
+    # an identified album is no longer looked up, the recordings of its tracks still are
+    concertos = await _add_album(mass, "Concertos", looked_up=int(time()), mbid=RELEASE_ID)
+    beethoven = await _add_composer(mass, "Beethoven")
+    await _add_recorded_track(mass, "Eroica", symphonies, beethoven, classical=True)
+    await _add_recorded_track(mass, "Emperor", concertos, beethoven, classical=True)
+    await _add_recorded_track(
+        mass, "Song", hits, await _add_composer(mass, "Songwriter"), classical=False
+    )
+    await mass.music.works.add_item_to_library(
+        Work(
+            item_id="0",
+            provider="library",
+            name="Symphony no. 3",
+            provider_mappings=set(),
+            external_ids={(ExternalID.MB_WORK, WORK_ID)},
+        )
+    )
+
+    assert await mass.metadata.get_classical_link_progress() == {
+        "albums": 1,
+        "recordings": 2,
+        "works": 1,
+        "composers": 1,
+    }

@@ -72,7 +72,13 @@ if TYPE_CHECKING:
 
     from music_assistant_models.config_entries import CoreConfig
     from music_assistant_models.enums import Period
-    from music_assistant_models.media_items import Audiobook, MediaItemType, Playlist, Podcast, Work
+    from music_assistant_models.media_items import (
+        Audiobook,
+        MediaItemType,
+        Playlist,
+        Podcast,
+        Work,
+    )
     from music_assistant_models.unique_list import UniqueList
 
     from music_assistant import MusicAssistant

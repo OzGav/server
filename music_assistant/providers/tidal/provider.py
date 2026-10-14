@@ -37,6 +37,7 @@ from .constants import (
     CONF_QUALITY,
     CONF_REFRESH_TOKEN,
     CONF_USER_ID,
+    PARSED_ITEM_CACHE_CHECKSUM,
 )
 from .library import TidalLibraryManager
 from .media import TidalMediaManager
@@ -186,24 +187,24 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
         """Get artist details for given artist id."""
         return await self.media.get_artist(prov_artist_id)
 
-    @use_cache(3600 * 24 * 30)
+    @use_cache(3600 * 24 * 30, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM)
     async def get_album(self, prov_album_id: str) -> Album:
         """Get album details for given album id."""
         return await self.media.get_album(prov_album_id)
 
-    @use_cache(3600 * 24 * 30)
+    @use_cache(3600 * 24 * 30, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM)
     async def get_track(self, prov_track_id: str) -> Track:
         """Get track details for given track id."""
         return await self.media.get_track(prov_track_id)
 
-    @use_cache(3600 * 24 * 7, allow_expired_cache=True)
+    @use_cache(3600 * 24 * 7, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True)
     async def get_track_by_external_id(
         self, external_id: str, external_id_type: ExternalID
     ) -> Track | None:
         """Retrieve track by external ID (ISRC)."""
         return await self.media.get_track_by_external_id(external_id, external_id_type)
 
-    @use_cache(3600 * 24 * 7, allow_expired_cache=True)
+    @use_cache(3600 * 24 * 7, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True)
     async def get_album_by_external_id(
         self, external_id: str, external_id_type: ExternalID
     ) -> Album | None:
@@ -215,7 +216,7 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
         """Get playlist details for given playlist id."""
         return await self.media.get_playlist(prov_playlist_id)
 
-    @use_cache(3600 * 24 * 30, allow_expired_cache=True)
+    @use_cache(3600 * 24 * 30, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True)
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get album tracks for given album id."""
         return await self.media.get_album_tracks(prov_album_id)

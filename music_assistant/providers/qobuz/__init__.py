@@ -112,7 +112,7 @@ SUPPORTED_FEATURES = {
 
 VARIOUS_ARTISTS_ID = "145383"
 # Bump when the shape of parsed artists, albums or tracks changes, so cached items are re-parsed
-PARSED_ITEM_CACHE_CHECKSUM = "classical_v2"
+PARSED_ITEM_CACHE_CHECKSUM = "classical_v7"
 
 CONF_QUALITY = "quality"
 

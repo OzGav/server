@@ -6,13 +6,16 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from music_assistant_models.enums import ArtistRole
 from music_assistant_models.helpers import create_safe_string
-from music_assistant_models.media_items import Work
+from music_assistant_models.media_items import Credit, Work
 
 from music_assistant.helpers.compare import compare_strings, is_named_in
 
 if TYPE_CHECKING:
-    from music_assistant_models.media_items import Track
+    from collections.abc import Sequence
+
+    from music_assistant_models.media_items import Artist, Track
 
 # credit wording in a joined name, such as "Beethoven & Conducted By William Bowles"
 _CREDIT_WORDING = re.compile(
@@ -91,11 +94,14 @@ _CLOSING_PART_WORDS = {
     "Aufzug": "act",
 }
 _UNNUMBERED_PART_WORDS = ("Anhang", "Appendix")
-# an act or part closing a work title, only followed by catalog numbers, such as
-# "La bohème, Act II", "Messiah, HWV 56, Pt. 2" or "Swan Lake, Act II, Op. 20, TH 12"
+# an act or part closing a work title, only followed by a scene of the act and catalog
+# numbers, such as "La bohème, Act II", "Messiah, HWV 56, Pt. 2", "Swan Lake, Act II, Op. 20,
+# TH 12", "The Nutcracker, Act II, Scene 3, Op. 71", "La bohème, SC 67 / Act 1" or
+# MusicBrainz's "Turandot: Atto III"
 _ACT_OR_PART = re.compile(
-    rf"^(?P<work>.+), (?:(?P<word>{'|'.join(map(re.escape, _NUMBERED_PART_WORDS))}) "
-    rf"(?P<number>[IVX]+|\d+)|(?P<label>{'|'.join(_UNNUMBERED_PART_WORDS)}))"
+    rf"^(?P<work>.+)(?:, | / |: )(?:(?P<word>{'|'.join(map(re.escape, _CLOSING_PART_WORDS))}) "
+    rf"(?P<number>[IVX]+|\d+)(?:, (?:Scene|[Ss]cena|[Ss]cène) (?P<scene>[IVX]+|\d+))?"
+    rf"|(?P<label>{'|'.join(_UNNUMBERED_PART_WORDS)}))"
     rf"(?P<catalog>(?:, {_CATALOG_NUMBER.pattern})*)$"
 )
 # the subtitle right after the number of an act or part, as in "Luisa Miller: Atto II.
@@ -108,6 +114,8 @@ _PART_SUBTITLE = re.compile(
 _LEADING_PART = re.compile(
     rf"^(?P<part>(?:{'|'.join(map(re.escape, _NUMBERED_PART_WORDS))}) (?:[IVX]+|\d+))(?:, |: )"
 )
+# a name starting with a word and a number, such as "Variation No. 1", "Var. 1" or "Act II"
+_WORD_AND_NUMBER = re.compile(r"^([^\W\d_]{3,})\.?\s+(?:(?i:no|nr)\.?\s*|n°\s*)?(\d+|[IVX]+)\b")
 # a work and its numbered movement joined by a dash, as in "Miserere - 01. Miserere Mei, Deus"
 _DASHED_MOVEMENT = re.compile(r"^(.+?) - ((?:No\.\s)?(?:\d+[a-z]?|[IVX]+)\.\s.+)$")
 # a numbered piece after a comma or dash, as in "Erster Teil, 9a. Evangelista" or "Miserere -
@@ -234,6 +242,23 @@ def is_work_title(title: str) -> bool:
     )
 
 
+def composers_listed_first(tracks: Sequence[tuple[str, str | None]]) -> bool:
+    """
+    Return whether the tracks of a classical album list each track's composer as first artist.
+
+    Some labels name the composer in the title instead ("Allegri: Miserere - 01. Miserere Mei,
+    Deus") and list only the performers.
+
+    :param tracks: The title and first artist name of each track of the album.
+    """
+    work_titles = [
+        work_title
+        for title, first_artist in tracks
+        if (work_title := parse_work_title(title, first_artist, classical=True))
+    ]
+    return sum(1 for x in work_titles if x.other_composer) * 2 <= len(work_titles)
+
+
 def work_with_movement(work: str, movement: str | None = None) -> TrackWork:
     """
     Return a work and movement named apart.
@@ -310,6 +335,33 @@ def without_part_subtitle(work: str) -> str:
     return _PART_SUBTITLE.sub(r"\g<part>", work)
 
 
+def word_and_number(name: str) -> tuple[str, int] | None:
+    """
+    Return the word and number a name starts with, or None when it starts otherwise.
+
+    The word comes lowercase and without accents, so "Variation No. 1" gives "variation"
+    and 1, and "Variatio IV." gives "variatio" and 4.
+
+    :param name: The name of a movement or part, such as "Var. 1".
+    """
+    if not (match := _WORD_AND_NUMBER.match(name)):
+        return None
+    numeral = match.group(2)
+    number = int(numeral) if numeral.isdecimal() else _roman_number(numeral)
+    return (create_safe_string(match.group(1), True, True), number) if number else None
+
+
+def without_movement_number(name: str) -> str:
+    """
+    Return a movement name without the number it opens with, such as "Christe" for "02. Christe".
+
+    A scene before the number goes with it, so "Scene II. No. 2 Aria" gives "Aria".
+
+    :param name: The name of a movement, such as a track's "No. 3, O mio babbino caro".
+    """
+    return _OPENING_MOVEMENT_NUMBER.sub("", name, count=1) or name
+
+
 def parse_catalog_numbers(title: str) -> list[str]:
     """
     Return the catalog numbers a work title names, written as the title writes them.
@@ -345,6 +397,39 @@ def set_track_work(track: Track, track_work: TrackWork) -> None:
         name=track_work.name,
         provider_mappings=set(),
     )
+
+
+def set_listed_composer_work(
+    track: Track,
+    title: str,
+    first_artist: Artist | None,
+    composer_first: bool | None,
+    classical: bool = False,
+) -> None:
+    """
+    Set the work and movement a classical track's title names, with its first artist as composer.
+
+    The first artist is credited as composer when the title names a work, or when the album
+    lists each track's composer first, unless the titles name the composers instead.
+
+    :param track: The provider track.
+    :param title: The title of the track, without its version.
+    :param first_artist: The first artist the track lists.
+    :param composer_first: True on a classical album that lists each track's composer as its
+        first artist, False on one whose titles name the composers instead, None when unknown.
+    :param classical: Whether the track is known to be classical, as on a classical album.
+    """
+    composer = first_artist
+    track_work = parse_work_title(
+        title, composer.name if composer else None, classical or composer_first is not None
+    )
+    if composer_first is False or (track_work and track_work.other_composer):
+        # the titles name the composers, so the first artist is a performer
+        composer = None
+    if composer and (track_work or composer_first):
+        track.credits.append(Credit(artist=composer, role=ArtistRole.COMPOSER))
+    if track_work:
+        set_track_work(track, track_work)
 
 
 def joined_composer_name(name: str, title: str) -> str | None:

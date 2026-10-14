@@ -212,6 +212,41 @@ async def test_work_given_apart_from_the_title_gives_work_movement_and_credits()
     assert "Hans-Rudolf Müller, Recording Engineer" in (track.metadata.performers or set())
 
 
+async def test_opera_title_gives_the_act_and_singers_by_voice() -> None:
+    """A title naming the act names the work, a director conducts without a conductor."""
+    tosca = 'Tosca, S. 69, IGP 17, Act I: "Gente là dentro!!" (Cavaradossi, Angelotti, Tosca)'
+    floriana_cavalli = {"id": 1, "name": "Floriana Cavalli"}
+    album = _album_obj(
+        CLASSICAL_GENRE,
+        [
+            _track_obj(288735270, tosca, TOSCA_PERFORMERS, performer=STAATSOPER, composer=PUCCINI),
+            # another track names a soloist by id
+            _track_obj(2, tosca, "", performer=floriana_cavalli, composer=PUCCINI),
+        ],
+        artists=[{**KARAJAN, "roles": ["main-artist"]}],
+    )
+
+    track, _ = await _make_provider()._parse_album_tracks(album)
+
+    assert isinstance(track.work, Work)
+    assert track.work.name == "Tosca, S. 69, IGP 17, Act I"
+    assert track.movement_name == '"Gente là dentro!!" (Cavaradossi, Angelotti, Tosca)'
+    assert track.movement_number is None
+    assert _credits(track) == {
+        "composer": ["Giacomo Puccini"],
+        "conductor": ["Herbert von Karajan"],
+        "orchestra": ["Orchester der Wiener Staatsoper"],
+        "soloist (bass vocals)": ["Ferruccio Mazzoli"],
+        "soloist (soprano vocals)": ["Floriana Cavalli"],
+        "soloist (tenor vocals)": ["Dimiter Uzunov"],
+        "performer": ["Dimiter Usunow"],
+    }
+    # a singer Qobuz knows by id keeps it, one it names alone is identified by the name
+    artist_ids = {x.artist.name: x.artist.item_id for x in track.credits}
+    assert artist_ids["Floriana Cavalli"] == "1"
+    assert artist_ids["Ferruccio Mazzoli"] == "Ferruccio Mazzoli"
+
+
 async def test_director_is_no_conductor_next_to_a_conductor() -> None:
     """A track naming a conductor credits its director with nothing more."""
     performers = "Carlos Kleiber, Conductor - Herbert von Karajan, Director - Puccini, Composer"

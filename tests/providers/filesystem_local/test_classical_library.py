@@ -10,7 +10,12 @@ from uuid import uuid4
 
 import pytest
 from music_assistant_models.enums import ArtistRole, ExternalID, Period
-from music_assistant_models.media_items import Artist, ItemMapping, ProviderMapping, Track
+from music_assistant_models.media_items import (
+    Artist,
+    ItemMapping,
+    ProviderMapping,
+    Track,
+)
 
 from music_assistant.helpers.tags import AudioTags
 from music_assistant.mass import MusicAssistant
@@ -368,6 +373,38 @@ async def test_work_takes_the_catalog_numbers_of_its_title(
     assert work.catalog_numbers == ["op. 8 no. 1", "RV 269"]
 
 
+@pytest.mark.parametrize(
+    "works",
+    [
+        ["Madrigal, SV 120 {token}", "Madrigal, SV 143 {token}"],
+        ["Orchestersuite Nr. 3 D-Dur, BWV 1068 {token}: II. Air"],
+    ],
+)
+async def test_several_work_ids_give_no_work_and_stay_on_the_track(
+    provider: LocalFileSystemProvider, works: list[str]
+) -> None:
+    """
+    A file tagged with several work ids gets no work from its tags, the ids stay on it.
+
+    This holds whether or not the ids pair up with the work titles.
+    """
+    token = _token()
+    work_ids = {"51bb8773-8492-3773-ab88-73a89c922c3d", "b58b7e13-17df-4122-82de-8031081d9647"}
+    path = f"{token}/Album/01.flac"
+    tags = _tags(
+        path,
+        album=f"Album {token}",
+        composer=f"Composer {token}",
+        work=[work.format(token=token) for work in works],
+        musicbrainzworkid=sorted(work_ids),
+    )
+
+    track = await _add_track(provider, path, tags)
+
+    assert track.work is None
+    assert _work_ids(track) == work_ids
+
+
 async def test_movement_tags_win_over_a_split_movement_title(
     provider: LocalFileSystemProvider, mass: MusicAssistant
 ) -> None:
@@ -397,6 +434,71 @@ async def test_movement_tags_win_over_a_split_movement_title(
         4,
     )
     assert _work_ids(track) == {movement_work_id}
+
+
+async def test_movement_titles_without_a_work_tag_keep_their_movements(
+    provider: LocalFileSystemProvider, mass: MusicAssistant
+) -> None:
+    """Tracks titled as numbered movements keep their movements, a work only by their own id."""
+    token = _token()
+    work_id = str(uuid4())
+    first_path, second_path = f"{token}/Album/01.flac", f"{token}/Album/02.flac"
+    first = await _add_track(
+        provider,
+        first_path,
+        _tags(
+            first_path,
+            title=f"Symphony {token}: I. Allegro",
+            album=f"Album {token}",
+            composer=f"Composer {token}",
+            musicbrainzworkid=[work_id],
+        ),
+    )
+    second = await _add_track(
+        provider,
+        second_path,
+        _tags(
+            second_path,
+            title=f"Symphony {token}: II. Adagio",
+            album=f"Album {token}",
+            composer=f"Composer {token}",
+            movementname="Adagio molto",
+        ),
+    )
+
+    assert first.work is not None
+    assert (await mass.music.works.get_library_item(first.work.item_id)).mbid == work_id
+    assert second.work is None
+    assert (first.movement_name, first.movement_number) == ("I. Allegro", 1)
+    assert (second.movement_name, second.movement_number) == ("Adagio molto", 2)
+    assert _work_ids(first) == {work_id}
+
+
+async def test_pop_track_with_a_work_tag_gets_no_work(
+    provider: LocalFileSystemProvider, mass: MusicAssistant
+) -> None:
+    """A pop song tagged with its work gets no work, keeps the work id and is not classical."""
+    token = _token()
+    work_id = str(uuid4())
+    path = f"{token}/Album/01.flac"
+    tags = _tags(
+        path,
+        album=f"Album {token}",
+        artist=f"Band {token}",
+        composer=f"Songwriter {token}",
+        work=[f"Song {token}"],
+        musicbrainzworkid=[work_id],
+        genre="Rock",
+    )
+
+    track = await _add_track(provider, path, tags)
+
+    assert track.work is None
+    assert _work_ids(track) == {work_id}
+    assert not await mass.music.works.library_items(search=f"Song {token}")
+    full_track = await mass.music.tracks.get_library_item(track.item_id)
+    assert not full_track.classical_tag
+    assert not full_track.is_classical
 
 
 @pytest.mark.parametrize(
