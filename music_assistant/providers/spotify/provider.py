@@ -278,6 +278,7 @@ class SpotifyProvider(MusicProvider):
 
     async def loaded_in_mass(self) -> None:
         """Call after the provider has been loaded."""
+        # TEMP(classical 5a Spotify re-read): remove before release
         if not self.mass.config.get_raw_provider_config_value(
             self.instance_id, CONF_CLASSICAL_REREAD_DONE, False
         ):
@@ -289,6 +290,7 @@ class SpotifyProvider(MusicProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
+        # TEMP(classical 5a Spotify re-read): remove before release
         if self._classical_reread_task and not self._classical_reread_task.done():
             self._classical_reread_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -1776,9 +1778,11 @@ class SpotifyProvider(MusicProvider):
 
     async def _reread_library_albums(self) -> None:
         """Read this account's library albums again once, for the classical details they give."""
+        # TEMP(classical 5a Spotify re-read): remove before release
         if await reread_library_albums(self, self._reread_library_album):
             self._update_config_value(CONF_CLASSICAL_REREAD_DONE, True, immediate=True)
 
+    # TEMP(classical 5a Spotify re-read): remove before release
     async def _reread_library_album(self, library_id: int, prov_album_id: str) -> None:
         """
         Update a library album and its library tracks with what Spotify gives for them now.

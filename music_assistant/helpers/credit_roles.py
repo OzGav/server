@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from music_assistant_models.enums import ArtistRole
+from music_assistant_models.media_items import Credit
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Container, Mapping
+
+    from music_assistant_models.media_items import Artist, ItemMapping
 
 # the role of an artist a service names without any role
 NO_ROLE = ""
@@ -140,6 +147,39 @@ def role_credits(
     if (performs or is_main_artist) and not performing:
         result[(ArtistRole.PERFORMER, None)] = None
     return list(result)
+
+
+def track_role_credits(
+    roles_by_artist: Mapping[str, list[str]],
+    main_artist_keys: Container[str],
+    credited_artist: Callable[[str], Artist | ItemMapping | None],
+) -> list[Credit]:
+    """
+    Return the credits the roles a service names for each artist of a track give.
+
+    A main artist is credited as performer as well, unless it holds a performing role or
+    composed the track. A director is credited as conductor when the track names no conductor.
+
+    :param roles_by_artist: The roles of each artist, keyed by the service's key of the artist.
+    :param main_artist_keys: The keys of the main artists of the track.
+    :param credited_artist: Returns the artist for a key, or None for an artist given no credit.
+    """
+    has_conductor = any(
+        role_word(x) == "conductor" for roles in roles_by_artist.values() for x in roles
+    )
+    result: list[Credit] = []
+    for key, roles in roles_by_artist.items():
+        is_main_artist = key in main_artist_keys and all(role_word(x) != "composer" for x in roles)
+        if not (role_instruments := role_credits(roles, has_conductor, is_main_artist)) or not (
+            artist := credited_artist(key)
+        ):
+            continue
+        for role, instrument in role_instruments:
+            position = sum(x.role == role for x in result)
+            result.append(
+                Credit(artist=artist, role=role, instrument=instrument, position=position)
+            )
+    return result
 
 
 def is_performing_role(role: str) -> bool:

@@ -389,39 +389,17 @@ class ClassicalController:
         field, direction = resolve_listing_sort(
             ListingType.CLASSICAL_WORKS, sort_field, sort_direction
         )
-        params: dict[str, Any] = {}
         performer = int(performer_id) if performer_id else None
-        if performer:
-            params["performer_id"] = performer
-            work_ids = (
-                f"SELECT t.work_id {PERFORMER_CREDITS} "
-                f"AND t.item_id IN ({self._classical_tracks(params)}) "
-                "AND ta.artist_id = :performer_id"
-            )
-        else:
-            work_ids = self._classical_work_ids(params)
-        conditions = [
-            f"{DB_TABLE_WORKS}.item_id IN (SELECT r.root_id FROM ({WORK_ROOTS}) r "
-            f"WHERE r.item_id IN ({work_ids}))"
-        ]
-        if composer_id:
-            params["composer_id"] = int(composer_id)
-            conditions.append(
-                f"{DB_TABLE_WORKS}.item_id IN (SELECT work_id FROM ({LISTED_WORK_COMPOSERS}) "
-                "WHERE artist_id = :composer_id)"
-            )
-        if search and (search_term := create_safe_string(search, True, True)):
-            conditions.append(work_search_sql(search_term, params))
-        # works without a composition year drop out once a bound is set
-        if year_from is not None:
-            params["year_from"] = year_from
-            conditions.append(f"{DB_TABLE_WORKS}.composition_year >= :year_from")
-        if year_to is not None:
-            params["year_to"] = year_to
-            conditions.append(f"{DB_TABLE_WORKS}.composition_year <= :year_to")
+        filters: dict[str, Any] = {
+            "composer_id": composer_id,
+            "performer": performer,
+            "year_from": year_from,
+            "year_to": year_to,
+            "search": search,
+        }
         if field == SortField.RECORDING_COUNT:
             sort_key = work_sort_sql(SortField.COMPOSER, SortDirection.ASC)
-            ids = await self._ids(DB_TABLE_WORKS, conditions, params, None, sort_key)
+            ids = await self._work_ids(sort_key, **filters)
             performances = await self._listed_work_performances(None)
             ids = _page(
                 sorted(
@@ -434,7 +412,7 @@ class ClassicalController:
             )
         else:
             sort_key = work_sort_sql(field, direction)
-            ids = await self._ids(DB_TABLE_WORKS, conditions, params, None, sort_key, limit, offset)
+            ids = await self._work_ids(sort_key, limit=limit, offset=offset, **filters)
             performances = await self._listed_work_performances(ids)
         part_names = await self._part_names(ids)
         works = await self._items(self.mass.music.works, ids)
@@ -487,9 +465,8 @@ class ClassicalController:
         if work_id:
             listed_ids = [int(work_id)]
         elif performer_id:
-            listed_ids = [
-                int(x.work.item_id) for x in await self.works(performer_id=performer_id, limit=0)
-            ]
+            sort_key = work_sort_sql(*resolve_listing_sort(ListingType.CLASSICAL_WORKS))
+            listed_ids = await self._work_ids(sort_key, performer=int(performer_id))
         else:
             msg = "Either work_id or performer_id is required"
             raise InvalidDataError(msg)
@@ -619,6 +596,49 @@ class ClassicalController:
             f"SELECT work_id FROM {DB_TABLE_TRACKS} WHERE work_id IS NOT NULL "
             f"AND item_id IN ({self._classical_tracks(params)})"
         )
+
+    async def _work_ids(
+        self,
+        sort_key: str,
+        composer_id: str | None = None,
+        performer: int | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        search: str | None = None,
+        limit: int = 0,
+        offset: int = 0,
+    ) -> list[int]:
+        """Return the ids of the listed works matching the filters, in order, all without a limit."""
+        params: dict[str, Any] = {}
+        if performer:
+            params["performer_id"] = performer
+            work_ids = (
+                f"SELECT t.work_id {PERFORMER_CREDITS} "
+                f"AND t.item_id IN ({self._classical_tracks(params)}) "
+                "AND ta.artist_id = :performer_id"
+            )
+        else:
+            work_ids = self._classical_work_ids(params)
+        conditions = [
+            f"{DB_TABLE_WORKS}.item_id IN (SELECT r.root_id FROM ({WORK_ROOTS}) r "
+            f"WHERE r.item_id IN ({work_ids}))"
+        ]
+        if composer_id:
+            params["composer_id"] = int(composer_id)
+            conditions.append(
+                f"{DB_TABLE_WORKS}.item_id IN (SELECT work_id FROM ({LISTED_WORK_COMPOSERS}) "
+                "WHERE artist_id = :composer_id)"
+            )
+        if search and (search_term := create_safe_string(search, True, True)):
+            conditions.append(work_search_sql(search_term, params))
+        # works without a composition year drop out once a bound is set
+        if year_from is not None:
+            params["year_from"] = year_from
+            conditions.append(f"{DB_TABLE_WORKS}.composition_year >= :year_from")
+        if year_to is not None:
+            params["year_to"] = year_to
+            conditions.append(f"{DB_TABLE_WORKS}.composition_year <= :year_to")
+        return await self._ids(DB_TABLE_WORKS, conditions, params, None, sort_key, limit, offset)
 
     async def _ids(
         self,
@@ -1464,7 +1484,10 @@ def _shown_credits(
     """
     shown: dict[tuple[str, ArtistRole, str | None], Credit] = {}
     for x in track_credits:
-        role = refinements.get(int(x.artist.item_id), {}).get(x.role, x.role)
+        role = x.role
+        # a chorus master who conducts elsewhere would otherwise show as conductor
+        if not x.instrument:
+            role = refinements.get(int(x.artist.item_id), {}).get(x.role, x.role)
         credit = x if role == x.role else replace(x, role=role)
         shown.setdefault((credit.artist.item_id, credit.role, credit.instrument), credit)
     return list(shown.values())

@@ -1333,14 +1333,16 @@ async def test_migration_adds_is_endless_column_to_radios(
     assert [(row["item_id"], row["is_endless"]) for row in rows] == [(1, 1), (2, 1)]
 
 
+@pytest.mark.parametrize("prev_version", [67, 68])
 async def test_migration_drops_the_token_from_audiobookshelf_image_urls(
-    database: DatabaseConnection,
+    database: DatabaseConnection, prev_version: int
 ) -> None:
     """
-    A pre-68 database loses the audiobookshelf api token from its stored image urls.
+    A pre-68 database, or one from a classical test build at 68, loses the token.
 
-    The cover version stays, images of other providers and unparsable rows are left alone,
-    and running the migration twice is harmless.
+    The audiobookshelf api token leaves its stored image urls, the cover version stays,
+    images of other providers and unparsable rows are left alone, and running the
+    migration twice is harmless.
     """
     base = "http://abs.local"
     cover = _image("thumb", f"{base}/api/items/li_1/cover?token=secret&ts=5", "audiobookshelf--a")
@@ -1371,7 +1373,7 @@ async def test_migration_drops_the_token_from_audiobookshelf_image_urls(
     mass.cache.clear = AsyncMock()
     for _ in range(2):
         await migrate_database(
-            mass, database, MagicMock(), prev_version=67, create_tables=AsyncMock()
+            mass, database, MagicMock(), prev_version=prev_version, create_tables=AsyncMock()
         )
 
     clean_cover = {**cover, "path": f"{base}/api/items/li_1/cover?ts=5"}

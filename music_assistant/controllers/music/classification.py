@@ -43,12 +43,13 @@ CLASSICAL_GENRE_KEY: Final[str] = "classical"
 
 
 def _has_classical_genre(item: str, media_type: MediaType) -> str:
-    """Return the condition that an item is mapped to the curated classical genre."""
+    """Return the condition that an item has its own mapping to the curated classical genre."""
     gm = DB_TABLE_GENRE_MEDIA_ITEM_MAPPING
     return f"""EXISTS (
         SELECT 1 FROM {gm} JOIN {DB_TABLE_GENRES} ON {DB_TABLE_GENRES}.item_id = {gm}.genre_id
         WHERE {gm}.media_id = {item}.item_id
         AND {gm}.media_type = '{media_type.value}'
+        AND {gm}.is_derived = 0
         AND {DB_TABLE_GENRES}.translation_key = '{CLASSICAL_GENRE_KEY}'
         AND {DB_TABLE_GENRES}.content_type IS NULL
         AND {DB_TABLE_GENRES}.is_excluded = 0

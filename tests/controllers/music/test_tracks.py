@@ -3312,7 +3312,7 @@ async def test_joined_composer_is_replaced_by_the_library_composer(
     with patch.object(music.artists, "get_library_composers", query):
         replaced = await music.tracks._split_joined_composers(track)
 
-    query.assert_awaited_once_with(with_mbid=True)
+    query.assert_awaited_once_with(with_mbid=True, named_by="Ludwig van Beethoven")
     assert replaced == {JOINED_COMPOSER}
     assert track.credits == [
         Credit(artist=beethoven, role=ArtistRole.COMPOSER, position=2),

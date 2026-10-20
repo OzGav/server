@@ -69,6 +69,7 @@ def _provider(
     """
     with patch.object(MusicbrainzProvider, "__init__", lambda *_a, **_kw: None):
         provider = MusicbrainzProvider.__new__(MusicbrainzProvider)
+    provider._logged_hints = set()
 
     async def _answer(endpoint: str, **_kwargs: Any) -> Any:
         return release_group_response if endpoint == "release-group" else response
@@ -953,6 +954,7 @@ def _routed_provider(routes: dict[str, Any]) -> tuple[MusicbrainzProvider, Async
     with patch.object(MusicbrainzProvider, "__init__", lambda *_a, **_kw: None):
         provider = MusicbrainzProvider.__new__(MusicbrainzProvider)
     provider.logger = MagicMock()
+    provider._logged_hints = set()
 
     async def _answer(endpoint: str, **kwargs: Any) -> Any:
         if endpoint == "url":
@@ -1226,7 +1228,7 @@ async def test_release_details_parses_a_full_release_lookup() -> None:
 
     get_data.assert_awaited_once_with(
         "release/rel-1?inc=artist-credits+aliases+labels+release-groups"
-        "+recordings+isrcs+url-rels+genres+artist-rels+recording-level-rels+work-rels+place-rels"
+        "+recordings+isrcs+url-rels+genres"
     )
     assert release.count is None
     assert release.barcode == BARCODE
@@ -2266,7 +2268,7 @@ def test_reverse_lookup_urls_take_one_canonical_url_per_provider_first() -> None
         }
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         SPOTIFY_ARTIST_URL,
         "https://www.deezer.com/artist/399",
         "https://open.spotify.com/artist/7eyQXxuf2nGj9d2367Gi5f",
@@ -2288,7 +2290,7 @@ def test_reverse_lookup_urls_include_the_mappings_own_public_links() -> None:
         }
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         "https://music.apple.com/gb/artist/657515",
         "https://radiohead.bandcamp.com/",
         "https://soundcloud.com/radiohead",
@@ -2304,18 +2306,18 @@ def test_reverse_lookup_urls_include_qobuz_artists_only() -> None:
         mappings={_mapping("qobuz", "ftrty0qq43i3b", "https://open.qobuz.com/album/ftrty0qq43i3b")}
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         "https://open.qobuz.com/artist/43840"
     ]
-    assert MusicbrainzProvider._reverse_lookup_urls(album) == []
+    assert MusicbrainzProvider.reverse_lookup_urls(album) == []
     assert (
-        MusicbrainzProvider._reverse_lookup_urls(
+        MusicbrainzProvider.reverse_lookup_urls(
             _artist_item(mappings={_mapping("qobuz", "Herbert von Karajan")})
         )
         == []
     )
     assert (
-        MusicbrainzProvider._reverse_lookup_urls(_artist_item(mappings={_mapping("qobuz", "311")}))
+        MusicbrainzProvider.reverse_lookup_urls(_artist_item(mappings={_mapping("qobuz", "311")}))
         == []
     )
 
@@ -2349,7 +2351,7 @@ def test_reverse_lookup_urls_are_capped_at_three() -> None:
         }
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         SPOTIFY_ARTIST_URL,
         "https://www.deezer.com/artist/399",
         "https://tidal.com/artist/64518",
@@ -2617,6 +2619,7 @@ def _browsing_provider(pages: dict[str, Any]) -> tuple[MusicbrainzProvider, Magi
     with patch.object(MusicbrainzProvider, "__init__", lambda *_a, **_kw: None):
         provider = MusicbrainzProvider.__new__(MusicbrainzProvider)
     provider.logger = MagicMock()
+    provider._logged_hints = set()
 
     async def _answer(_endpoint: str, **kwargs: Any) -> Any:
         return pages.get(kwargs["offset"])

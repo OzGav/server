@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING, Any, Final, cast
+from urllib.parse import urlencode
 
 from music_assistant_models.enums import (
     ArtistRole,
@@ -38,17 +40,23 @@ from music_assistant.controllers.music.helpers import search_name_match_clause
 from music_assistant.controllers.music.sorting import get_listing_default_direction
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import json_loads, serialize_to_json
+from music_assistant.helpers.logging import log_once
 from music_assistant.helpers.work_titles import (
+    name_different_keys,
+    names_catalogued_part,
     numbered_piece,
     parent_work_name,
     parse_catalog_numbers,
     part_key,
 )
+from music_assistant.providers.musicbrainz.constants import MUSICBRAINZ_WEB_URL
 
 from .base import SUMMARY_ARTIST_FIELDS, SUPPRESS_MEDIA_ITEM_UPDATES, MediaControllerBase
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Hashable, Iterable, Mapping, Sequence
+
+    from music_assistant import MusicAssistant
 
 # the first composer of a work, for sorting works by composer
 FIRST_COMPOSER_SORT_NAME = f"""(SELECT artists.search_sort_name FROM {DB_TABLE_WORK_ARTISTS}
@@ -122,6 +130,12 @@ class WorksController(MediaControllerBase[Work]):
     media_type = MediaType.WORK
     item_cls = Work
     summary_item_cls = WorkSummary
+
+    def __init__(self, mass: MusicAssistant) -> None:
+        """Initialize class."""
+        super().__init__(mass)
+        # the works a key clash was logged for, so each clash is logged once
+        self._logged_hints: set[Hashable] = set()
 
     @property
     def base_query(self) -> tuple[str, dict[str, Any]]:
@@ -460,6 +474,88 @@ class WorksController(MediaControllerBase[Work]):
         ]
         return (candidates[0], number, name) if len(candidates) == 1 else None
 
+    async def get_catalogued_work_id(
+        self, title: str, composers: Sequence[Artist | ItemMapping]
+    ) -> int | None:
+        """
+        Return the library work a track title naming no work is, by its catalog numbers.
+
+        Only the one top-level library work with the given composers that is the same work by
+        the catalog numbers in the title qualifies, such as the "BWV 565" work for "Toccata and
+        Fugue in D Minor, BWV 565". No work is added.
+
+        :param title: The title of the track.
+        :param composers: The composers credited on the track.
+        """
+        if not (catalog_numbers := parse_catalog_numbers(title)) or not composers:
+            return None
+        work = Work(
+            item_id=title,
+            provider="work_title",
+            name=title,
+            provider_mappings=set(),
+            composers=UniqueList(composers),
+            catalog_numbers=catalog_numbers,
+        )
+        await self._set_library_composers(work)
+        return await self._get_catalogued_work_id(work)
+
+    async def join_catalogued_works(self, composer_id: int | None = None) -> None:
+        """
+        Merge the top-level works that are one work by their composers and catalog numbers.
+
+        Works by the same composers are one work when their catalog numbers are equal or share
+        a number of a composer catalog, such as "RV 269", but not when they are different
+        MusicBrainz works or their titles name different keys.
+
+        :param composer_id: Library id of the composer whose works to join, all works if omitted.
+        """
+        groups: list[dict[int, tuple[frozenset[int], frozenset[str]]]] = []
+        for work_id, key in await self._get_catalogued_works(composer_id):
+            work = await self.get_library_item(work_id)
+            for group in groups:
+                if any(_same_catalogued_work(key, x) for x in group.values()) and all(
+                    [await self._may_join(x, work) for x in group]
+                ):
+                    group[work_id] = key
+                    break
+            else:
+                groups.append({work_id: key})
+        for group in groups:
+            if len(group) > 1:
+                await self._join_works(list(group))
+
+    async def join_same_named_works(self, composer_id: int) -> None:
+        """
+        Merge the top-level works of a composer that adding them now would match by name.
+
+        :param composer_id: Library id of the composer whose works to join.
+        """
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT item_id FROM {DB_TABLE_WORKS} WHERE parent_work_id IS NULL "
+            f"AND item_id IN (SELECT work_id FROM {DB_TABLE_WORK_ARTISTS} "
+            "WHERE artist_id = :composer_id AND role = :composer) ORDER BY item_id",
+            {"composer_id": composer_id, "composer": ArtistRole.COMPOSER.value},
+            limit=0,
+        )
+        # each work joins the oldest work its name matches, as it would when added
+        groups: list[list[Work]] = []
+        for row in rows:
+            work = await self.get_library_item(row["item_id"])
+            match_names = self._library_match_names(work)
+            for group in groups:
+                oldest = group[0]
+                if create_safe_string(oldest.name, True, True) in match_names and (
+                    await self._confirm_library_candidate(oldest, work)
+                ):
+                    group.append(work)
+                    break
+            else:
+                groups.append([work])
+        for group in groups:
+            if len(group) > 1:
+                await self._join_works([int(x.item_id) for x in group])
+
     # TEMP(classical 5b work join): remove before release
     async def join_same_works(self) -> None:
         """
@@ -470,7 +566,7 @@ class WorksController(MediaControllerBase[Work]):
         await self._move_parts_below_their_works()
         while True:
             count = await self.mass.music.database.get_count(DB_TABLE_WORKS)
-            await self._join_catalogued_works()
+            await self.join_catalogued_works()
             await self._join_same_parts()
             if await self.mass.music.database.get_count(DB_TABLE_WORKS) == count:
                 return
@@ -518,6 +614,7 @@ class WorksController(MediaControllerBase[Work]):
         await self._set_composers(db_id, item.composers)
         await self._set_arrangements(db_id, item.arrangement_of)
         self.logger.debug("added %s to database (id: %s)", item.name, db_id)
+        await self._add_catalogued_tracks(db_id, item)
         return db_id
 
     async def _update_library_item(
@@ -643,16 +740,18 @@ class WorksController(MediaControllerBase[Work]):
         return None
 
     async def _get_catalogued_work_id(self, item: Work) -> int | None:
-        """Return the library id of the one top-level work with a work's catalog key, if any."""
+        """Return the library id of the one top-level work a work is by its catalog key, if any."""
         composer_ids = await self._get_library_composer_ids(item)
-        if parent_work_name(item.name) or not (
-            key := _catalog_key(composer_ids, item.catalog_numbers)
+        if (
+            parent_work_name(item.name)
+            or names_catalogued_part(item.name)
+            or not (key := _catalog_key(composer_ids, item.catalog_numbers))
         ):
             return None
         candidates = [
             work_id
             for work_id, candidate_key in await self._get_catalogued_works(min(composer_ids))
-            if candidate_key == key and await self._may_join(work_id, item)
+            if _same_catalogued_work(candidate_key, key) and await self._may_join(work_id, item)
         ]
         # several candidates are works the library keeps apart, so none of them is this one
         return candidates[0] if len(candidates) == 1 else None
@@ -682,6 +781,7 @@ class WorksController(MediaControllerBase[Work]):
             (int(row["item_id"]), key)
             for row in rows
             if not parent_work_name(row["name"])
+            and not names_catalogued_part(row["name"])
             and (
                 key := _catalog_key(
                     set(json_loads(row["composer_ids"])), json_loads(row["catalog_numbers"])
@@ -712,11 +812,69 @@ class WorksController(MediaControllerBase[Work]):
         return composer_ids
 
     async def _may_join(self, work_id: int, item: Work) -> bool:
-        """Return whether a work may join a library work, never a different MusicBrainz work."""
-        if not item.mbid:
-            return True
-        mbid = (await self.get_library_item(work_id)).mbid
-        return not mbid or mbid == item.mbid
+        """Return whether a work may join a library work, never another MusicBrainz work or key."""
+        if (
+            item.mbid
+            and (mbid := (await self.get_library_item(work_id)).mbid)
+            and mbid != item.mbid
+        ):
+            return False
+        return not await self._names_other_key(work_id, item)
+
+    async def _names_other_key(self, work_id: int, item: Work) -> bool:
+        """Return whether a work names another key than a library work, logging the clash once."""
+        name = (await self.get_library_item(work_id)).name
+        if not name_different_keys(name, item.name):
+            return False
+        search = urlencode({"type": "recording", "query": item.name})
+        log_once(
+            self.logger,
+            self._logged_hints,
+            (work_id, item.name),
+            logging.INFO,
+            'Titles "%s" and "%s" share %s but name different keys, so they are kept as separate '
+            "works; check which is right and link its recording to the correct work on "
+            "MusicBrainz: %s/search?%s",
+            name,
+            item.name,
+            ", ".join(item.catalog_numbers),
+            MUSICBRAINZ_WEB_URL,
+            search,
+        )
+        return True
+
+    async def _add_catalogued_tracks(self, work_id: int, work: Work) -> None:
+        """Give a new top-level work the library tracks without a work that it would be given."""
+        composer_ids = await self._get_library_composer_ids(work)
+        if work.parent_work or not (key := _catalog_key(composer_ids, work.catalog_numbers)):
+            return
+        rows = await self.mass.music.database.get_rows_from_query(
+            "SELECT item_id, name, (SELECT json_group_array(artist_id) "
+            f"FROM {DB_TABLE_TRACK_ARTISTS} ta WHERE ta.track_id = t.item_id "
+            f"AND ta.role = :composer) AS composer_ids FROM {DB_TABLE_TRACKS} t "
+            "WHERE t.work_id IS NULL AND t.item_id IN (SELECT track_id "
+            f"FROM {DB_TABLE_TRACK_ARTISTS} WHERE artist_id = :composer_id AND role = :composer)",
+            {"composer": ArtistRole.COMPOSER.value, "composer_id": min(composer_ids)},
+            limit=0,
+        )
+        # the match a track added after the work gets, for the tracks that may qualify
+        track_ids = [
+            int(row["item_id"])
+            for row in rows
+            if (
+                track_key := _catalog_key(
+                    set(json_loads(row["composer_ids"])), parse_catalog_numbers(row["name"])
+                )
+            )
+            and _same_catalogued_work(track_key, key)
+            and await self.get_catalogued_work_id(row["name"], work.composers) == work_id
+        ]
+        for track_id in track_ids:
+            await self.mass.music.database.update(
+                DB_TABLE_TRACKS, {"item_id": track_id}, {"work_id": work_id}
+            )
+        if track_ids:
+            await self.mass.music.classification.update(track_ids=track_ids)
 
     # TEMP(classical 5b work join): remove before release
     async def _move_parts_below_their_works(self) -> None:
@@ -748,17 +906,6 @@ class WorksController(MediaControllerBase[Work]):
             )
 
     # TEMP(classical 5b work join): remove before release
-    async def _join_catalogued_works(self) -> None:
-        """Merge each two top-level works that alone share a catalog key."""
-        groups: dict[tuple[frozenset[int], frozenset[str]], list[int]] = {}
-        for work_id, key in await self._get_catalogued_works():
-            groups.setdefault(key, []).append(work_id)
-        for work_ids in groups.values():
-            # more works are ones the library keeps apart, as adding them would
-            if len(work_ids) == 2:
-                await self._join_works(work_ids)
-
-    # TEMP(classical 5b work join): remove before release
     async def _join_same_parts(self) -> None:
         """Merge the works that are the same act or part of one work."""
         groups: dict[tuple[int, tuple[str, int | str]], list[int]] = {}
@@ -769,12 +916,22 @@ class WorksController(MediaControllerBase[Work]):
             if len(work_ids) > 1:
                 await self._join_works(work_ids)
 
-    # TEMP(classical 5b work join): remove before release
     async def _join_works(self, work_ids: list[int]) -> None:
-        """Merge the given works, logging which works are merged."""
+        """Merge the given works and then their same parts, logging which works are merged."""
         names = [f"{x}: {(await self.get_library_item(x)).name}" for x in work_ids]
         target_id = await self.merge_library_works(work_ids, work_ids[0])
         self.logger.info("Joined works %s into work %s", "; ".join(names), target_id)
+        await self._join_parts_of(target_id)
+
+    async def _join_parts_of(self, work_id: int) -> None:
+        """Merge the parts of a work that are the same act or part."""
+        groups: dict[tuple[str, int | str], list[int]] = {}
+        for row in await self._get_part_rows(work_id):
+            if key := part_key(row["name"]):
+                groups.setdefault(key, []).append(int(row["item_id"]))
+        for work_ids in groups.values():
+            if len(work_ids) > 1:
+                await self._join_works(work_ids)
 
     async def _validate_library_item_merge(self, target: Work, source: Work) -> None:
         """Validate that two works are not different MusicBrainz works."""
@@ -932,6 +1089,18 @@ def _catalog_key(
     return frozenset(composer_ids), frozenset(
         create_safe_string(x, True, True) for x in catalog_numbers
     )
+
+
+def _same_catalogued_work(
+    key: tuple[frozenset[int], frozenset[str]], other_key: tuple[frozenset[int], frozenset[str]]
+) -> bool:
+    """Return whether two catalog keys are one work, by equal numbers or a shared catalog one."""
+    composer_ids, numbers = key
+    other_composer_ids, other_numbers = other_key
+    if composer_ids != other_composer_ids:
+        return False
+    # an opus may hold several works, such as the twelve concertos of Vivaldi's "Op. 8"
+    return numbers == other_numbers or any(not x.startswith("op") for x in numbers & other_numbers)
 
 
 def _catalog_sort_key(catalog_numbers: list[str]) -> str | None:

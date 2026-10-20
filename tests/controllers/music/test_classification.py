@@ -340,6 +340,30 @@ async def test_album_in_classical_genre_makes_its_tracks_classical(mass: MusicAs
     assert await _is_classical(mass, track)
 
 
+async def test_album_genre_copied_down_from_its_tracks_does_not_count(
+    mass: MusicAssistant,
+) -> None:
+    """A classical genre an album only inherits from one of its tracks leaves a mixed album be."""
+    album = await _add_album(mass)
+    tracks = [await _add_track(mass, album, number) for number in (1, 2, 3)]
+    genre_id = await _classical_genre_id(mass)
+    await mass.music.genres.add_media_mapping(genre_id, MediaType.TRACK, tracks[0].item_id)
+    await mass.music.database.insert(
+        DB_TABLE_GENRE_MEDIA_ITEM_MAPPING,
+        {
+            "genre_id": genre_id,
+            "media_id": int(album.item_id),
+            "media_type": MediaType.ALBUM.value,
+            "is_derived": 1,
+        },
+    )
+
+    await mass.music.classification.update(album_ids=[int(album.item_id)])
+
+    assert not await _is_classical(mass, album)
+    assert not await _is_classical(mass, tracks[1])
+
+
 async def test_album_majority_ignores_tracks_classical_through_another_album(
     mass: MusicAssistant,
 ) -> None:

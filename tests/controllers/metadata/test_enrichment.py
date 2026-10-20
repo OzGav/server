@@ -36,7 +36,9 @@ from music_assistant.controllers.metadata.enrichment import MetadataEnrichmentMi
 from music_assistant.controllers.music.helpers import fill_track_from_recording
 from music_assistant.controllers.music.listing_cache import Listing
 from music_assistant.providers.musicbrainz.models import (
+    MusicBrainzAlias,
     MusicBrainzArtist,
+    MusicBrainzLifeSpan,
     MusicBrainzRecording,
     MusicBrainzRelation,
     MusicBrainzRelease,
@@ -77,6 +79,7 @@ def _enrichment(musicbrainz: MagicMock | None = None) -> MetadataEnrichmentMixin
     """
     enrichment = MetadataEnrichmentMixin()
     enrichment.logger = MagicMock()
+    enrichment._logged_hints = set()
     enrichment.mass = MagicMock()
     enrichment.config = MagicMock()
     enrichment.config.get_value = _online_metadata_only
@@ -93,6 +96,7 @@ def _enrichment(musicbrainz: MagicMock | None = None) -> MetadataEnrichmentMixin
     for controller in (music.artists, music.albums, music.tracks):
         controller.update_item_in_library = AsyncMock()
         controller.link_musicbrainz_mappings = AsyncMock(return_value=[])
+    music.tracks.merge_recording_duplicates = AsyncMock(return_value=set())
     music.albums.get_library_album_tracks = AsyncMock(return_value=[])
     music.albums.link_album_tracks = AsyncMock()
     return enrichment
@@ -389,6 +393,7 @@ def _enrichment_with_musicbrainz(
     """
     enrichment = MetadataEnrichmentMixin()
     enrichment.logger = MagicMock()
+    enrichment._logged_hints = set()
     enrichment.mass = MagicMock()
     enrichment.mass.music.artists.albums = AsyncMock(return_value=albums)
     enrichment.mass.music.artists.tracks = AsyncMock(return_value=tracks)
@@ -793,14 +798,24 @@ def _logged_musicbrainz_unavailable(enrichment: MetadataEnrichmentMixin) -> bool
 
 
 def _album(external_ids: set[tuple[ExternalID, str]] | None = None, **kwargs: Any) -> Album:
-    """Return a library album without provider mappings."""
+    """Return a library album, without provider mappings unless given."""
+    kwargs.setdefault("provider_mappings", set())
     return Album(
         item_id="1",
         provider="library",
         name="In Rainbows",
-        provider_mappings=set(),
         external_ids=external_ids or set(),
         **kwargs,
+    )
+
+
+def _library_mapping(in_library: bool = True) -> ProviderMapping:
+    """Return a mapping of an album on a local file source, added to the library or not."""
+    return ProviderMapping(
+        item_id="in-rainbows",
+        provider_domain="filesystem",
+        provider_instance="files",
+        in_library=in_library,
     )
 
 
@@ -929,9 +944,20 @@ async def test_album_identity_marks_a_miss_without_linking() -> None:
     ("album", "expected"),
     [
         (
-            _album({(ExternalID.BARCODE, "5051083087282")}),
+            _album(
+                {(ExternalID.BARCODE, "5051083087282")},
+                provider_mappings={_library_mapping()},
+            ),
             'Album "In Rainbows" (barcode 5051083087282) is not on MusicBrainz, add it for '
             "example with Harmony: https://harmony.pulsewidth.org.uk/release?gtin=5051083087282",
+        ),
+        # an album stored only for a track of it gets no hint
+        (
+            _album(
+                {(ExternalID.BARCODE, "5051083087282")},
+                provider_mappings={_library_mapping(in_library=False)},
+            ),
+            "Album In Rainbows was not found on MusicBrainz",
         ),
         (
             Album(
@@ -943,6 +969,7 @@ async def test_album_identity_marks_a_miss_without_linking() -> None:
                         item_id="7eyQXxuf2nGj9d2367Gi5f",
                         provider_domain="spotify",
                         provider_instance="spotify",
+                        in_library=True,
                     )
                 },
             ),
@@ -975,6 +1002,20 @@ async def test_album_identity_miss_tells_where_to_add_the_album(
     await enrichment._link_album_to_musicbrainz(album)
 
     assert [record.getMessage() for record in caplog.records] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_album_identity_miss_is_logged_once(caplog: pytest.LogCaptureFixture) -> None:
+    """The hint on adding an album to MusicBrainz is logged once, however often it is missed."""
+    enrichment = _enrichment(_musicbrainz(release=None))
+    enrichment.logger = logging.getLogger("test_enrichment")
+    caplog.set_level(logging.INFO, logger="test_enrichment")
+    album = _album({(ExternalID.BARCODE, "5051083087282")}, provider_mappings={_library_mapping()})
+
+    await enrichment._link_album_to_musicbrainz(album)
+    await enrichment._link_album_to_musicbrainz(album)
+
+    assert len(caplog.records) == 1
 
 
 @pytest.mark.asyncio
@@ -1403,6 +1444,10 @@ async def test_artist_identity_offers_musicbrainz_sort_name_for_classical_artist
     """A classical artist is offered the sort name MusicBrainz knows; other artists are not."""
     details = MusicBrainzArtist(id=OTHER_MBID, name="Aaron Copland", sort_name="Copland, Aaron")
     enrichment = _enrichment(_musicbrainz(artist=details))
+    # a classical artist the library holds as no composer
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": 0}]
+    )
     artist = Artist(
         item_id="1",
         provider="library",
@@ -1416,6 +1461,119 @@ async def test_artist_identity_offers_musicbrainz_sort_name_for_classical_artist
     await enrichment._link_artist_to_musicbrainz(artist)
 
     assert artist.sort_name == (expected or default_sort_name)
+
+
+def _rubinstein() -> MusicBrainzArtist:
+    """Return a composer whose MusicBrainz main name is in Cyrillic script."""
+    return MusicBrainzArtist(
+        id=OTHER_MBID,
+        name="Антон Григорьевич Рубинштейн",
+        sort_name="Рубинштейн, Антон Григорьевич",
+        aliases=[
+            MusicBrainzAlias("Anton Rubinstein", "Rubinstein, Anton", locale="en", primary=True)
+        ],
+    )
+
+
+async def _link_classical_artist(
+    name: str, sort_name: str | None, is_composer: bool
+) -> tuple[Artist, MagicMock, MetadataEnrichmentMixin]:
+    """
+    Link a classical artist holding the MusicBrainz id of Anton Rubinstein.
+
+    :param name: The library name of the artist.
+    :param sort_name: The library sort name of the artist, made from its name if None.
+    :param is_composer: Whether the library credits the artist as a classical composer.
+    :return: The artist, the MusicBrainz provider stub and the enrichment mixin.
+    """
+    musicbrainz = _musicbrainz(artist=_rubinstein())
+    enrichment = _enrichment(musicbrainz)
+    artists = _mass(enrichment).music.artists
+    artists.set_library_artist_name = AsyncMock()
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": int(is_composer)}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name=name,
+        sort_name=sort_name,
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        is_classical=True,
+    )
+    await enrichment._link_artist_to_musicbrainz(artist)
+    return artist, musicbrainz, enrichment
+
+
+@pytest.mark.asyncio
+async def test_artist_identity_gives_a_composer_its_musicbrainz_name() -> None:
+    """A composer holding an id takes the English name MusicBrainz gives a Cyrillic main name."""
+    artist, musicbrainz, enrichment = await _link_classical_artist(
+        "Rubenstein", None, is_composer=True
+    )
+
+    musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
+    _mass(enrichment).music.artists.set_library_artist_name.assert_awaited_once_with(
+        1, "Anton Rubinstein", "Rubinstein, Anton"
+    )
+    assert (artist.name, artist.sort_name) == ("Anton Rubinstein", "Rubinstein, Anton")
+
+
+@pytest.mark.asyncio
+async def test_artist_identity_leaves_a_composer_already_named_alone() -> None:
+    """A composer already carrying its MusicBrainz name costs no lookup and no rename."""
+    _artist, musicbrainz, enrichment = await _link_classical_artist(
+        "Anton Rubinstein", "Rubinstein, Anton", is_composer=True
+    )
+
+    musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
+    _mass(enrichment).music.database.get_rows_from_query.assert_not_awaited()
+    _mass(enrichment).music.artists.set_library_artist_name.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_artist_identity_does_not_rename_a_performer() -> None:
+    """A classical artist not credited as composer keeps its own name."""
+    artist, _musicbrainz_stub, enrichment = await _link_classical_artist(
+        "Rubenstein", None, is_composer=False
+    )
+
+    _mass(enrichment).music.artists.set_library_artist_name.assert_not_awaited()
+    assert artist.name == "Rubenstein"
+
+
+@pytest.mark.asyncio
+async def test_artist_identity_gives_a_composer_their_life_span_and_period() -> None:
+    """A composer whose id came from the tags takes their life span and period from the link."""
+    musicbrainz = _musicbrainz(
+        artist=MusicBrainzArtist(
+            id=OTHER_MBID,
+            name="Dmitri Shostakovich",
+            sort_name="Shostakovich, Dmitri",
+            type="Person",
+            life_span=MusicBrainzLifeSpan(begin="1906-09-25", end="1975-08-09", ended=True),
+        )
+    )
+    enrichment = _enrichment(musicbrainz)
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": 1}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Dmitri Shostakovich",
+        sort_name="Shostakovich, Dmitri",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        is_classical=True,
+    )
+
+    await enrichment._link_artist_to_musicbrainz(artist)
+
+    musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
+    assert artist.metadata.life_span == LifeSpan(begin="1906-09-25", end="1975-08-09", ended=True)
+    assert artist.period == Period.MODERN
 
 
 # --------------------------------------------------------------------------- #

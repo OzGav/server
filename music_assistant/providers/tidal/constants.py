@@ -37,12 +37,12 @@ CONF_REFRESH_TOKEN = "refresh_token"  # noqa: S105 - config key
 CONF_USER_ID = "user_id"
 CONF_EXPIRY_TIME = "expiry_time"
 CONF_QUALITY = "quality"
-# TEMP(classical 5c catch-up): remove before release
+# TEMP(classical 5c Tidal re-read): remove before release
 # Hidden config marking that the library albums have been read again for their classical details
 CONF_CLASSICAL_REREAD_DONE = "classical_reread_done"
 
 # Bump when the shape of parsed albums or tracks changes, so cached items are re-parsed
-PARSED_ITEM_CACHE_CHECKSUM: Final[str] = "classical_v5"
+PARSED_ITEM_CACHE_CHECKSUM: Final[str] = "classical_v6"
 
 # Cache keys
 CACHE_CATEGORY_RECOMMENDATIONS: Final[int] = 1

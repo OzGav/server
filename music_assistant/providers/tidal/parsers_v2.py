@@ -438,6 +438,7 @@ def _set_classical_details(
             track.name,
             first_artist if isinstance(first_artist, Artist) else None,
             composer_first,
+            classical=True,
         )
         return
     track.credits.extend(
@@ -451,7 +452,9 @@ def _set_classical_details(
         ),
         None,
     )
-    if classical_work := parse_work_title(track.name, composer.name if composer else None):
+    if classical_work := parse_work_title(
+        track.name, composer.name if composer else None, classical=True
+    ):
         set_track_work(track, classical_work, composer)
 
 

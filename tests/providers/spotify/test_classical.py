@@ -32,6 +32,13 @@ TROUT_QUINTET = (
     "Notturno",
 )
 FIFTY_SECOND_STREET = ("Big Shot", "Honesty", "My Life", "Zanzibar", "Stiletto")
+# chapter titles of an audiobook Spotify lists as a music album
+AUDIOBOOK = (
+    "Kapitel 1: Der Anfang",
+    "Kapitel 2: Die Reise",
+    "Kapitel 3: Die Rückkehr",
+    "Kapitel 4: Op. 1",
+)
 
 
 def _make_provider(mass: MagicMock | None = None) -> SpotifyProvider:
@@ -110,6 +117,11 @@ def test_one_work_title_does_not_make_an_album_classical() -> None:
     """A single colon in the titles of a pop album leaves it out of the Classical genre."""
     titles = (*FIFTY_SECOND_STREET, "Interlude: Reprise")
     assert not _is_classical_album(_album_obj(titles))
+
+
+def test_album_of_chapters_is_not_classical() -> None:
+    """An audiobook listed as a music album stays out of the Classical genre."""
+    assert not _is_classical_album(_album_obj(AUDIOBOOK))
 
 
 def test_album_without_its_tracks_is_not_tagged() -> None:
@@ -220,7 +232,7 @@ async def test_album_titles_naming_their_composers_credit_no_performer() -> None
 
 
 async def test_album_tracks_of_a_pop_album_credit_no_composer() -> None:
-    """On a pop album only a "Work: Piece" title credits the first artist as composer."""
+    """On a pop album no track credits its first artist as composer, not even a colon title."""
     provider = _make_provider()
     titles = (*FIFTY_SECOND_STREET, "Interlude: Reprise")
     provider._get_all_items = MagicMock(  # type: ignore[method-assign]
@@ -229,9 +241,19 @@ async def test_album_tracks_of_a_pop_album_credit_no_composer() -> None:
 
     tracks = await SpotifyProvider.get_album_tracks.__wrapped__(provider, "album-1")  # type: ignore[attr-defined]
 
-    assert {x.name: _composer_names(x) for x in tracks if x.credits} == {
-        "Interlude: Reprise": ["Billy Joel"]
-    }
+    assert [x.name for x in tracks if x.credits or x.work] == []
+
+
+async def test_album_tracks_of_an_audiobook_credit_no_composer() -> None:
+    """The chapters of an audiobook listed as a music album get no work and no composer."""
+    provider = _make_provider()
+    provider._get_all_items = MagicMock(  # type: ignore[method-assign]
+        return_value=_iterate([_track_obj(title, ("Rufus Beck",)) for title in AUDIOBOOK])
+    )
+
+    tracks = await SpotifyProvider.get_album_tracks.__wrapped__(provider, "album-1")  # type: ignore[attr-defined]
+
+    assert [x.name for x in tracks if x.credits or x.work] == []
 
 
 async def test_reread_updates_library_album_and_its_classical_tracks() -> None:

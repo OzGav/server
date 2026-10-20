@@ -67,6 +67,7 @@ def _make_provider(base_path: str, lib_artists: list[Artist]) -> LocalFileSystem
 
     provider.mass = MagicMock()
     provider.mass.music.artists.iter_library_items = iter_library_items
+    provider.mass.music.genres.names_classical_genre = AsyncMock(return_value=False)
     provider.mass.get_provider = MagicMock(return_value=None)
     provider.mass.create_task = MagicMock()
     return provider

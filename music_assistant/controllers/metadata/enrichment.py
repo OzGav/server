@@ -9,6 +9,7 @@ into library items (artists, albums, tracks, playlists, audiobooks and podcasts)
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from dataclasses import replace
 from time import time
@@ -49,6 +50,7 @@ from music_assistant.controllers.music.helpers import (
 from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
 from music_assistant.helpers.compare import compare_strings
 from music_assistant.helpers.external_ids import is_valid_barcode, is_valid_isrc
+from music_assistant.helpers.logging import log_once
 from music_assistant.helpers.provider_access import visible_music_sources
 from music_assistant.models.music_provider import MusicProvider
 from music_assistant.providers.musicbrainz.constants import HARMONY_RELEASE_URL
@@ -61,11 +63,10 @@ from .constants import (
     REFRESH_INTERVAL,
     REFRESH_RETRY_INTERVAL,
 )
-from .helpers import composer_period
+from .helpers import composer_period, fill_artist_from_musicbrainz, musicbrainz_name
 
 if TYPE_CHECKING:
-    import logging
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Hashable, Iterable, Sequence
 
     from music_assistant_models.config_entries import CoreConfig
     from music_assistant_models.enums import Period
@@ -75,7 +76,7 @@ if TYPE_CHECKING:
     from music_assistant import MusicAssistant
     from music_assistant.models.media_capabilities import MusicDiscoveryMixin
     from music_assistant.models.metadata_provider import MetadataProvider
-    from music_assistant.providers.musicbrainz.models import MusicBrainzRelease
+    from music_assistant.providers.musicbrainz.models import MusicBrainzArtist, MusicBrainzRelease
 
 # how many reference albums and tracks an artist is identified on MusicBrainz through
 MAX_MUSICBRAINZ_REF_ITEMS = 3
@@ -109,8 +110,8 @@ class MetadataEnrichmentMixin:
     """
     Rich metadata enrichment functionality for the MetaDataController.
 
-    Expects to be mixed with a class providing ``mass``, ``logger``, ``config``
-    and the ``providers``, ``preferred_language`` and
+    Expects to be mixed with a class providing ``mass``, ``logger``, ``config``,
+    ``_logged_hints`` and the ``providers``, ``preferred_language`` and
     ``link_providers_via_musicbrainz`` properties.
     """
 
@@ -118,6 +119,7 @@ class MetadataEnrichmentMixin:
         mass: MusicAssistant
         logger: logging.Logger
         config: CoreConfig
+        _logged_hints: set[Hashable]
 
         @property
         def preferred_language(self) -> str: ...  # noqa: D102
@@ -680,8 +682,17 @@ class MetadataEnrichmentMixin:
                     discogs := discogs_external_id(urls, MediaType.ARTIST)
                 ):
                     artist.add_external_id(*discogs)
+                if artist.is_classical:
+                    fill_artist_from_musicbrainz(artist, details)
+                    # a period from the tags or genres is kept
+                    if not artist.period and (period := await self._composer_period(artist)):
+                        artist.period = period
                 # only a sort name made from the artist's name gives way to this one
-                if artist.is_classical and details.sort_name:
+                if (
+                    artist.is_classical
+                    and not await self._name_after_musicbrainz(artist, details, composer_only=True)
+                    and details.sort_name
+                ):
                     artist.sort_name = details.sort_name
                 if self.link_providers_via_musicbrainz:
                     await self.mass.music.artists.link_musicbrainz_mappings(artist, urls)
@@ -753,9 +764,16 @@ class MetadataEnrichmentMixin:
         return False
 
     def _log_album_not_found(self, album: Album) -> None:
-        """Log that MusicBrainz lacks an album, with where to add it when that can be told."""
+        """
+        Log that MusicBrainz lacks an album, with where to add it when that can be told.
+
+        Where to add it is only told for an album the user added to the library, not for one
+        stored only for a track of it.
+        """
         # a release group id means MusicBrainz has the album, only no single edition matched
-        if not album.get_external_id(ExternalID.MB_RELEASEGROUP):
+        if not album.get_external_id(ExternalID.MB_RELEASEGROUP) and any(
+            x.in_library for x in album.provider_mappings
+        ):
             barcode = min(
                 (
                     value
@@ -765,7 +783,11 @@ class MetadataEnrichmentMixin:
                 default=None,
             )
             if barcode:
-                self.logger.debug(
+                log_once(
+                    self.logger,
+                    self._logged_hints,
+                    ("album", album.uri),
+                    logging.INFO,
                     'Album "%s" (barcode %s) is not on MusicBrainz, '
                     "add it for example with Harmony: %s?%s",
                     album.name,
@@ -774,15 +796,26 @@ class MetadataEnrichmentMixin:
                     urlencode({"gtin": barcode}),
                 )
                 return
-            if urls := MusicbrainzProvider._reverse_lookup_urls(album):
-                self.logger.debug(
+            if urls := MusicbrainzProvider.reverse_lookup_urls(album):
+                log_once(
+                    self.logger,
+                    self._logged_hints,
+                    ("album", album.uri),
+                    logging.INFO,
                     'Album "%s" is not on MusicBrainz, add it for example with Harmony: %s?%s',
                     album.name,
                     HARMONY_RELEASE_URL,
                     urlencode({"url": urls[0]}),
                 )
                 return
-        self.logger.debug("Album %s was not found on MusicBrainz", album.name)
+        log_once(
+            self.logger,
+            self._logged_hints,
+            ("album", album.uri),
+            logging.DEBUG,
+            "Album %s was not found on MusicBrainz",
+            album.name,
+        )
 
     async def _link_track_to_musicbrainz(self, track: Track) -> bool:
         """
@@ -800,6 +833,7 @@ class MetadataEnrichmentMixin:
                 self.logger.debug("Track %s was not found on MusicBrainz", track.name)
             else:
                 fill_track_from_recording(track, recording)
+                await self.mass.music.tracks.merge_recording_duplicates(track)
                 if self.link_providers_via_musicbrainz:
                     await self.mass.music.tracks.link_musicbrainz_mappings(
                         track, relation_urls(recording.relations)
@@ -954,15 +988,45 @@ class MetadataEnrichmentMixin:
         death_year = release_year(life_span.end)
         if life_span.ended and not death_year:
             return None  # died in an unknown year, so their working life is unknown too
+        if not await self._is_classical_composer(int(artist.item_id)):
+            return None
+        return composer_period(birth_year, death_year)
+
+    async def _name_after_musicbrainz(
+        self, artist: Artist, details: MusicBrainzArtist, composer_only: bool = False
+    ) -> bool:
+        """
+        Give a library artist the name MusicBrainz gives it, in Latin script.
+
+        An alias in the user's metadata language comes before an English one.
+
+        :param artist: The library artist holding the MusicBrainz id.
+        :param details: The MusicBrainz artist with its aliases.
+        :param composer_only: Rename only a classical artist credited as composer.
+        :return: Whether the artist carries that name and sort name.
+        """
+        mb_name = musicbrainz_name(details, self.preferred_language)
+        if not mb_name:
+            return False
+        if (artist.name, artist.sort_name) == mb_name:
+            return True
+        if composer_only and not await self._is_classical_composer(int(artist.item_id)):
+            return False
+        if artist.name != mb_name[0]:
+            self.logger.debug('Renaming "%s" to "%s"', artist.name, mb_name[0])
+        await self.mass.music.artists.set_library_artist_name(int(artist.item_id), *mb_name)
+        artist.name, artist.sort_name = mb_name
+        return True
+
+    async def _is_classical_composer(self, artist_id: int) -> bool:
+        """Return whether a library artist is a classical artist credited as composer."""
         rows = await self.mass.music.database.get_rows_from_query(
             f"SELECT {_IS_CLASSICAL_COMPOSER} AS is_classical_composer "
             f"FROM {DB_TABLE_ARTISTS} WHERE item_id = :artist_id",
-            {"artist_id": int(artist.item_id)},
+            {"artist_id": artist_id},
             limit=0,
         )
-        if not rows or not rows[0]["is_classical_composer"]:
-            return None
-        return composer_period(birth_year, death_year)
+        return bool(rows and rows[0]["is_classical_composer"])
 
 
 def _fill_album_from_release(

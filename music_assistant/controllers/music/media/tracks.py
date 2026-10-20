@@ -72,6 +72,7 @@ from music_assistant.helpers.compare import (
     get_keep_remasters_apart,
     is_named_by,
     loose_compare_strings,
+    track_durations_agree,
 )
 from music_assistant.helpers.credit_roles import role_word
 from music_assistant.helpers.database import UNSET
@@ -717,7 +718,43 @@ class TracksController(MediaControllerBase[Track]):
         if not changed:
             return
 
+        await self.merge_recording_duplicates(track)
         await self.update_item_in_library(int(track.item_id), track)
+
+    async def merge_recording_duplicates(self, track: Track) -> set[str]:
+        """
+        Merge the other library tracks of a library track's MusicBrainz recording into it.
+
+        Only a track that adding it to the library now would join to this one and whose
+        duration agrees is merged, and neither track may carry a second recording id.
+
+        :param track: The library track, with the recording id it was given.
+        :return: The library ids of the tracks merged into it.
+        """
+        recording_ids = self._recording_ids(track)
+        if len(recording_ids) != 1:
+            return set()
+        merged: set[str] = set()
+        for other in await self.get_library_items_by_external_id(
+            recording_ids.pop(), ExternalID.MB_RECORDING, limit=None
+        ):
+            if (
+                int(other.item_id) == int(track.item_id)
+                or len(self._recording_ids(other)) != 1
+                or not track_durations_agree(other, track)
+                or not await self._confirm_library_candidate(other, track)
+            ):
+                continue
+            self.logger.debug(
+                "Merging track item id %s into item id %s: both are recording %s",
+                other.item_id,
+                track.item_id,
+                track.mbid,
+            )
+            merged_item = await self.merge_library_items(track.item_id, other.item_id)
+            track.provider_mappings.update(merged_item.provider_mappings)
+            merged.add(other.item_id)
+        return merged
 
     async def add_credits(self, item_id: int, item_credits: Iterable[Credit]) -> None:
         """
@@ -1785,7 +1822,7 @@ class TracksController(MediaControllerBase[Track]):
         # a merge keeps the stored work, so the update's work is not added to the library then
         new_work_id = (
             await self._get_or_add_work_id(update)
-            if update.work and (overwrite or not cur_work_id)
+            if not cur_work_id or (update.work and overwrite)
             else None
         )
         # like the artists, a source without a work or movement keeps the stored one
@@ -1966,9 +2003,12 @@ class TracksController(MediaControllerBase[Track]):
 
         A track that is a numbered piece of an opus the library holds, as "K 331, No. 3" of the
         "K. 331" sonata, becomes a movement of that work, with the number and name of the piece.
+        A track without a work joins the library work its title's catalog numbers name.
         """
         if not track.work:
-            return None
+            return await self.mass.music.works.get_catalogued_work_id(
+                track.name, [x.artist for x in track.credits if x.role == ArtistRole.COMPOSER]
+            )
         # a numbered movement of its own is a movement of the piece, not the piece
         if (
             isinstance(track.work, Work)
@@ -1989,9 +2029,11 @@ class TracksController(MediaControllerBase[Track]):
         """
         if not (candidates := self._joined_composer_candidates(track)):
             return set()
-        library_composers = await self.mass.music.artists.get_library_composers(with_mbid=True)
         replacements: dict[str, Artist] = {}
         for name, candidate in candidates.items():
+            library_composers = await self.mass.music.artists.get_library_composers(
+                with_mbid=True, named_by=candidate
+            )
             matches = [x for x in library_composers if is_named_by(candidate, x)]
             # a name several composers share, such as "Strauss", stays as it is
             if len(matches) == 1:
@@ -2095,6 +2137,15 @@ class TracksController(MediaControllerBase[Track]):
             work.composers = UniqueList(replacements.get(x.name, x) for x in work.composers)
         track.artists = UniqueList(replacements.get(x.name, x) for x in track.artists)
         return set(replacements)
+
+    @staticmethod
+    def _recording_ids(track: Track) -> set[str]:
+        """Return the distinct MusicBrainz recording ids of a track."""
+        return {
+            normalize_external_id(ExternalID.MB_RECORDING, value)
+            for id_type, value in track.external_ids
+            if id_type == ExternalID.MB_RECORDING
+        }
 
     async def _remove_joined_artists(
         self, track: Track, work_id: int | None, joined_names: set[str], main_artists: bool

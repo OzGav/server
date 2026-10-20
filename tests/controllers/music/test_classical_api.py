@@ -55,6 +55,7 @@ from music_assistant.controllers.music.classical import (
     _performer_row,
     _recording_sort_key,
     _refined_roles,
+    _shown_credits,
     _title_work_type,
     _track_movements,
     _with_title_work_type,
@@ -1111,6 +1112,22 @@ def test_refined_roles(
 ) -> None:
     """The generic performer role and a wrong orchestra role are refined, never guessed."""
     assert _refined_roles(name, Counter(stored)) == Counter(expected)
+
+
+def test_credit_naming_a_task_keeps_its_role() -> None:
+    """A chorus master who conducts elsewhere is not shown as conductor for that task."""
+    artist = ItemMapping(media_type=MediaType.ARTIST, item_id="7", provider="library", name="A")
+    track_credits = [
+        Credit(artist=artist, role=ArtistRole.PERFORMER, instrument="chorus master"),
+        Credit(artist=artist, role=ArtistRole.PERFORMER),
+    ]
+
+    shown = _shown_credits(track_credits, {7: {ArtistRole.PERFORMER: ArtistRole.CONDUCTOR}})
+
+    assert [(x.role, x.instrument) for x in shown] == [
+        (ArtistRole.PERFORMER, "chorus master"),
+        (ArtistRole.CONDUCTOR, None),
+    ]
 
 
 @pytest.fixture(scope="class", name="parts_library")

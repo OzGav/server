@@ -41,6 +41,7 @@ CONF_AUDIO_QUALITY = "audio_quality"
 # Whether Spotify's own loudness normalization is used instead of MA's. Only
 # meaningful on the soloist backend: librespot hands over the untouched file.
 CONF_SPOTIFY_NORMALIZATION = "spotify_normalization"
+# TEMP(classical 5a Spotify re-read): remove before release
 # Hidden config marking that the library albums have been read again for their classical details
 CONF_CLASSICAL_REREAD_DONE = "classical_reread_v2_done"
 # The playback session registers under this name, so it shows up as a device in
@@ -99,4 +100,4 @@ SCOPE = [
 LIKED_SONGS_FAKE_PLAYLIST_ID_PREFIX = "liked_songs"
 # Bump when the parsed form of a cached album or track changes, so that old cache rows are
 # fetched again
-PARSED_ITEM_CACHE_CHECKSUM = "classical_v7"
+PARSED_ITEM_CACHE_CHECKSUM = "classical_v8"

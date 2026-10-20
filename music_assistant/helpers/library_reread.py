@@ -1,5 +1,7 @@
 """Helper to read a music provider's library albums again, for details it did not read before."""
 
+# TEMP(classical 5a Spotify re-read, 5b Qobuz re-read, 5c Tidal re-read): remove before release
+
 from __future__ import annotations
 
 import logging

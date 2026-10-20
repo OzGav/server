@@ -117,8 +117,9 @@ _ROMAN_NUMERALS = (
 )
 # a movement name such as "II. Andante" or "3 - Scherzo" starts with its number
 _MOVEMENT_NUMBER_PREFIX = re.compile(r"^([IVX]+|\d+)[.:\-\s]", re.IGNORECASE)
-# a performer credit such as "Martha Argerich (piano)" ends with the instrument or role
-_PERFORMER_ROLE_SUFFIX = re.compile(r"^(.+?)\s*\(([^()]*)\)$")
+# a performer credit such as "Martha Argerich (piano)" ends with the instrument or role,
+# which can hold parentheses of its own as in "Mick Fleetwood (drums (drum set))"
+_PERFORMER_ROLE_SUFFIX = re.compile(r"^(.+?)\s*\(((?:[^()]|\([^()]*\))*)\)$")
 
 
 def clean_tuple(values: Iterable[str]) -> tuple[str, ...]:
@@ -1465,7 +1466,9 @@ def _store_id3_classical_tags(
     if movement := _id3_get_tag_text(tags, "MVIN"):
         result["movement"] = movement[0]
     # ffprobe reports the conductor frame as performer, so this always replaces it
-    result["performer"], arrangers = _id3_get_people(tags)
+    performers, arrangers = _id3_get_people(tags)
+    # foobar2000 and Mp3tag write the performers to a TXXX PERFORMER frame instead
+    result["performer"] = performers or user_frames.get("performer", [])
     if arrangers:
         result["arranger"] = arrangers
     # Picard writes the work to TIT1 in ID3v2.3 and in its iTunes compatible style, where the

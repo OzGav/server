@@ -6,13 +6,14 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
-from music_assistant_models.enums import ArtistRole, MediaType
+from music_assistant_models.enums import ArtistRole, ExternalID, MediaType
 from music_assistant_models.errors import MediaNotFoundError, ResourceTemporarilyUnavailable
 from music_assistant_models.media_items import Album, Track, Work
 
 from music_assistant.constants import CLASSICAL_GENRE_NAME
 from music_assistant.providers.qobuz import (
     CONF_CLASSICAL_REREAD_DONE,
+    PARSED_ITEM_CACHE_CHECKSUM,
     SUPPORTED_FEATURES,
     QobuzProvider,
 )
@@ -560,6 +561,50 @@ async def test_album_tracks_are_read_with_their_album() -> None:
     provider._get_data.assert_awaited_once_with(
         "album/get", album_id="0002894790548", limit=500, offset=0
     )
+
+
+async def test_album_tracks_beyond_the_first_page_are_read_once() -> None:
+    """The rest of a long track listing is read from where the album's first page ends."""
+    provider = _make_provider()
+    first_page = [{"id": number} for number in range(500)]
+    rest = [{"id": number} for number in range(500, 600)]
+    album = {"id": "0002894790548", "tracks": {"items": first_page, "total": 600}}
+    provider._get_data = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[album, {"tracks": {"items": rest, "total": 600}}]
+    )
+
+    album_obj = await provider._get_album_with_tracks("0002894790548")
+
+    assert album_obj is not None
+    assert album_obj["tracks"]["items"] == first_page + rest
+    assert [call.kwargs["offset"] for call in provider._get_data.await_args_list] == [0, 500]
+
+
+class _CacheLookup(Exception):
+    """Stops a cached call at its cache lookup."""
+
+
+@pytest.mark.parametrize(
+    ("method", "external_id_type"),
+    [
+        ("get_track_by_external_id", ExternalID.ISRC),
+        ("get_album_by_external_id", ExternalID.BARCODE),
+    ],
+)
+async def test_items_found_by_external_id_are_cached_with_the_parse_checksum(
+    method: str, external_id_type: ExternalID
+) -> None:
+    """A parsing change drops the cached items found by their ISRC or barcode."""
+    lookup = AsyncMock(side_effect=_CacheLookup)
+    mass = MagicMock()
+    mass.cache.get_with_freshness = lookup
+    provider = _make_provider(mass)
+
+    with pytest.raises(_CacheLookup):
+        await getattr(provider, method)("DEF057401772", external_id_type)
+
+    assert lookup.await_args is not None
+    assert lookup.await_args.kwargs["checksum"] == PARSED_ITEM_CACHE_CHECKSUM
 
 
 async def test_reread_updates_a_classical_library_album_and_its_library_tracks() -> None:

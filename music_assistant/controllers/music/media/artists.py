@@ -12,6 +12,7 @@ from music_assistant_models.enums import (
     AlbumType,
     ArtistRole,
     ArtistType,
+    EventType,
     ExternalID,
     ImageType,
     ListingType,
@@ -1668,7 +1669,9 @@ class ArtistsController(MediaControllerBase[Artist]):
         """
         Merge the library artists carrying the given MusicBrainz artist id into the oldest.
 
-        Only artists of the same type merge, so an author and a singer are left apart.
+        Only artists of the same type merge, so an author and a singer are left apart. Works
+        of the merged artists that are then one work by their catalog numbers or names are
+        joined.
 
         :param artist_id: Library id of an artist carrying the MusicBrainz id.
         :param mbid: The MusicBrainz artist id.
@@ -1685,28 +1688,68 @@ class ArtistsController(MediaControllerBase[Artist]):
         target_id, *source_ids = sorted(
             {artist_id, *(item_id for item_id, t in artist_types.items() if t == artist_type)}
         )
+        merged = False
         for source_id in source_ids:
             with contextlib.suppress(MediaNotFoundError):  # already merged by a concurrent add
                 await self.merge_library_items(target_id, source_id)
+                merged = True
+        if merged:
+            await self.mass.music.works.join_catalogued_works(target_id)
+            await self.mass.music.works.join_same_named_works(target_id)
         return target_id
 
-    async def get_library_composers(self, with_mbid: bool) -> list[Artist]:
+    async def set_library_artist_name(self, item_id: int, name: str, sort_name: str) -> None:
+        """
+        Give a library artist a new name and sort name.
+
+        :param item_id: Library id of the artist.
+        :param name: The new name.
+        :param sort_name: The new sort name.
+        """
+        await self.mass.music.database.update(
+            self.db_table,
+            {"item_id": item_id},
+            {
+                "name": name,
+                "sort_name": sort_name,
+                "search_name": create_safe_string(name, True, True),
+                "search_sort_name": create_safe_string(sort_name, True, True),
+            },
+        )
+        library_item = await self.get_library_item(item_id)
+        self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+
+    async def get_library_composers(
+        self, with_mbid: bool, named_by: str | None = None
+    ) -> list[Artist]:
         """
         Return the library artists credited as composer on classical tracks.
 
         :param with_mbid: True for the composers with a MusicBrainz artist id, False for those
             without one.
+        :param named_by: Leave out the composers this name, such as "Chopin", cannot name.
         """
         classical_tracks = f"SELECT item_id FROM {DB_TABLE_TRACKS} WHERE is_classical = 1"
         has_mbid = has_musicbrainz_id(
             f"{DB_TABLE_ARTISTS}.item_id", MediaType.ARTIST, ExternalID.MB_ARTIST
         )
+        query_parts = [
+            f"{DB_TABLE_ARTISTS}.item_id IN ({track_composers_query(classical_tracks)})",
+            has_mbid if with_mbid else f"NOT {has_mbid}",
+        ]
+        query_params: dict[str, Any] = {}
+        if named_by is not None:
+            # every word of a name is part of the stored search name of an artist it names
+            words = create_safe_string(named_by.replace("-", " ")).split()
+            if not words:
+                return []
+            query_parts.append(
+                f"({DB_TABLE_ARTISTS}.search_name LIKE :named_by "
+                f"OR {DB_TABLE_ARTISTS}.search_sort_name LIKE :named_by)"
+            )
+            query_params["named_by"] = f"%{max(words, key=len)}%"
         return await self.get_library_items_by_query(
-            extra_query_parts=[
-                f"{DB_TABLE_ARTISTS}.item_id IN ({track_composers_query(classical_tracks)})",
-                has_mbid if with_mbid else f"NOT {has_mbid}",
-            ],
-            limit=0,
+            extra_query_parts=query_parts, extra_query_params=query_params, limit=0
         )
 
     def artist_from_item_mapping(self, item: ItemMapping) -> Artist:

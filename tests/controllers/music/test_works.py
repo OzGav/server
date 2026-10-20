@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock
@@ -434,6 +435,118 @@ async def test_numbered_piece_without_its_library_opus_is_a_work_of_its_own(
     assert track.movement_number is None
 
 
+@pytest.mark.parametrize("stored", [True, False], ids=["library_work", "no_library_work"])
+async def test_title_naming_no_work_joins_the_library_work_of_its_catalog_number(
+    mass: MusicAssistant, stored: bool
+) -> None:
+    """A track titled without a work joins the library work of its composer and catalog number."""
+    composer = await _add_artist(mass, "Johann Sebastian Bach")
+    work = (
+        await _add_work(mass, "Toccata and Fugue", [composer], catalog_numbers=["BWV 565"])
+        if stored
+        else None
+    )
+    before = await _library_work_ids(mass)
+
+    track = await mass.music.tracks.add_item_to_library(
+        Track(
+            item_id="0",
+            provider="library",
+            name="Toccata and Fugue in D Minor, BWV 565",
+            provider_mappings={_mapping()},
+            artists=UniqueList([await _add_artist(mass, "Organist")]),
+            credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)],
+        )
+    )
+
+    assert (track.work.item_id if track.work else None) == (work.item_id if work else None)
+    assert await _library_work_ids(mass) == before
+
+
+async def test_stored_track_naming_no_work_joins_a_later_library_work_on_update(
+    mass: MusicAssistant,
+) -> None:
+    """A stored track titled without a work joins the work of its catalog number once updated."""
+    composer = await _add_artist(mass, "Johann Sebastian Bach")
+    track = await mass.music.tracks.add_item_to_library(
+        Track(
+            item_id="0",
+            provider="library",
+            name="Toccata and Fugue in D Minor, BWV 565",
+            provider_mappings={_mapping()},
+            artists=UniqueList([await _add_artist(mass, "Organist")]),
+            credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)],
+        )
+    )
+    work = await _add_work(mass, "Toccata and Fugue", [composer], catalog_numbers=["BWV 565"])
+
+    updated = await mass.music.tracks.update_item_in_library(track.item_id, track)
+
+    assert updated.work is not None
+    assert updated.work.item_id == work.item_id
+
+
+@pytest.mark.parametrize(
+    ("title", "joins"),
+    [
+        ("Toccata and Fugue in D Minor, BWV 565", True),
+        ("Toccata and Fugue in C major, BWV 565", False),
+        ("Toccata and Fugue, BWV 566", False),
+    ],
+    ids=["same_catalog_number", "other_key", "other_catalog_number"],
+)
+async def test_stored_track_naming_no_work_joins_a_new_library_work(
+    mass: MusicAssistant, title: str, joins: bool
+) -> None:
+    """A stored track titled without a work joins a work added later for its catalog number."""
+    composer = await _add_artist(mass, "Johann Sebastian Bach")
+    track = await mass.music.tracks.add_item_to_library(
+        Track(
+            item_id="0",
+            provider="library",
+            name=title,
+            provider_mappings={_mapping()},
+            artists=UniqueList([await _add_artist(mass, "Organist")]),
+            credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)],
+        )
+    )
+
+    work = await _add_work(
+        mass, "Toccata and Fugue in D Minor, BWV 565", [composer], catalog_numbers=["BWV 565"]
+    )
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert (stored.work.item_id if stored.work else None) == (work.item_id if joins else None)
+
+
+async def test_works_naming_different_keys_stay_apart_on_their_catalog_number(
+    mass: MusicAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Titles sharing a catalog number but naming different keys stay apart, logged once."""
+    composer = await _add_artist(mass, "Johann Sebastian Bach")
+    works = mass.music.works
+    a_minor = await _add_work(
+        mass, "Violin Concerto in A Minor, BWV 1041", [composer], catalog_numbers=["BWV 1041"]
+    )
+    caplog.set_level(logging.INFO, logger=works.logger.name)
+    e_major = "Violin Concerto in E major, BWV 1041"
+
+    german_id = await works.get_catalogued_work_id("Violinkonzert a-Moll, BWV 1041", [composer])
+    track_ids = [await works.get_catalogued_work_id(e_major, [composer]) for _ in range(2)]
+    work = await _add_work(mass, e_major, [composer], catalog_numbers=["BWV 1041"])
+
+    assert german_id == int(a_minor.item_id)
+    assert track_ids == [None, None]
+    assert work.item_id != a_minor.item_id
+    assert [x.getMessage() for x in caplog.records if "different keys" in x.getMessage()] == [
+        'Titles "Violin Concerto in A Minor, BWV 1041" and "Violin Concerto in E major, '
+        'BWV 1041" share BWV 1041 but name different keys, so they are kept as separate works; '
+        "check which is right and link its recording to the correct work on MusicBrainz: "
+        "https://musicbrainz.org/search?type=recording"
+        "&query=Violin+Concerto+in+E+major%2C+BWV+1041"
+    ]
+
+
 async def test_update_with_overwrite_keeps_composers_without_new_ones(
     mass: MusicAssistant,
 ) -> None:
@@ -776,6 +889,7 @@ async def _add_part(mass: MusicAssistant, name: str, parent: Work, composer: Art
         ("Matthäus-Passion, BWV 244, Part 1", "St. Matthew Passion, BWV 244, Part I"),
         ("Messiah, HWV 56, Pt. 2", "The Messiah, Part II"),
         ("La bohème, Act II", "La Bohème, Act 2"),
+        ("The Nutcracker, Op. 71, Act II", "The Nutcracker, Act II, Scene 3, Op. 71, TH 14"),
         ("Matthäus-Passion, BWV 244, Anhang", "St. Matthew Passion, BWV 244, Anhang"),
     ],
 )
@@ -873,6 +987,26 @@ async def test_work_never_matches_other_catalog_numbers(
     assert added.item_id != stored.item_id
 
 
+@pytest.mark.parametrize(
+    ("stored_numbers", "added_numbers"),
+    [
+        (["Op. 8 No. 1", "RV 269"], ["RV 269"]),
+        (["Op. 8", "RV 269"], ["Op. 8 No. 1", "RV269"]),
+        (["Op. 20", "TH 12", "ČW 12"], ["Op. 20", "TH 12"]),
+    ],
+)
+async def test_work_matches_the_work_sharing_a_composer_catalog_number(
+    mass: MusicAssistant, stored_numbers: list[str], added_numbers: list[str]
+) -> None:
+    """A work matches the one top-level work by its composers sharing a non-opus number."""
+    composer = await _add_artist(mass, "Composer")
+    stored = await _add_work(mass, "Concerto", [composer], catalog_numbers=stored_numbers)
+
+    added = await _add_work(mass, "Violin Concerto", [composer], catalog_numbers=added_numbers)
+
+    assert added.item_id == stored.item_id
+
+
 async def test_catalog_match_needs_the_same_composer(mass: MusicAssistant) -> None:
     """A work never matches another composer's work with the same catalog numbers."""
     stored = await _add_work(
@@ -924,6 +1058,150 @@ async def test_catalog_match_skips_a_work_titled_as_a_part(mass: MusicAssistant)
     added = await _add_work(mass, "Le Lac des cygnes, Op. 20", [composer])
 
     assert added.item_id != part.item_id
+
+
+async def test_catalog_match_skips_a_work_titled_as_a_catalogued_part(
+    mass: MusicAssistant,
+) -> None:
+    """A work titled as a part after its catalog number never is the whole catalogued work."""
+    composer = await _add_artist(mass, "Composer")
+    whole = await _add_work(mass, "Messiah, HWV 56", [composer], catalog_numbers=["HWV 56"])
+
+    part = await _add_work(
+        mass,
+        'Messiah, HWV 56: Part II, no. 44. Chorus "Hallelujah"',
+        [composer],
+        catalog_numbers=["HWV 56"],
+    )
+    await mass.music.works.join_catalogued_works(int(composer.item_id))
+
+    assert part.item_id != whole.item_id
+    assert {whole.item_id, part.item_id} <= await _library_work_ids(mass)
+
+
+async def test_catalog_join_skips_a_work_titled_as_a_scene_of_an_act(
+    mass: MusicAssistant,
+) -> None:
+    """A work titled as a scene of an act is never joined to the whole catalogued work."""
+    composer = await _add_artist(mass, "Tchaikovsky")
+    works = mass.music.works
+    scene = await works.create_library_item(
+        _work(
+            "The Nutcracker, Act II, Scene 3, Op. 71, TH 14",
+            [composer],
+            catalog_numbers=["Op. 71", "TH 14"],
+        )
+    )
+    whole = await works.create_library_item(
+        _work("The Nutcracker, Op. 71", [composer], catalog_numbers=["TH 14", "ČW 14", "Op. 71"])
+    )
+
+    await works.join_catalogued_works(int(composer.item_id))
+
+    assert {scene.item_id, whole.item_id} <= await _library_work_ids(mass)
+
+
+async def test_works_sharing_a_composer_catalog_number_are_joined(mass: MusicAssistant) -> None:
+    """The works of a composer sharing a number of a composer catalog join into the oldest."""
+    composer = await _add_artist(mass, "Vivaldi")
+    # works the library keeps apart, as an add would have matched the first
+    spring = [
+        await mass.music.works.create_library_item(_work(name, [composer], catalog_numbers=numbers))
+        for name, numbers in (
+            ('Violin Concerto in E Major, Op. 8 No. 1, RV 269 "Spring"', ["Op. 8 No. 1", "RV 269"]),
+            ('Violin Concerto No. 1 in E Major, RV 269 "Spring"', ["RV 269"]),
+            ('Concerto No. 1 in E major, Op. 8, RV 269 "La primavera"', ["Op. 8", "RV 269"]),
+        )
+    ]
+    summer = await mass.music.works.create_library_item(
+        _work(
+            'Concerto No. 2 in G minor, Op. 8, RV 315 "Summer"',
+            [composer],
+            catalog_numbers=["Op. 8", "RV 315"],
+        )
+    )
+
+    await mass.music.works.join_catalogued_works(int(composer.item_id))
+
+    remaining = await _library_work_ids(mass)
+    assert spring[0].item_id in remaining
+    assert not remaining & {spring[1].item_id, spring[2].item_id}
+    assert summer.item_id in remaining
+
+
+async def test_joined_works_join_their_same_parts(mass: MusicAssistant) -> None:
+    """The same act of two works joined on their catalog number becomes one part."""
+    composer = await _add_artist(mass, "Tchaikovsky")
+    works = mass.music.works
+    first = await works.create_library_item(
+        _work("Swan Lake, Op. 20", [composer], catalog_numbers=["Op. 20", "TH 12", "ČW 12"])
+    )
+    second = await works.create_library_item(
+        _work("Swan Lake, Op. 20, TH 12", [composer], catalog_numbers=["Op. 20", "TH 12"])
+    )
+    act_two = await _add_part(mass, "Swan Lake, Op. 20, Act II", first, composer)
+    other_act_two = await works.create_library_item(
+        _work(
+            "Swan Lake, Act II, Op. 20, TH 12",
+            [composer],
+            parent_work=ItemMapping.from_item(second),
+        )
+    )
+
+    await works.join_catalogued_works(int(composer.item_id))
+
+    remaining = await _library_work_ids(mass)
+    assert second.item_id not in remaining
+    assert act_two.item_id in remaining
+    assert other_act_two.item_id not in remaining
+
+
+async def test_joined_composers_join_their_works_of_one_name(mass: MusicAssistant) -> None:
+    """Works of two composers found to be one join when adding them would match by name."""
+    mbid = _mbid()
+    mahler, other_mahler = [await _add_artist(mass, "Mahler") for _ in range(2)]
+    symphony = await _add_work(mass, 'Symphony No. 1 in D Major "Titan"', [mahler])
+    other_symphony = await _add_work(
+        mass,
+        'Symphony no. 1 in D major "Titan"',
+        [other_mahler],
+        _mbid(),
+        catalog_numbers=["GMW 11"],
+    )
+    other_work = await _add_work(mass, "Symphony No. 2", [other_mahler])
+    for artist in (mahler, other_mahler):
+        artist.external_ids = {(ExternalID.MB_ARTIST, mbid)}
+        await mass.music.artists.update_item_in_library(artist.item_id, artist)
+
+    await mass.music.artists.merge_library_artists_by_mbid(int(other_mahler.item_id), mbid)
+
+    remaining = await _library_work_ids(mass)
+    assert len(remaining & {symphony.item_id, other_symphony.item_id}) == 1
+    assert other_work.item_id in remaining
+
+
+async def test_joined_composers_join_their_works_of_one_catalog_number(
+    mass: MusicAssistant,
+) -> None:
+    """Works of two composers found to be one join when their catalog numbers are the same."""
+    mbid = _mbid()
+    bach, other_bach = [await _add_artist(mass, "Bach") for _ in range(2)]
+    suite = await _add_work(
+        mass, "Orchestral Suite No. 3 in D Major", [bach], catalog_numbers=["BWV 1068"]
+    )
+    other_suite, other_work = [
+        await _add_work(mass, name, [other_bach], catalog_numbers=[number])
+        for name, number in (("Orchestersuite Nr. 3 D-Dur", "BWV 1068"), ("Air", "BWV 1069"))
+    ]
+    for artist in (bach, other_bach):
+        artist.external_ids = {(ExternalID.MB_ARTIST, mbid)}
+        await mass.music.artists.update_item_in_library(artist.item_id, artist)
+
+    await mass.music.artists.merge_library_artists_by_mbid(int(other_bach.item_id), mbid)
+
+    remaining = await _library_work_ids(mass)
+    assert len(remaining & {suite.item_id, other_suite.item_id}) == 1
+    assert other_work.item_id in remaining
 
 
 async def test_provider_works_in_two_languages_share_their_work_and_parts(

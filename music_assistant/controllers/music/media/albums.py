@@ -736,7 +736,8 @@ class AlbumsController(MediaControllerBase[Album]):
         ]
         async with self.mass.music.database.deferred_commit():
             if release is not None:
-                await self._link_tracks_to_release(db_tracks, release)
+                merged = await self._link_tracks_to_release(db_tracks, release)
+                db_tracks = [x for x in db_tracks if x.item_id not in merged]
             if not link_providers:
                 return
             for domain, mapping in album_mappings.items():
@@ -1101,17 +1102,29 @@ class AlbumsController(MediaControllerBase[Album]):
             return False
         return True
 
+    def _is_musicbrainz_duplicate(self, db_item: Album, holder: Album) -> bool:
+        """Return True if the album holding a linked album is not identified as another release."""
+        # an identified album is the release whose links are being added
+        return bool(db_item.mbid) and holder.mbid in (None, db_item.mbid)
+
     async def _link_tracks_to_release(
         self, db_tracks: Sequence[Track], release: MusicBrainzRelease
-    ) -> None:
-        """Fill the recording ids and ISRCs of a release in on the library tracks at its positions."""
+    ) -> set[str]:
+        """
+        Fill the recording ids and ISRCs of a release in on the library tracks at its positions.
+
+        :return: The library ids of the tracks merged into another one of the tracks.
+        """
         recordings = {
             (medium.position, track.position): track.recording
             for medium in release.media
             for track in medium.tracks
             if track.position and track.recording
         }
+        merged: set[str] = set()
         for db_track in db_tracks:
+            if db_track.item_id in merged:
+                continue
             # a digital release stores its single disc as disc 0 or 1
             recording = recordings.get((db_track.disc_number or 1, db_track.track_number))
             if recording is None or not _recording_matches_track(recording, db_track):
@@ -1120,7 +1133,9 @@ class AlbumsController(MediaControllerBase[Album]):
             if not changed and db_track.metadata.last_musicbrainz_lookup is not None:
                 continue
             db_track.metadata.last_musicbrainz_lookup = int(time())
+            merged |= await self.mass.music.tracks.merge_recording_duplicates(db_track)
             await self.mass.music.tracks.update_item_in_library(db_track.item_id, db_track)
+        return merged
 
     async def _link_tracks_to_provider_album(
         self, db_tracks: Sequence[Track], mapping: ProviderMapping

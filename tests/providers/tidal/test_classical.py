@@ -238,6 +238,14 @@ LOVER_TRACK = _Track(
         ("Vocalist", TAYLOR_SWIFT, None),
     ],
 )
+# a pop track with a "Work: Piece" like title and a songwriter credit
+INTERLUDE_TRACK = _Track(
+    "116125898",
+    "Interlude: Reprise",
+    [TAYLOR_SWIFT],
+    [POP],
+    [("Composer", TAYLOR_SWIFT, None), ("Vocalist", TAYLOR_SWIFT, None)],
+)
 MARLEY_TRACK = _Track(
     "574875",
     "Get Up, Stand Up",
@@ -415,7 +423,11 @@ async def test_placeholder_composer_gives_no_credit_and_keeps_its_role(
     assert track.metadata.performers == {"dr, Composer"}
 
 
-@pytest.mark.parametrize("track", [LOVER_TRACK, MARLEY_TRACK], ids=["taylor-swift", "bob-marley"])
+@pytest.mark.parametrize(
+    "track",
+    [LOVER_TRACK, MARLEY_TRACK, INTERLUDE_TRACK],
+    ids=["taylor-swift", "bob-marley", "colon-title"],
+)
 async def test_pop_tracks_keep_their_credit_names_only(
     track: _Track, media_manager: TidalMediaManager, provider_mock: Mock
 ) -> None:
@@ -466,9 +478,16 @@ async def test_reread_updates_a_classical_library_album_and_its_library_tracks(
     )
     provider.api.paginate_jsonapi = _pages_of([KLEIBER_TRACKS])  # type: ignore[method-assign]
     provider._update_config_value = MagicMock()  # type: ignore[method-assign]
+    # the cached album calls, so what the re-read fetches is kept for later
+    provider.get_album = AsyncMock(side_effect=provider.media.get_album)  # type: ignore[method-assign]
+    provider.get_album_tracks = AsyncMock(  # type: ignore[method-assign]
+        side_effect=provider.media.get_album_tracks
+    )
 
     await provider._reread_library_albums()
 
+    provider.get_album.assert_awaited_once_with("17626399")
+    provider.get_album_tracks.assert_awaited_once_with("17626399")
     [(album_args, _)] = mass.music.albums.update_item_in_library.await_args_list
     assert album_args[0] == 7
     mass.music.genres.sync_media_item_genres.assert_awaited_once_with(
@@ -490,6 +509,7 @@ async def test_reread_leaves_pop_albums_alone(provider: TidalProvider, mass: Mag
     )
     provider.api.paginate_jsonapi = MagicMock()  # type: ignore[method-assign]
     provider._update_config_value = MagicMock()  # type: ignore[method-assign]
+    provider.get_album = AsyncMock(side_effect=provider.media.get_album)  # type: ignore[method-assign]
 
     await provider._reread_library_albums()
 

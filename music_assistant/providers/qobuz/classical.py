@@ -6,15 +6,14 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from music_assistant_models.helpers import create_safe_string
-from music_assistant_models.media_items import Credit
 
 from music_assistant.helpers.compare import compare_strings
 from music_assistant.helpers.credit_roles import (
     NO_ROLE,
     is_known_role,
     is_performing_role,
-    role_credits,
     role_word,
+    track_role_credits,
 )
 from music_assistant.helpers.util import is_placeholder_artist
 from music_assistant.helpers.work_titles import TrackWork, parse_work_title, work_with_movement
@@ -22,7 +21,7 @@ from music_assistant.helpers.work_titles import TrackWork, parse_work_title, wor
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from music_assistant_models.media_items import Artist, ItemMapping
+    from music_assistant_models.media_items import Artist, Credit, ItemMapping
 
 # the Qobuz genre of classical music, which the path of every classical sub-genre starts with
 CLASSICAL_GENRE_ID = 10
@@ -106,10 +105,57 @@ def track_credits(
         # an album artist credited with a performing role on the album performs on every track
         if performing_roles := [x for x in roles if is_performing_role(x)]:
             roles_by_artist.setdefault(key, []).extend(performing_roles)
-    main_artist_keys = {artist_key(x.name) for x in main_artists}
     for main_artist in main_artists:
         artists[artist_key(main_artist.name)] = main_artist
         roles_by_artist.setdefault(artist_key(main_artist.name), [])
+    joined = _joined_names(main_artists, names, roles_by_artist)
+
+    def credited_artist(key: str) -> Artist | ItemMapping | None:
+        if key in joined:
+            return None
+        if key not in artists:
+            # an artist named without an id or any role may well be another credit's artist
+            # under another name, as "Wiener Philharmoniker" next to the album's "Wiener
+            # Philharmonic Orchestra"
+            if key not in names or all(x == NO_ROLE for x in roles_by_artist[key]):
+                return None
+            artists[key] = named_artist(names[key])
+        return artists[key]
+
+    return track_role_credits(
+        roles_by_artist, {artist_key(x.name) for x in main_artists}, credited_artist
+    )
+
+
+def track_work(title: str, work: str | None, composer: str | None) -> TrackWork | None:
+    """
+    Return the work and movement of a classical Qobuz track, from its title or else its work.
+
+    :param title: The title of the track, such as "I. Allegro con brio".
+    :param work: The work Qobuz gives for the track, such as "Symphony No. 5 in C minor, Op. 67".
+    :param composer: The name of the track's composer.
+    """
+    # a title naming its work names it the way the album's other titles do, which may differ
+    # from the work Qobuz gives ("Goldberg-Variationen BWV 988")
+    if title_work := parse_work_title(title, composer, classical=True):
+        return title_work
+    if not work or not (work := work.strip()):
+        return None
+    # a track that is a whole work has the work as its title
+    return work_with_movement(work, None if compare_strings(title, work) else title)
+
+
+def artist_key(name: str) -> str:
+    """Return the key two names of one artist share, ignoring case and diacritics."""
+    return create_safe_string(name, True, True)
+
+
+def _joined_names(
+    main_artists: Sequence[Artist | ItemMapping],
+    names: Mapping[str, str],
+    roles_by_artist: Mapping[str, list[str]],
+) -> set[str]:
+    """Return the keys of the joined names of several artists, which get no credit of their own."""
     # Qobuz joins the main artists into one artist ("Ernest Bour, Orchestra X"), which needs no
     # credit of its own when the performers string names each of them
     joined = {
@@ -124,52 +170,7 @@ def track_credits(
         for key in (artist_key(x.name) for x in main_artists if ", " in x.name)
         if any(", " in name and x != key and x.startswith(key) for x, name in names.items())
     )
-    # a director leads the performance, unless the track names a conductor as well
-    has_conductor = any(
-        role_word(x) == "conductor" for roles in roles_by_artist.values() for x in roles
-    )
-    result: list[Credit] = []
-    for key, roles in roles_by_artist.items():
-        # an artist named without an id or any role may well be another credit's artist under
-        # another name, as "Wiener Philharmoniker" next to the album's "Wiener Philharmonic
-        # Orchestra"
-        if key in joined or (
-            key not in artists and (key not in names or all(x == NO_ROLE for x in roles))
-        ):
-            continue
-        # a composer is a performer as well only when the performers string says so
-        is_main_artist = key in main_artist_keys and all(role_word(x) != "composer" for x in roles)
-        for role, instrument in role_credits(roles, has_conductor, is_main_artist):
-            if not (credited := artists.get(key)):
-                credited = artists[key] = named_artist(names[key])
-            position = sum(x.role == role for x in result)
-            result.append(
-                Credit(artist=credited, role=role, instrument=instrument, position=position)
-            )
-    return result
-
-
-def track_work(title: str, work: str | None, composer: str | None) -> TrackWork | None:
-    """
-    Return the work and movement of a Qobuz track, from its title or else its work.
-
-    :param title: The title of the track, such as "I. Allegro con brio".
-    :param work: The work Qobuz gives for the track, such as "Symphony No. 5 in C minor, Op. 67".
-    :param composer: The name of the track's composer.
-    """
-    # a title naming its work names it the way the album's other titles do, which may differ
-    # from the work Qobuz gives ("Goldberg-Variationen BWV 988")
-    if title_work := parse_work_title(title, composer):
-        return title_work
-    if not work or not (work := work.strip()):
-        return None
-    # a track that is a whole work has the work as its title
-    return work_with_movement(work, None if compare_strings(title, work) else title)
-
-
-def artist_key(name: str) -> str:
-    """Return the key two names of one artist share, ignoring case and diacritics."""
-    return create_safe_string(name, True, True)
+    return joined
 
 
 def _drop_respelled_composer(roles_by_artist: dict[str, list[str]], composer_key: str) -> None:

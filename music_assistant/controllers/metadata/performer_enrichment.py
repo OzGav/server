@@ -8,9 +8,10 @@ was recorded and the ids of the works it is a performance of. A credited artist 
 on the recording by its name, its MusicBrainz id, or the music provider artist MusicBrainz
 links it to. A track whose only performers are its track artists gets their exact performing
 roles. Credits are never renamed, changed or removed, and a performer the track does not
-credit is only added to a track that credits no artist but its composers. Such a track gets
-the performers the recording names, taken from the library's own artists or added to the
-library when MusicBrainz links them to a loaded music provider.
+credit is only added to a track that credits no artist but its composers, or when an album's
+metadata update is forced. Such a track gets the performers the recording names that it does
+not credit yet, taken from the library's own artists or added to the library when MusicBrainz
+links them to a loaded music provider.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from music_assistant.controllers.music.helpers import provider_mappings_from_url
 from music_assistant.helpers.compare import compare_strings
 from music_assistant.providers.musicbrainz.provider import relation_urls
 
-from .constants import MUSICBRAINZ_LINK_DOMAINS
+from .constants import MUSICBRAINZ_LINK_DOMAINS, REFRESH_INTERVAL
 
 if TYPE_CHECKING:
     import logging
@@ -77,10 +78,18 @@ class PerformerEnrichmentMixin:
 
         async def _match_library_artist(self, mb_artist: MusicBrainzArtist) -> Artist | None: ...
 
-        async def _add_musicbrainz_artist(self, mb_artist: MusicBrainzArtist) -> Artist | None: ...
+        async def _add_musicbrainz_artist(
+            self, mb_artist: MusicBrainzArtist, album: Album | None = None, fresh: bool = False
+        ) -> Artist | None: ...
 
-    async def _link_album_performers(self, album: Album) -> bool:
-        """Read the recordings of an album's classical tracks, return whether it could."""
+    async def _link_album_performers(self, album: Album, reread: bool = False) -> bool:
+        """
+        Read the recordings of an album's classical tracks, return whether it could.
+
+        :param album: The library album.
+        :param reread: Read all its classical tracks again with fresh MusicBrainz data and credit
+            the performers each still misses.
+        """
         if not (musicbrainz := self._musicbrainz_provider()):
             return False
         if not album.mbid:
@@ -88,12 +97,13 @@ class PerformerEnrichmentMixin:
         tracks = [
             track
             for track in await self.mass.music.albums.get_library_album_tracks(album.item_id)
-            if _recording_due(track)
+            if _recording_due(track) or (reread and track.is_classical and track.mbid)
         ]
         if not tracks:
             return True
         try:
-            release = await musicbrainz.get_release_details(album.mbid)
+            async with self.mass.cache.handle_refresh(reread):
+                release = await musicbrainz.get_release_details(album.mbid, with_performers=True)
         except InvalidDataError:
             recordings = {}
         else:
@@ -106,7 +116,7 @@ class PerformerEnrichmentMixin:
                     return False
                 # a track not on the album's release is looked up on its own
                 recording = await _get_recording(musicbrainz, track.mbid)
-            await self._apply_recording(track.item_id, recording)
+            await self._apply_recording(track.item_id, recording, album, reread)
         return True
 
     async def _link_track_performers(self, track: Track) -> bool:
@@ -119,8 +129,21 @@ class PerformerEnrichmentMixin:
             )
         return True
 
-    async def _apply_recording(self, track_id: str, recording: MusicBrainzRecording | None) -> None:
-        """Identify a track's credited performers on its recording and store its recording year."""
+    async def _apply_recording(
+        self,
+        track_id: str,
+        recording: MusicBrainzRecording | None,
+        album: Album | None = None,
+        reread: bool = False,
+    ) -> None:
+        """
+        Identify a track's credited performers on its recording and store its recording year.
+
+        :param track_id: Library id of the track.
+        :param recording: The track's MusicBrainz recording, None when MusicBrainz lacks it.
+        :param album: The album the track is read through, named when a performer is not added.
+        :param reread: Credit the performers the track still misses with fresh MusicBrainz data.
+        """
         # read again, as identifying the album's earlier tracks may have merged its artists
         track = await self.mass.music.tracks.get_library_item(track_id)
         if recording:
@@ -149,7 +172,7 @@ class PerformerEnrichmentMixin:
                 if credit.role == ArtistRole.MAIN_ARTIST:
                     main_artists[credit.artist.item_id] = (artist, naming)
             await self._credit_performing_main_artists(track, main_artists)
-            await self._credit_recording_performers(track, relations)
+            await self._credit_recording_performers(track, relations, album, reread)
         await self._mark_recording_read(
             int(track.item_id), recording.recording_year if recording else None
         )
@@ -291,23 +314,41 @@ class PerformerEnrichmentMixin:
         await self.mass.music.tracks.add_credits(int(track.item_id), new_credits)
 
     async def _credit_recording_performers(
-        self, track: Track, relations: Sequence[MusicBrainzRelation]
+        self,
+        track: Track,
+        relations: Sequence[MusicBrainzRelation],
+        album: Album | None = None,
+        reread: bool = False,
     ) -> None:
-        """Credit a track naming no artist but its composers with its recording's performers."""
+        """
+        Credit a track naming no artist but its composers with its recording's performers.
+
+        :param track: The library track.
+        :param relations: The performing relations of the track's recording.
+        :param album: The album the track is read through, named when a performer is not added.
+        :param reread: Also credit a track naming performers, with the ones it does not name yet.
+        """
         composers = {x.artist.item_id for x in track.credits if x.role == ArtistRole.COMPOSER}
-        if any(
-            credit.role in PERFORMING_ROLES
-            or (credit.role == ArtistRole.MAIN_ARTIST and credit.artist.item_id not in composers)
+        performers = [
+            credit
             for credit in track.credits
-        ):
+            if credit.role in PERFORMING_ROLES
+            or (credit.role == ArtistRole.MAIN_ARTIST and credit.artist.item_id not in composers)
+        ]
+        if performers and not reread:
             return
+        credited = {x.artist.item_id for x in performers}
+        # the added performers follow the credits the track has
+        start = max((x.position for x in track.credits), default=-1) + 1 if performers else 0
         new_credits: list[Credit] = []
-        for position, relation in enumerate(relations):
+        for position, relation in enumerate(relations, start):
             assert relation.artist is not None  # for type checking
             assert relation.performing_role is not None  # for type checking
+            if any(_names_artist(relation, x.artist.name) for x in performers):
+                continue
             if not (artist := await self._match_library_artist(relation.artist)):
-                artist = await self._add_musicbrainz_artist(relation.artist)
-            if artist:
+                artist = await self._add_musicbrainz_artist(relation.artist, album, reread)
+            if artist and artist.item_id not in credited:
                 new_credits.append(
                     Credit(
                         artist=ItemMapping.from_item(artist),
@@ -340,11 +381,22 @@ async def _get_recording(
 
 
 def _recording_due(track: Track) -> bool:
-    """Return whether a library track is a classical track whose recording is still to be read."""
+    """
+    Return whether a library track is a classical track whose recording is due a read.
+
+    A recording read before is due again once stale while the track still has no performer credit.
+    """
+    last_lookup = track.metadata.last_musicbrainz_recording_lookup
     return (
         track.is_classical
         and track.mbid is not None
-        and track.metadata.last_musicbrainz_recording_lookup is None
+        and (
+            last_lookup is None
+            or (
+                last_lookup < time() - REFRESH_INTERVAL
+                and not any(x.role in PERFORMING_ROLES for x in track.credits)
+            )
+        )
     )
 
 

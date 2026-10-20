@@ -36,7 +36,7 @@ from music_assistant_models.media_items import (
 from music_assistant.constants import DB_TABLE_ALBUMS
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.constants import (
-    COMPOSER_LOOKUP_RETRY_INTERVAL,
+    ARTIST_LOOKUP_RETRY_INTERVAL,
     CONF_COMPOSER_COUNTRIES_DONE,  # TEMP(classical 6a country catch-up)
     CONF_LINK_PROVIDERS_VIA_MUSICBRAINZ,
     CONF_MUSICBRAINZ_LINKED_DOMAINS,
@@ -51,6 +51,7 @@ from music_assistant.controllers.metadata.controller import (
     _albums_with_recordings_to_read_query,
     _artists_to_identify_query,
     _composers_to_identify_query,
+    _performers_to_identify_query,
     _relink_query,
     _tracks_to_identify_query,
     _tracks_with_recording_to_read_query,
@@ -129,6 +130,7 @@ def _controller(
     ctrl = MetaDataController.__new__(MetaDataController)
     ctrl._corrupt_metadata_rows = {}
     ctrl._musicbrainz_link_summary = None
+    ctrl._logged_hints = set()
     ctrl.logger = Mock()
     ctrl.config = Mock()
     ctrl.config.get_value = lambda key, default=None: (
@@ -210,6 +212,9 @@ def _queue(
             if kwargs["extra_query_parts"][0] == _composers_to_identify_query():
                 queried.append("composers")
                 return []
+            if kwargs["extra_query_parts"][0] == _performers_to_identify_query():
+                queried.append("performers")
+                return []
             if "domain" in params:
                 queried.append(f"relink {name} {params['domain']}")
                 return list(relink_items)[: kwargs["limit"]]
@@ -266,7 +271,7 @@ def _provider_instances(loaded: Sequence[str] = (), unavailable: Sequence[str] =
 
 
 async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
-    """Albums, artists, tracks, works and composers are selected by their queries, newest first."""
+    """Each phase selects its items by its own query, newest first."""
     ctrl = _controller()
     queried = _queue(ctrl)
 
@@ -279,6 +284,7 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
         "tracks",
         "works",
         "composers",
+        "performers",
         "albums performers",
         "tracks performers",
     ]
@@ -291,10 +297,15 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
         (
             music.artists,
             _composers_to_identify_query(),
-            {"stale": NOW - COMPOSER_LOOKUP_RETRY_INTERVAL},
+            {"stale": NOW - ARTIST_LOOKUP_RETRY_INTERVAL},
         ),
-        (music.albums, _albums_with_recordings_to_read_query(), {}),
-        (music.tracks, _tracks_with_recording_to_read_query(), {}),
+        (
+            music.artists,
+            _performers_to_identify_query(),
+            {"stale": NOW - ARTIST_LOOKUP_RETRY_INTERVAL},
+        ),
+        (music.albums, _albums_with_recordings_to_read_query(), {"stale": NOW - REFRESH_INTERVAL}),
+        (music.tracks, _tracks_with_recording_to_read_query(), {"stale": NOW - REFRESH_INTERVAL}),
     ):
         controller.get_library_items_by_query.assert_any_await(
             limit=MUSICBRAINZ_LINK_BATCH_SIZE,
@@ -521,6 +532,7 @@ async def test_link_run_relinks_for_a_provider_loaded_since_the_previous_run() -
         "relink artists tidal",
         "works",
         "composers",
+        "performers",
         "albums performers",
         "tracks performers",
     ]
@@ -720,17 +732,20 @@ async def test_link_item_hands_a_work_to_the_work_step() -> None:
 async def test_diagnostics_report_the_last_run_and_the_pending_counts() -> None:
     """Diagnostics carry the last run summary and how many items each phase still has."""
     ctrl = _controller()
-    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[7, 6, 5, 4, 3, 2, 1])
+    _mass(ctrl).music.database.get_count_from_query = AsyncMock(
+        side_effect=[8, 7, 6, 5, 4, 3, 2, 1]
+    )
 
     assert await ctrl.get_diagnostics() == {
         "musicbrainz_link": {
             "last_run": None,
             "pending": {
-                "albums": 7,
-                "artists": 6,
-                "tracks": 5,
-                "works": 4,
-                "composers": 3,
+                "albums": 8,
+                "artists": 7,
+                "tracks": 6,
+                "works": 5,
+                "composers": 4,
+                "performers": 3,
                 "album performers": 2,
                 "track performers": 1,
             },
@@ -944,6 +959,7 @@ async def test_link_run_selects_albums_by_their_lookup_marker(mass: MusicAssista
             "tracks": 0,
             "works": 0,
             "composers": 0,
+            "performers": 0,
             "album performers": 0,
             "track performers": 0,
         },

@@ -68,21 +68,69 @@ _PIECE_NUMBER = re.compile(r",?\s(?:[Nn]o\.|[Nn]r\.|[Nn]°)\s?(\d+)$")
 # or straight by the quoted text of an aria ('La Bohème, Act I:"Che gelida manina"'), so
 # catalog numbers such as "Hob. I:94" are never split
 _WORK_SEPARATOR = re.compile(r':(?:\s+|(?=["“]))')
+# a catalog number followed by the part of its work, as in MusicBrainz's "Messiah, HWV 56:
+# Part II, no. 44. Chorus"
+_CATALOGUED_PART = re.compile(
+    rf"(?:{_CATALOG_NUMBER.pattern})(?P<separator>{_WORK_SEPARATOR.pattern})(?=\S)"
+)
 # the words naming an act or part of a work, the numbered ones with the kind of part they name
 _NUMBERED_PART_WORDS = {"Act": "act", "Part": "part", "Pt.": "part"}
 _UNNUMBERED_PART_WORDS = ("Anhang", "Appendix")
-# an act or part closing a work title, only followed by catalog numbers, such as
-# "La bohème, Act II", "Messiah, HWV 56, Pt. 2", "Swan Lake, Act II, Op. 20, TH 12" or
-# "La bohème, SC 67 / Act 1"
+# an act or part closing a work title, only followed by a scene of the act and catalog
+# numbers, such as "La bohème, Act II", "Messiah, HWV 56, Pt. 2", "Swan Lake, Act II, Op. 20,
+# TH 12", "The Nutcracker, Act II, Scene 3, Op. 71" or "La bohème, SC 67 / Act 1"
 _ACT_OR_PART = re.compile(
     rf"^(?P<work>.+)(?:, | / )(?:(?P<word>{'|'.join(map(re.escape, _NUMBERED_PART_WORDS))}) "
-    rf"(?P<number>[IVX]+|\d+)|(?P<label>{'|'.join(_UNNUMBERED_PART_WORDS)}))"
+    rf"(?P<number>[IVX]+|\d+)(?:, Scene (?:[IVX]+|\d+))?"
+    rf"|(?P<label>{'|'.join(_UNNUMBERED_PART_WORDS)}))"
     rf"(?P<catalog>(?:, {_CATALOG_NUMBER.pattern})*)$"
+)
+# an act or part opening the text after a work, as in "Act 1, No. 2 Waltz"
+_LEADING_PART = re.compile(
+    rf"^(?P<part>(?:{'|'.join(map(re.escape, _NUMBERED_PART_WORDS))}) (?:[IVX]+|\d+))(?:, |: )"
 )
 # a name starting with a word and a number, such as "Variation No. 1", "Var. 1" or "Act II"
 _WORD_AND_NUMBER = re.compile(r"^([^\W\d_]{3,})\.?\s+(?:(?i:no|nr)\.?\s*|n°\s*)?(\d+|[IVX]+)\b")
 # a work and its numbered movement joined by a dash, as in "Miserere - 01. Miserere Mei, Deus"
 _DASHED_MOVEMENT = re.compile(r"^(.+?) - ((?:No\.\s)?(?:\d+[a-z]?|[IVX]+)\.\s.+)$")
+# a numbered piece after a comma or dash, as in "Erster Teil, 9a. Evangelista" or "Miserere -
+# 01. Miserere Mei", whose own text may hold a colon
+_NUMBERED_PIECE_WITHIN = re.compile(r"(?:, | - )\d+[a-z]?\.\s")
+# an act or part of a work after a comma or slash, as in "La bohème, Act II, Scene 1"
+_WORK_PART = re.compile(
+    rf"(?:, | / )(?:{'|'.join(map(re.escape, _NUMBERED_PART_WORDS))}) (?:[IVX]+|\d+)\b"
+)
+# the words naming a classical form, in English, German, French and Italian, where a word
+# German joins to an instrument also counts at the end of a word, as in "Klaviersonate"
+_FORM_WORD = re.compile(
+    r"\b(?:symphony|symphonies|symphonie|symphonien|sinfonia|sinfonie|sinfonien|sinfonietta"
+    r"|concerto|concertos|concerti|concertino|mass|missa|messe|requiem|suite|suites"
+    r"|prelude|preludes|prélude|préludes|präludium|präludien|preludio|fugue|fugues|fuga|fuge"
+    r"|fugen|overture|overtures|ouverture|ouvertüre|cantata|cantatas|kantate|kantaten"
+    r"|oratorio|oratorium|motet|motets|motette|madrigal|madrigals|madrigale|madrigali"
+    r"|partita|partitas|etude|etudes|étude|études|etüde|etüden|nocturne|nocturnes|notturno"
+    r"|variation|variations|variationen|variazioni|fantasia|fantasie"
+    r"|\w*(?:sonata|sonatas|sonate|sonaten|sonatina|quartet|quartets|quartett|quartette"
+    r"|quartetto|quatuor|quintet|quintets|quintett|quintetto|konzert|konzerte))\b",
+    re.IGNORECASE,
+)
+# the key an English title names, such as "in A minor", "in E-flat major" or "in B♭ major"
+_ENGLISH_KEY = re.compile(
+    r"\bin ([A-G])(?:[\s-](flat|sharp)|(♭|♯|#|b))?[\s-](major|minor)\b", re.IGNORECASE
+)
+# the key a German title names, such as "a-Moll", "Es-Dur" or "fis-Moll"
+_GERMAN_KEY = re.compile(r"\b([A-H])(is|es|s)?-(dur|moll)\b", re.IGNORECASE)
+# a chapter or episode of an audiobook or radio play, such as "Kapitel 1" or "Folge 5"
+_CHAPTER = re.compile(
+    r"(?:chapter|kapitel|teil|folge|part|episode)\s+(?:(?:no|nr)\.?\s*)?"
+    r"(?:\d+(?:\.\d+)*|[ivxlc]+)\.?",
+    re.IGNORECASE,
+)
+# a chapter or episode numbered before its word, such as "1. Kapitel" or "Nr. 3. Folge"
+_NUMBERED_CHAPTER = re.compile(
+    r"(?:(?:no|nr)\.?\s*)?(?:\d+|[ivxlc]+)\.\s*(?:chapter|kapitel|folge|episode)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -110,21 +158,31 @@ def split_movement_title(title: str) -> TrackWork | None:
     return None
 
 
-def parse_work_title(title: str, composer: str | None = None) -> TrackWork | None:
+def parse_work_title(
+    title: str, composer: str | None = None, classical: bool = False
+) -> TrackWork | None:
     """
     Return the work a "Work: Piece" title names, or None for any other title.
 
-    The text after the last colon is the movement, numbered when it starts with a numeral. A
-    leading segment naming the composer is left out of the work, and a work that is an act or
-    part, such as "La bohème, Act II", comes with the work it is part of. In a "Composer: Work -
+    The text after the last colon is the movement, numbered when it starts with a numeral, but
+    a work ends at a catalog number followed by a colon, as in "Swan Lake, Op. 20: Act 1, No. 2
+    Waltz: Tempo di valse", and an act or part opening the rest is part of the work. A leading
+    segment naming the composer is left out of the work, and a work that is an act or part,
+    such as "La bohème, Act II", comes with the work it is part of. In a "Composer: Work -
     1. Movement" title the leading segment is the composer, returned as the other composer
     when it is not the given one.
 
+    A title of a track not known to be classical names a work only when it also has a catalog
+    number, a classical form such as "Sonata", an act or part, a numbered movement or a leading
+    segment naming the composer. A title starting or ending with a chapter, such as "Kapitel 1:
+    Der Anfang" or "Der Hobbit: 1. Kapitel", never names a work.
+
     :param title: A track title such as "Symphony No. 5 in C Minor, Op. 67: I. Allegro con brio".
     :param composer: The name of the track's composer, matched against a leading segment.
+    :param classical: Whether the track is known to be classical, such as by its genre or album.
     """
     segments = _split_work_title(title)
-    if len(segments) < 2:
+    if len(segments) < 2 or not _names_work(title, segments, composer, classical):
         return None
     if len(segments) == 2 and (dashed := _DASHED_MOVEMENT.match(segments[1])):
         # a "Composer: Work - 1. Movement" title
@@ -142,6 +200,8 @@ def parse_work_title(title: str, composer: str | None = None) -> TrackWork | Non
         work, movement = segments[0], None
     else:
         work, movement = ": ".join(segments[:-1]), segments[-1]
+        if catalogued := _CATALOGUED_PART.search(work):
+            work, movement = _catalogued_work_and_part(work, catalogued, movement)
     return work_with_movement(work, movement)
 
 
@@ -157,7 +217,7 @@ def composers_listed_first(tracks: Sequence[tuple[str, str | None]]) -> bool:
     work_titles = [
         work_title
         for title, first_artist in tracks
-        if (work_title := parse_work_title(title, first_artist))
+        if (work_title := parse_work_title(title, first_artist, classical=True))
     ]
     return sum(1 for x in work_titles if x.other_composer) * 2 <= len(work_titles)
 
@@ -188,6 +248,16 @@ def parent_work_name(work: str) -> str | None:
     if not (match := _ACT_OR_PART.match(work)):
         return None
     return match["work"] + match["catalog"]
+
+
+def names_catalogued_part(work: str) -> bool:
+    """
+    Return whether a work title names a part of the catalogued work it starts with.
+
+    :param work: The name of a work, such as "Messiah, HWV 56: Part II, no. 44. Chorus" or
+        "The Nutcracker, Act II, Scene 3, Op. 71, TH 14".
+    """
+    return _CATALOGUED_PART.search(work) is not None or _WORK_PART.search(work) is not None
 
 
 def part_key(work: str) -> tuple[str, int | str] | None:
@@ -233,6 +303,15 @@ def parse_catalog_numbers(title: str) -> list[str]:
     return list(dict.fromkeys(match.group() for match in _CATALOG_NUMBER.finditer(title)))
 
 
+def names_classical_work(title: str) -> bool:
+    """
+    Return whether a title names a classical form or a catalog number.
+
+    :param title: The title of a work, such as "Symphony No. 5" or "Suite, BWV 1068".
+    """
+    return _FORM_WORD.search(title) is not None or _CATALOG_NUMBER.search(title) is not None
+
+
 def numbered_piece(work: str) -> tuple[str, int, str | None] | None:
     """
     Return the opus, number and name of a work titled as a numbered piece of an opus, or None.
@@ -257,6 +336,21 @@ def numbered_piece(work: str) -> tuple[str, int, str | None] | None:
         int(piece.group(1)),
         name if name and not parse_catalog_numbers(name) else None,
     )
+
+
+def name_different_keys(title: str, other_title: str) -> bool:
+    """
+    Return whether two titles each name a key and the keys differ.
+
+    "Violin Concerto in A minor" and "Violinkonzert a-Moll" name the same key. A title that
+    names no key never differs.
+
+    :param title: The title of a work or track, such as "Violin Concerto in A minor, BWV 1041".
+    :param other_title: The title to compare it with.
+    """
+    key = _named_key(title)
+    other_key = _named_key(other_title)
+    return key is not None and other_key is not None and key != other_key
 
 
 def set_track_work(track: Track, track_work: TrackWork, composer: Artist | None) -> None:
@@ -290,7 +384,11 @@ def set_track_work(track: Track, track_work: TrackWork, composer: Artist | None)
 
 
 def set_listed_composer_work(
-    track: Track, title: str, first_artist: Artist | None, composer_first: bool | None
+    track: Track,
+    title: str,
+    first_artist: Artist | None,
+    composer_first: bool | None,
+    classical: bool = False,
 ) -> None:
     """
     Set the work and movement a classical track's title names, with its first artist as composer.
@@ -303,9 +401,12 @@ def set_listed_composer_work(
     :param first_artist: The first artist the track lists.
     :param composer_first: True on a classical album that lists each track's composer as its
         first artist, False on one whose titles name the composers instead, None when unknown.
+    :param classical: Whether the track is known to be classical, as on a classical album.
     """
     composer = first_artist
-    track_work = parse_work_title(title, composer.name if composer else None)
+    track_work = parse_work_title(
+        title, composer.name if composer else None, classical or composer_first is not None
+    )
     if composer_first is False or (track_work and track_work.other_composer):
         # the titles name the composers, so the first artist is a performer
         composer = None
@@ -337,6 +438,18 @@ def joined_composer_name(name: str, title: str) -> str | None:
     return None
 
 
+def _catalogued_work_and_part(
+    work: str, catalogued: re.Match[str], movement: str
+) -> tuple[str, str]:
+    """Return the work ending at its catalog number and the movement, with an act it opens with."""
+    part = f"{work[catalogued.end() :]}: {movement}"
+    work = work[: catalogued.start("separator")]
+    if leading := _LEADING_PART.match(part):
+        # "Swan Lake, Op. 20: Act 1, No. 2 Waltz" is the act "Swan Lake, Op. 20, Act 1"
+        work, part = f"{work}, {leading['part']}", part[leading.end() :]
+    return work, part
+
+
 def _movement_number(movement: str) -> int | None:
     """Return the number a movement title starts with, or None when it starts with none."""
     if not (match := _NUMBERED_MOVEMENT.match(movement)):
@@ -350,6 +463,27 @@ def _roman_number(numeral: str) -> int | None:
     return _ROMAN_NUMERALS.index(numeral) + 1 if numeral in _ROMAN_NUMERALS else None
 
 
+def _named_key(title: str) -> tuple[str, str, str] | None:
+    """Return the note, accidental and mode of the key a title names, None when it names none."""
+    if match := _ENGLISH_KEY.search(title):
+        note, accidental = match.group(1).upper(), (match.group(2) or match.group(3) or "").lower()
+        if accidental in ("♭", "b"):
+            accidental = "flat"
+        elif accidental in ("♯", "#"):
+            accidental = "sharp"
+        return note, accidental, match.group(4).lower()
+    if not (match := _GERMAN_KEY.search(title)):
+        return None
+    note, suffix = match.group(1).upper(), (match.group(2) or "").lower()
+    mode = "major" if match.group(3).lower() == "dur" else "minor"
+    # in German "B" is B flat and "H" is B
+    if note == "H":
+        return "B", "", mode
+    if note == "B" and not suffix:
+        return "B", "flat", mode
+    return note, "sharp" if suffix == "is" else "flat" if suffix else "", mode
+
+
 def _split_work_title(title: str) -> list[str]:
     """Return the non-empty segments a title's work separators outside brackets divide it in."""
     segments: list[str] = []
@@ -359,10 +493,33 @@ def _split_work_title(title: str) -> list[str]:
         # a colon inside brackets belongs to an annotation, as in "(Excerpt: Opening)"
         if before.count("(") > before.count(")") or before.count("[") > before.count("]"):
             continue
-        segments.append(title[start : match.start()].strip())
+        segment = title[start : match.start()]
+        # a colon after the number of a piece belongs to the text of that piece
+        if _NUMBERED_PIECE_WITHIN.search(segment):
+            break
+        segments.append(segment.strip())
         start = match.end()
     segments.append(title[start:].strip())
     return [segment for segment in segments if segment]
+
+
+def _names_work(title: str, segments: list[str], composer: str | None, classical: bool) -> bool:
+    """Return whether a title, split in its segments, names a work rather than a chapter or song."""
+    names_composer = bool(composer and _names_composer(segments[0], composer))
+    movement = segments[-1]
+    if _CHAPTER.fullmatch(segments[1] if names_composer else segments[0]) or (
+        _NUMBERED_CHAPTER.match(movement)
+    ):
+        return False
+    return (
+        classical
+        or names_composer
+        or _CATALOG_NUMBER.search(title) is not None
+        or _FORM_WORD.search(title) is not None
+        or _WORK_PART.search(title) is not None
+        or _movement_number(movement) is not None
+        or _NUMBERED_PIECE_WITHIN.search(movement) is not None
+    )
 
 
 def _names_composer(segment: str, composer: str) -> bool:

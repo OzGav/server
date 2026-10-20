@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
+from time import time
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, PropertyMock, patch
 
@@ -21,12 +23,18 @@ from music_assistant_models.media_items import (
 )
 from music_assistant_models.media_items.metadata import MediaItemMetadata
 
+from music_assistant.constants import DB_TABLE_TRACKS
+from music_assistant.controllers.cache import BYPASS_CACHE
 from music_assistant.controllers.metadata import MetaDataController
+from music_assistant.controllers.metadata.constants import REFRESH_INTERVAL
 from music_assistant.controllers.metadata.controller import (
     _albums_with_recordings_to_read_query,
     _tracks_with_recording_to_read_query,
 )
-from music_assistant.controllers.metadata.performer_enrichment import _relations_naming
+from music_assistant.controllers.metadata.performer_enrichment import (
+    _recording_due,
+    _relations_naming,
+)
 from music_assistant.controllers.music.classical import PERFORMING_ROLES
 from music_assistant.providers.musicbrainz.models import MusicBrainzRelease
 from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider
@@ -88,8 +96,10 @@ def _controller(mass: MusicAssistant, lookups: dict[str, dict[str, Any]]) -> Met
     ctrl = MetaDataController.__new__(MetaDataController)
     ctrl.mass = mass
     ctrl.logger = Mock()
+    ctrl._logged_hints = set()
     with patch.object(MusicbrainzProvider, "__init__", lambda *_a, **_kw: None):
         musicbrainz = MusicbrainzProvider.__new__(MusicbrainzProvider)
+    musicbrainz._logged_hints = set()
 
     async def _answer(endpoint: str, **_kwargs: Any) -> Any:
         return next((value for key, value in lookups.items() if endpoint.startswith(key)), None)
@@ -107,6 +117,21 @@ def _requests(ctrl: MetaDataController) -> list[str]:
     musicbrainz = cast("MusicbrainzProvider", ctrl._musicbrainz_provider())
     get_data = cast("AsyncMock", musicbrainz._api_client.get_data)
     return [call.args[0] for call in get_data.await_args_list]
+
+
+def _record_bypass(ctrl: MetaDataController) -> list[tuple[str, bool]]:
+    """Return the endpoints MusicBrainz is asked for from now on, each with its cache bypass."""
+    musicbrainz = cast("MusicbrainzProvider", ctrl._musicbrainz_provider())
+    get_data = cast("AsyncMock", musicbrainz._api_client.get_data)
+    answer = get_data.side_effect
+    recorded: list[tuple[str, bool]] = []
+
+    async def _record(endpoint: str, **kwargs: Any) -> Any:
+        recorded.append((endpoint.split("?", maxsplit=1)[0], BYPASS_CACHE.get()))
+        return await answer(endpoint, **kwargs)
+
+    get_data.side_effect = _record
+    return recorded
 
 
 def _refreshed(ctrl: MetaDataController) -> list[tuple[str, bool]]:
@@ -242,6 +267,8 @@ async def test_credited_performers_get_their_musicbrainz_ids(music_mass: MusicAs
 
     await _read_album(ctrl, track)
 
+    # the album lookup asks for the performers of its recordings
+    assert _requests(ctrl)[0].endswith("+artist-rels+recording-level-rels+work-rels+place-rels")
     assert await _mbid(music_mass, "Nigel Kennedy") == KENNEDY_MBID
     assert await _mbid(music_mass, "English Chamber Orchestra") == ECO_MBID
     # the composer is no performer of the recording
@@ -881,6 +908,26 @@ async def test_recording_musicbrainz_does_not_know_is_marked_read(
     assert await _tracks_due(music_mass) == set()
 
 
+@pytest.mark.parametrize(
+    ("days_ago", "performer", "due"),
+    [(91, False, True), (91, True, False), (1, False, False)],
+)
+async def test_recording_without_performers_is_read_again_once_stale(
+    music_mass: MusicAssistant, days_ago: int, performer: bool, due: bool
+) -> None:
+    """A recording read long ago is read again only while its track has no performer credit."""
+    credits_ = [("Orchestra", ArtistRole.ORCHESTRA, None)] if performer else []
+    track = await _add(music_mass, _track("Unknown", OTHER_MBID, ["Somebody"], credits_, _album()))
+    await music_mass.music.database.execute_write(
+        f"UPDATE {DB_TABLE_TRACKS} SET metadata = json_set(COALESCE(metadata, '{{}}'), "
+        "'$.last_musicbrainz_recording_lookup', :read) WHERE item_id = :track_id",
+        {"read": int(time()) - days_ago * 86400, "track_id": int(track.item_id)},
+    )
+
+    assert (await _tracks_due(music_mass) == {track.item_id}) is due
+    assert _recording_due(await music_mass.music.tracks.get_library_item(track.item_id)) is due
+
+
 async def test_link_run_reads_the_performers_after_the_other_phases() -> None:
     """The performer phases come last and read albums and tracks through their own steps."""
     ctrl = MetaDataController.__new__(MetaDataController)
@@ -891,6 +938,130 @@ async def test_link_run_reads_the_performers_after_the_other_phases() -> None:
     assert [x.name for x in phases[-2:]] == ["album performers", "track performers"]
     assert phases[-2].link == ctrl._link_album_performers
     assert phases[-1].link == ctrl._link_track_performers
+
+
+# --------------------------------------------------------------------------- #
+#  reading an album's performers again on a forced update                      #
+# --------------------------------------------------------------------------- #
+
+
+async def test_forced_album_update_credits_a_performer_skipped_before(
+    music_mass: MusicAssistant,
+) -> None:
+    """A re-read adds the performers a track misses, with fresh data, and duplicates none."""
+    ctrl = _controller(
+        music_mass,
+        {"release/": _lookup(BEST_CLASSICAL), f"artist/{ECO_MBID}": _eco_with_spotify_link()},
+    )
+    bypassed = _record_bypass(ctrl)
+    # the tags credit the soloist only, and leave out the orchestra
+    track = await _kennedy_album(
+        music_mass,
+        ["Nigel Kennedy"],
+        [
+            ("Nigel Kennedy", ArtistRole.SOLOIST, "violin"),
+            ("Antonio Vivaldi", ArtistRole.COMPOSER, None),
+        ],
+    )
+    before = await _credits(music_mass, track)
+    album = await _library_album(music_mass, track)
+
+    with patch.object(music_mass.music, "get_provider_instances", _spotify_instances()):
+        await _read_album(ctrl, track)
+        assert await _credits(music_mass, track) == before
+        assert await ctrl._link_album_performers(album, reread=True)
+        assert await ctrl._link_album_performers(album, reread=True)
+
+    assert await _credits(music_mass, track) == {
+        *before,
+        ("English Chamber Orchestra", ArtistRole.ORCHESTRA, None),
+    }
+    stored = await music_mass.music.tracks.get_library_item(track.item_id)
+    orchestra = next(x for x in stored.credits if x.role == ArtistRole.ORCHESTRA)
+    assert orchestra.position > max(
+        x.position for x in stored.credits if x.role != ArtistRole.ORCHESTRA
+    )
+    release = f"release/{_release(BEST_CLASSICAL).id}"
+    assert bypassed == [
+        (release, False),
+        (release, True),
+        (f"artist/{ECO_MBID}", True),
+        (release, True),
+    ]
+
+
+async def test_forced_update_of_an_album_without_classical_tracks_reads_nothing(
+    music_mass: MusicAssistant,
+) -> None:
+    """Only an identified album with classical tracks is read again."""
+    ctrl = _controller(music_mass, {"release/": _lookup(BEST_CLASSICAL)})
+    track = await _add(
+        music_mass,
+        _track(
+            "Pop",
+            _recording_id(BEST_CLASSICAL, KENNEDY),
+            ["Pop"],
+            [],
+            _album(_release(BEST_CLASSICAL).id),
+            classical=False,
+        ),
+    )
+
+    assert await ctrl._link_album_performers(await _library_album(music_mass, track), reread=True)
+
+    assert _requests(ctrl) == []
+
+
+@pytest.mark.parametrize("force_refresh", [True, False])
+async def test_album_metadata_update_reads_the_performers_again_when_forced(
+    music_mass: MusicAssistant, force_refresh: bool
+) -> None:
+    """The Update metadata button reads an album's performers again, a scheduled update not."""
+    ctrl = _controller(music_mass, {})
+    ctrl.cache = music_mass.cache
+    ctrl._throttler = MagicMock()
+    track = await _kennedy_album(music_mass)
+    album = await _library_album(music_mass, track)
+
+    with (
+        patch.object(ctrl, "_update_album_metadata", AsyncMock()),
+        patch.object(ctrl, "_link_album_performers", AsyncMock(return_value=True)) as read,
+    ):
+        await ctrl.update_metadata(album, force_refresh=force_refresh)
+
+    if force_refresh:
+        read.assert_awaited_once_with(album, reread=True)
+    else:
+        read.assert_not_awaited()
+
+
+async def test_performer_without_a_link_tells_to_update_the_album_once_added(
+    music_mass: MusicAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A performer left out for want of a link names the album and how to read it again."""
+    eco = {**_eco_with_spotify_link(), "relations": []}
+    ctrl = _controller(music_mass, {"release/": _lookup(BEST_CLASSICAL), f"artist/{ECO_MBID}": eco})
+    ctrl.logger = logging.getLogger("test_performer_enrichment")
+    caplog.set_level(logging.INFO, logger="test_performer_enrichment")
+    track = await _kennedy_album(
+        music_mass, ["Antonio Vivaldi"], [("Antonio Vivaldi", ArtistRole.COMPOSER, None)]
+    )
+
+    def _instances(domain: str, **_kwargs: Any) -> list[Mock]:
+        if domain != "tidal":
+            return []
+        instance = Mock(available=True, instance_id=domain)
+        instance.manifest.name = "Tidal"
+        return [instance]
+
+    with patch.object(music_mass.music, "get_provider_instances", Mock(side_effect=_instances)):
+        await _read_album(ctrl, track)
+
+    assert (
+        'Artist "English Chamber Orchestra" has no link to Tidal on MusicBrainz, so it is not '
+        'added to album "Album"; add one at '
+        f"https://musicbrainz.org/artist/{ECO_MBID}, then use Update metadata on the album"
+    ) in caplog.messages
 
 
 # --------------------------------------------------------------------------- #
@@ -1027,7 +1198,9 @@ async def _holders(mass: MusicAssistant, mbid: str) -> list[Artist]:
 async def _albums_due(mass: MusicAssistant) -> set[str]:
     """Return the ids of the library albums the album performers phase would select now."""
     albums = await mass.music.albums.get_library_items_by_query(
-        limit=0, extra_query_parts=[_albums_with_recordings_to_read_query()]
+        limit=0,
+        extra_query_parts=[_albums_with_recordings_to_read_query()],
+        extra_query_params={"stale": int(time() - REFRESH_INTERVAL)},
     )
     return {x.item_id for x in albums}
 
@@ -1035,6 +1208,8 @@ async def _albums_due(mass: MusicAssistant) -> set[str]:
 async def _tracks_due(mass: MusicAssistant) -> set[str]:
     """Return the ids of the library tracks the track performers phase would select now."""
     tracks = await mass.music.tracks.get_library_items_by_query(
-        limit=0, extra_query_parts=[_tracks_with_recording_to_read_query()]
+        limit=0,
+        extra_query_parts=[_tracks_with_recording_to_read_query()],
+        extra_query_params={"stale": int(time() - REFRESH_INTERVAL)},
     )
     return {x.item_id for x in tracks}

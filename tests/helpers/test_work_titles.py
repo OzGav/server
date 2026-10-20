@@ -7,6 +7,8 @@ import pytest
 from music_assistant.helpers.work_titles import (
     TrackWork,
     joined_composer_name,
+    name_different_keys,
+    names_catalogued_part,
     numbered_piece,
     parent_work_name,
     parse_catalog_numbers,
@@ -62,11 +64,6 @@ PUCCINI = "Giacomo Puccini"
             'Symphony No. 94 in G Major, Hob. I:94 "Surprise": II. Andante',
             "Joseph Haydn",
             TrackWork('Symphony No. 94 in G Major, Hob. I:94 "Surprise"', None, "II. Andante", 2),
-        ),
-        (
-            "Gianni Schicchi: O mio babbino caro",
-            PUCCINI,
-            TrackWork("Gianni Schicchi", None, "O mio babbino caro"),
         ),
     ],
 )
@@ -169,7 +166,18 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
         (
             "La bohème, Act II, Scene 1: Viva Parpignol!",
             PUCCINI,
-            TrackWork("La bohème, Act II, Scene 1", None, "Viva Parpignol!"),
+            TrackWork("La bohème, Act II, Scene 1", None, "Viva Parpignol!", None, "La bohème"),
+        ),
+        (
+            "The Nutcracker, Act II, Scene 3, Op. 71, TH 14: No. 15, Pas de deux",
+            "Pyotr Ilyich Tchaikovsky",
+            TrackWork(
+                "The Nutcracker, Act II, Scene 3, Op. 71, TH 14",
+                None,
+                "No. 15, Pas de deux",
+                None,
+                "The Nutcracker, Op. 71, TH 14",
+            ),
         ),
     ],
 )
@@ -178,6 +186,34 @@ def test_act_or_part_comes_with_its_work(
 ) -> None:
     """A work that is an act or part, after a comma or slash, comes with the work it is part of."""
     assert parse_work_title(title, composer) == expected
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        (
+            "Tchaikovsky: Swan Lake Ballet, Op. 20: Act 1, No. 2 Waltz: Tempo di valse",
+            TrackWork(
+                "Swan Lake Ballet, Op. 20, Act 1",
+                None,
+                "No. 2 Waltz: Tempo di valse",
+                None,
+                "Swan Lake Ballet, Op. 20",
+            ),
+        ),
+        (
+            "Swan Lake, Op. 20: Act 2: No. 10 Scene",
+            TrackWork("Swan Lake, Op. 20, Act 2", None, "No. 10 Scene", None, "Swan Lake, Op. 20"),
+        ),
+        (
+            "Symphony No. 5 in C minor, Op. 67: I. Allegro con brio: Coda",
+            TrackWork("Symphony No. 5 in C minor, Op. 67", None, "I. Allegro con brio: Coda", 1),
+        ),
+    ],
+)
+def test_work_ends_at_its_catalog_number(title: str, expected: TrackWork) -> None:
+    """A work ends at a catalog number followed by a colon, taking in an act opening the rest."""
+    assert parse_work_title(title, "Pyotr Ilyich Tchaikovsky") == expected
 
 
 def test_aria_quoted_straight_after_the_colon() -> None:
@@ -330,6 +366,119 @@ def test_composer_work_and_dashed_movement(title: str, composer: str, expected: 
     assert parse_work_title(title, composer) == expected
 
 
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        (
+            "Goldberg Variations, BWV 988: Aria",
+            TrackWork("Goldberg Variations, BWV 988", None, "Aria"),
+        ),
+        (
+            "Matthäus-Passion, BWV 244: Teil II",
+            TrackWork("Matthäus-Passion, BWV 244", None, "Teil II"),
+        ),
+        (
+            "Matthäus-Passion, BWV 244: 1. Teil",
+            TrackWork("Matthäus-Passion, BWV 244", None, "1. Teil", 1),
+        ),
+        ("Trout Quintet: Andante", TrackWork("Trout Quintet", None, "Andante")),
+        ("Klavierkonzert Nr. 2: Adagio", TrackWork("Klavierkonzert Nr. 2", None, "Adagio")),
+        (
+            "La bohème, Act II, Scene 1: Viva Parpignol!",
+            TrackWork("La bohème, Act II, Scene 1", None, "Viva Parpignol!", None, "La bohème"),
+        ),
+        ("Peer Gynt: II. Ases Tod", TrackWork("Peer Gynt", None, "II. Ases Tod", 2)),
+        (
+            "5. Sinfonie c-Moll, op. 67: I. Allegro con brio",
+            TrackWork("5. Sinfonie c-Moll, op. 67", None, "I. Allegro con brio", 1),
+        ),
+    ],
+)
+def test_classical_sign_names_a_work(title: str, expected: TrackWork) -> None:
+    """A title with a catalog number, form, act or numbered movement names a work on its own."""
+    assert parse_work_title(title) == expected
+
+
+@pytest.mark.parametrize(
+    ("title", "composer"),
+    [
+        ("Interlude: Reprise", "Billy Joel"),
+        ("Mr. Brightside: Live", "The Killers"),
+        ("Gianni Schicchi: O mio babbino caro", PUCCINI),
+        ("Swan Lake: Act II", "Pyotr Ilyich Tchaikovsky"),
+    ],
+)
+def test_colon_alone_names_no_work(title: str, composer: str) -> None:
+    """A title with only a colon names no work, unless the track is known to be classical."""
+    assert parse_work_title(title, composer) is None
+
+
+@pytest.mark.parametrize(
+    ("title", "composer", "expected"),
+    [
+        (
+            "Gianni Schicchi: O mio babbino caro",
+            PUCCINI,
+            TrackWork("Gianni Schicchi", None, "O mio babbino caro"),
+        ),
+        (
+            "Swan Lake: Act II",
+            "Pyotr Ilyich Tchaikovsky",
+            TrackWork("Swan Lake", None, "Act II"),
+        ),
+        (
+            "St Matthew Passion: Part I",
+            "Johann Sebastian Bach",
+            TrackWork("St Matthew Passion", None, "Part I"),
+        ),
+    ],
+)
+def test_classical_track_needs_no_other_sign(
+    title: str, composer: str, expected: TrackWork
+) -> None:
+    """The title of a track known to be classical names a work with only a colon."""
+    assert parse_work_title(title, composer, classical=True) == expected
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Kapitel 1: Der Anfang",
+        "Chapter 12: The Boy Who Lived",
+        "Folge 5: Die drei ???",
+        "Teil 3: Die Rückkehr",
+        "Part 2: Symphony of Lies",
+        "Episode No. 4: A New Hope",
+        "Kapitel 12.3: Op. 1",
+        "Der Hobbit: 1. Kapitel",
+        "Harry Potter: 12. Chapter",
+        "Die drei ???: 3. Folge",
+        "Der Hobbit: Nr. IV. Kapitel - Eine Sonate",
+    ],
+)
+@pytest.mark.parametrize("classical", [False, True])
+def test_chapter_names_no_work(title: str, classical: bool) -> None:
+    """A title starting or ending with a chapter or episode names no work, whatever it holds."""
+    assert parse_work_title(title, "Rufus Beck", classical) is None
+
+
+def test_colon_within_a_numbered_piece_names_no_work() -> None:
+    """A colon within the text of a numbered piece leaves the piece whole."""
+    assert (
+        parse_work_title(
+            "Erster Teil, 9a. Evangelista, Jesus: Er sprach: Gehet hin in die Stadt",
+            "Johann Sebastian Bach",
+            classical=True,
+        )
+        is None
+    )
+    assert parse_work_title(
+        "Matthäus-Passion, BWV 244: Erster Teil, 9a. Evangelista, Jesus: Er sprach"
+    ) == TrackWork(
+        "Matthäus-Passion, BWV 244", None, "Erster Teil, 9a. Evangelista, Jesus: Er sprach"
+    )
+
+
 def test_tchaikovsky_catalog_number() -> None:
     """A Tchaikovsky thematic catalog number is read like any other catalog number."""
     assert parse_catalog_numbers("Swan Lake, Op. 20, TH 12") == ["Op. 20", "TH 12"]
@@ -357,6 +506,7 @@ def test_catalog_number_keeps_its_number_within_the_opus(title: str, expected: l
         ("La bohème, SC 67 / Act 1", "La bohème, SC 67, Act I"),
         ("Messiah, HWV 56 / Part 2", "Messiah, HWV 56, Pt. 2"),
         ("Swan Lake, Act II, Op. 20, TH 12", "Swan Lake, Act 2"),
+        ("The Nutcracker, Act II, Scene 3, Op. 71, TH 14", "The Nutcracker, Op. 71, Act II"),
         ("Matthäus-Passion, BWV 244, Anhang", "St. Matthew Passion, BWV 244, Anhang"),
     ],
 )
@@ -370,6 +520,23 @@ def test_slashed_act_is_part_of_the_same_work() -> None:
     """An act after a slash is part of the work the same act after a comma is part of."""
     assert parent_work_name("La bohème, SC 67 / Act 1") == "La bohème, SC 67"
     assert parent_work_name("La bohème, SC 67, Act I") == "La bohème, SC 67"
+
+
+@pytest.mark.parametrize(
+    ("work", "expected"),
+    [
+        ('Messiah, HWV 56: Part II, no. 44. Chorus "Hallelujah"', True),
+        ("Sonata in B-flat major, D. 960: No. 3 Scherzo", True),
+        ("Symphony No. 94, Hob. I:94: II. Andante", True),
+        ("The Nutcracker, Act II, Scene 3, Op. 71, TH 14", True),
+        ("Messiah, HWV 56", False),
+        ("Symphony No. 94 in G major, Hob. I:94", False),
+        ("Symphony No. 5: I. Allegro", False),
+    ],
+)
+def test_catalogued_part(work: str, expected: bool) -> None:
+    """A title naming an act or going on after its catalog number names a part of the work."""
+    assert names_catalogued_part(work) is expected
 
 
 @pytest.mark.parametrize(
@@ -387,7 +554,7 @@ def test_different_parts_have_different_keys(first: str, second: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "work", ["Symphony No. 5, Op. 67", "Symphony No. 3 Part 2", "La bohème, Act II, Scene 1"]
+    "work", ["Symphony No. 5, Op. 67", "Symphony No. 3 Part 2", "La bohème, Scene 1"]
 )
 def test_whole_work_has_no_part_key(work: str) -> None:
     """A work that is not an act or part has no part key."""
@@ -452,3 +619,27 @@ def test_numbered_piece(work: str, expected: tuple[str, int, str | None] | None)
 def test_word_and_number(name: str, expected: tuple[str, int] | None) -> None:
     """A name starting with a word and a number gives the word, lowercase, and the number."""
     assert word_and_number(name) == expected
+
+
+@pytest.mark.parametrize(
+    ("title", "other_title", "expected"),
+    [
+        ("Violin Concerto in A Minor, BWV 1041", "Violin Concerto in E major, BWV 1041", True),
+        ("Violin Concerto in A Minor, BWV 1041", "Violin Concerto in A minor, BWV 1041", False),
+        ("Violin Concerto in A minor", "Violinkonzert a-Moll", False),
+        ("Symphony in E-flat major", "Symphony in E flat major", False),
+        ("Symphony in E-flat major", "Symphony in E♭ major", False),
+        ("Symphony in E-flat major", "Sinfonie Es-Dur", False),
+        ("Symphony in E-flat major", "Symphony in E major", True),
+        ("Sonata in F sharp minor", "Sonata in F# minor", False),
+        ("Sonata in F sharp minor", "Sonate fis-Moll", False),
+        ("Sonata in B-flat major", "Sonate B-Dur", False),
+        ("Sonata in B minor", "Sonate h-Moll", False),
+        ("Sonata in B minor", "Sonate b-Moll", True),
+        ("Mass in C, Op. 86", "Mass in C minor, Op. 86", False),
+        ("Toccata and Fugue, BWV 565", "Toccata and Fugue in D Minor, BWV 565", False),
+    ],
+)
+def test_name_different_keys(title: str, other_title: str, expected: bool) -> None:
+    """Titles differ in key only when both name one, however each spells it."""
+    assert name_different_keys(title, other_title) is expected

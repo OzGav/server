@@ -58,6 +58,7 @@ def _controller() -> MetaDataController:
     """Create a bare MetaDataController without running __init__."""
     ctrl = MetaDataController.__new__(MetaDataController)
     ctrl._corrupt_metadata_rows = {}
+    ctrl._logged_hints = set()
     ctrl.logger = Mock()
     return ctrl
 

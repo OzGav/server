@@ -4,16 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from music_assistant_models.media_items import Credit
-
-from music_assistant.helpers.credit_roles import role_credits, role_word
+from music_assistant.helpers.credit_roles import role_word, track_role_credits
 from music_assistant.helpers.util import is_placeholder_artist
 from music_assistant.helpers.work_titles import composers_listed_first, parse_work_title
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from music_assistant_models.media_items import Artist, ItemMapping
+    from music_assistant_models.media_items import Artist, Credit, ItemMapping
 
     from .jsonapi import JsonApiDocument
 
@@ -110,23 +108,7 @@ def track_credits(
         roles_by_artist.setdefault(artist_id, []).append(role)
     for main_artist in main_artists:
         roles_by_artist.setdefault(main_artist.item_id, [])
-    has_conductor = any(
-        role_word(x) == "conductor" for roles in roles_by_artist.values() for x in roles
-    )
-    main_artist_ids = {x.item_id for x in main_artists}
-    result: list[Credit] = []
-    for artist_id, roles in roles_by_artist.items():
-        is_main_artist = artist_id in main_artist_ids and all(
-            role_word(x) != "composer" for x in roles
-        )
-        for role, instrument in role_credits(roles, has_conductor, is_main_artist):
-            position = sum(x.role == role for x in result)
-            result.append(
-                Credit(
-                    artist=artists[artist_id], role=role, instrument=instrument, position=position
-                )
-            )
-    return result
+    return track_role_credits(roles_by_artist, {x.item_id for x in main_artists}, artists.get)
 
 
 def _has_composer_credit(doc: JsonApiDocument, resource: dict[str, Any]) -> bool:

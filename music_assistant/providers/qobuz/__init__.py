@@ -113,9 +113,10 @@ SUPPORTED_FEATURES = {
 
 VARIOUS_ARTISTS_ID = "145383"
 # Bump when the shape of parsed artists, albums or tracks changes, so cached items are re-parsed
-PARSED_ITEM_CACHE_CHECKSUM = "classical_v6"
+PARSED_ITEM_CACHE_CHECKSUM = "classical_v7"
 
 CONF_QUALITY = "quality"
+# TEMP(classical 5b Qobuz re-read): remove before release
 # Hidden config marking that the library albums have been read again for their classical details
 CONF_CLASSICAL_REREAD_DONE = "classical_reread_done"
 
@@ -168,6 +169,7 @@ class QobuzProvider(MusicProvider):
 
     async def loaded_in_mass(self) -> None:
         """Call after the provider has been loaded."""
+        # TEMP(classical 5b Qobuz re-read): remove before release
         if not self.mass.config.get_raw_provider_config_value(
             self.instance_id, CONF_CLASSICAL_REREAD_DONE, False
         ):
@@ -179,6 +181,7 @@ class QobuzProvider(MusicProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
+        # TEMP(classical 5b Qobuz re-read): remove before release
         if self._classical_reread_task and not self._classical_reread_task.done():
             self._classical_reread_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -300,7 +303,9 @@ class QobuzProvider(MusicProvider):
         msg = f"Item {prov_track_id} not found"
         raise MediaNotFoundError(msg)
 
-    @use_cache(3600 * 24 * 7, allow_expired_cache=True)  # Cache for 7 days
+    @use_cache(
+        3600 * 24 * 7, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True
+    )  # Cache for 7 days
     async def get_track_by_external_id(
         self, external_id: str, external_id_type: ExternalID
     ) -> Track | None:
@@ -318,7 +323,9 @@ class QobuzProvider(MusicProvider):
             fetch_item=self.get_track,
         )
 
-    @use_cache(3600 * 24 * 7, allow_expired_cache=True)  # Cache for 7 days
+    @use_cache(
+        3600 * 24 * 7, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True
+    )  # Cache for 7 days
     async def get_album_by_external_id(
         self, external_id: str, external_id_type: ExternalID
     ) -> Album | None:
@@ -929,17 +936,20 @@ class QobuzProvider(MusicProvider):
         if not album_obj:
             return None
         tracks = album_obj.setdefault("tracks", {})
-        if len(tracks.get("items") or []) < tracks.get("total", 0):
-            tracks["items"] = await self._get_all_items(
-                "album/get", album_id=prov_album_id, key="tracks"
+        items = tracks.get("items") or []
+        if len(items) < tracks.get("total", 0):
+            tracks["items"] = items + await self._get_all_items(
+                "album/get", album_id=prov_album_id, key="tracks", offset=len(items)
             )
         return album_obj
 
     async def _reread_library_albums(self) -> None:
         """Read this account's library albums again once, for the classical details they give."""
+        # TEMP(classical 5b Qobuz re-read): remove before release
         if await reread_library_albums(self, self._reread_library_album):
             self._update_config_value(CONF_CLASSICAL_REREAD_DONE, True, immediate=True)
 
+    # TEMP(classical 5b Qobuz re-read): remove before release
     async def _reread_library_album(self, library_id: int, prov_album_id: str) -> None:
         """
         Update a classical library album and its library tracks with what Qobuz gives for them.
@@ -1069,11 +1079,16 @@ class QobuzProvider(MusicProvider):
         return None
 
     async def _get_all_items(
-        self, endpoint: str, key: str = "tracks", **kwargs: Any
+        self, endpoint: str, key: str = "tracks", offset: int = 0, **kwargs: Any
     ) -> list[dict[str, Any]]:
-        """Get all items from a paged list."""
+        """
+        Get all items from a paged list.
+
+        :param endpoint: The API endpoint to read.
+        :param key: The key of the paged list in the response.
+        :param offset: The position of the first item to get.
+        """
         limit = 500
-        offset = 0
         all_items: list[dict[str, Any]] = []
         while True:
             kwargs["limit"] = limit
@@ -1090,7 +1105,7 @@ class QobuzProvider(MusicProvider):
             if items_received < limit:
                 # If the API returned fewer items than requested but reports more exist,
                 # the server silently capped our limit. Continue paginating.
-                if items_received > 0 and total > len(all_items):
+                if items_received > 0 and total > kwargs["offset"] + items_received:
                     continue
                 break
         return all_items

@@ -1404,6 +1404,8 @@ async def migrate_database(  # noqa: C901, PLR0912, PLR0915
         await _move_more_classical_genre_aliases(database, logger)
 
     if prev_version <= 69:
+        # a database from a classical test build reports 68 without having run step 67
+        await _drop_audiobookshelf_image_tokens(database)
         # classical music support adds the works table with its work_arrangements and
         # work_artists junctions, work and movement columns on tracks, role, instrument
         # and position columns on track_artists / album_artists (existing rows become

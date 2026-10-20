@@ -53,6 +53,7 @@ def _provider(responses: dict[str, Any]) -> tuple[MusicbrainzProvider, AsyncMock
     """Return a MusicbrainzProvider answering the endpoints starting with the given keys."""
     with patch.object(MusicbrainzProvider, "__init__", lambda *_a, **_kw: None):
         provider = MusicbrainzProvider.__new__(MusicbrainzProvider)
+    provider._logged_hints = set()
 
     async def _answer(endpoint: str, **_kwargs: Any) -> Any:
         return next((value for key, value in responses.items() if endpoint.startswith(key)), None)
@@ -226,7 +227,7 @@ async def test_release_details_request_the_relations_of_its_recordings() -> None
     """One release lookup carries the performers, works and places of every recording."""
     provider, get_data = _provider({"release/": _fixture("best_classical_album")})
 
-    release = await provider.get_release_details("rel-1")
+    release = await provider.get_release_details("rel-1", with_performers=True)
 
     get_data.assert_awaited_once_with(
         "release/rel-1?inc=artist-credits+aliases+labels+release-groups+recordings+isrcs"

@@ -1512,6 +1512,19 @@ async def test_conductor_is_not_read_as_performer_from_an_id3_file(tmp_path: pat
     assert _tags.performers == ()
 
 
+async def test_performer_user_frame_is_read_from_an_id3_file(tmp_path: pathlib.Path) -> None:
+    """The TXXX PERFORMER frame of foobar2000 and Mp3tag credits the performers."""
+    dest = tmp_path / "classical.mp3"
+    shutil.copy(FILE_MP3, dest)
+    id3 = ID3(str(dest))  # type: ignore[no-untyped-call]
+    id3.add(TXXX(encoding=3, desc="PERFORMER", text=["Martha Argerich (piano)"]))  # type: ignore[no-untyped-call]
+    id3.save(v2_version=4)
+
+    _tags = await tags.async_parse_tags(str(dest))
+
+    assert _tags.performers == (("Martha Argerich", "piano"),)
+
+
 @pytest.mark.parametrize(
     ("frames", "expected_work", "expected_grouping"),
     [
@@ -1776,6 +1789,13 @@ def test_is_classical(value: str, expected: bool) -> None:
 def test_is_classical_without_the_tag() -> None:
     """A file without the tag is not marked as classical."""
     assert not _tags_with({}).is_classical
+
+
+def test_performer_instrument_holding_parentheses_is_split_off() -> None:
+    """Picard's instrument names such as "drums (drum set)" are no part of the performer name."""
+    audio_tags = _tags_with({"performer": "Mick Fleetwood (drums (drum set))"})
+
+    assert audio_tags.performers == (("Mick Fleetwood", "drums (drum set)"),)
 
 
 def test_roon_credits_are_read_without_a_performer_tag() -> None:

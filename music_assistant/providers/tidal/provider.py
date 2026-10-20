@@ -168,7 +168,7 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
 
     async def loaded_in_mass(self) -> None:
         """Call after the provider has been loaded."""
-        # TEMP(classical 5c catch-up): remove before release
+        # TEMP(classical 5c Tidal re-read): remove before release
         if not self.mass.config.get_raw_provider_config_value(
             self.instance_id, CONF_CLASSICAL_REREAD_DONE, False
         ):
@@ -180,7 +180,7 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle close/cleanup of the provider."""
-        # TEMP(classical 5c catch-up): remove before release
+        # TEMP(classical 5c Tidal re-read): remove before release
         if self._classical_reread_task and not self._classical_reread_task.done():
             self._classical_reread_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -480,7 +480,7 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
 
     async def _reread_library_albums(self) -> None:
         """Read this account's library albums again once, for the classical details they give."""
-        # TEMP(classical 5c catch-up): remove before release
+        # TEMP(classical 5c Tidal re-read): remove before release
         if await reread_library_albums(self, self._reread_library_album):
             self._update_config_value(CONF_CLASSICAL_REREAD_DONE, True, immediate=True)
 
@@ -491,12 +491,12 @@ class TidalProvider(RecommendationPayloadMixin, MusicProvider):
         :param library_id: The library id of the album.
         :param prov_album_id: The Tidal id of the album.
         """
-        # TEMP(classical 5c catch-up): remove before release
-        album = await self.media.get_album(prov_album_id)
+        # TEMP(classical 5c Tidal re-read): remove before release
+        album = await self.get_album(prov_album_id)
         if CLASSICAL_GENRE_NAME not in (album.metadata.genres or ()):
             return
         await update_library_album(self, library_id, album)
-        for track in await self.media.get_album_tracks(prov_album_id):
+        for track in await self.get_album_tracks(prov_album_id):
             if library_track := await self.mass.music.tracks.get_library_item_by_prov_id(
                 track.item_id, self.instance_id
             ):
