@@ -6,10 +6,12 @@ import asyncio
 from time import time
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
+from uuid import uuid4
 
 import aiohttp
 import pytest
 from music_assistant_models.enums import (
+    ArtistRole,
     EventType,
     ExternalID,
     MediaType,
@@ -25,6 +27,7 @@ from music_assistant_models.event import MassEvent
 from music_assistant_models.media_items import (
     Album,
     Artist,
+    Credit,
     MediaItemMetadata,
     ProviderMapping,
     Track,
@@ -33,7 +36,7 @@ from music_assistant_models.media_items import (
     WorkMovement,  # TEMP(classical 5c movements catch-up)
 )
 
-from music_assistant.constants import DB_TABLE_ALBUMS
+from music_assistant.constants import DB_TABLE_ALBUMS, DB_TABLE_TRACKS
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.constants import (
     ARTIST_LOOKUP_RETRY_INTERVAL,
@@ -72,6 +75,7 @@ _PROGRESS_TEXT = f"{_CONTROLLER}.update_current_task_progress_text"
 NOW = 1_700_000_000
 RELEASE_ID = "5d9c6e8a-1c3b-4f2e-9a7d-2b8c4e6f0a11"
 ARTIST_ID = "a74b1b7f-71a5-4011-9441-d0b5e4122711"
+WORK_ID = "3c4b2a1e-8f6d-4e5c-9b7a-1d2e3f4a5b6c"
 
 
 @pytest.fixture(autouse=True)
@@ -141,6 +145,7 @@ def _controller(
         controller.get_library_items_by_query = AsyncMock(return_value=[])
         controller.update_item_in_library = AsyncMock()
     mass.music.active_sync_tasks = []
+    mass.music.database.get_row = AsyncMock(return_value={"item_id": 1})
     stored = (
         None
         if linked_domains is None
@@ -282,23 +287,17 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
         "albums",
         "artists",
         "tracks",
-        "works",
-        "composers",
         "performers",
         "albums performers",
         "tracks performers",
+        "works",
+        "composers",
     ]
     music = _mass(ctrl).music
     for controller, query, params in (
         (music.albums, _albums_to_identify_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.artists, _artists_to_identify_query(), {}),
         (music.tracks, _tracks_to_identify_query(), {}),
-        (music.works, _works_to_enrich_query(), {"stale": NOW - REFRESH_INTERVAL}),
-        (
-            music.artists,
-            _composers_to_identify_query(),
-            {"stale": NOW - ARTIST_LOOKUP_RETRY_INTERVAL},
-        ),
         (
             music.artists,
             _performers_to_identify_query(),
@@ -306,6 +305,12 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
         ),
         (music.albums, _albums_with_recordings_to_read_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.tracks, _tracks_with_recording_to_read_query(), {"stale": NOW - REFRESH_INTERVAL}),
+        (music.works, _works_to_enrich_query(), {}),
+        (
+            music.artists,
+            _composers_to_identify_query(),
+            {"stale": NOW - ARTIST_LOOKUP_RETRY_INTERVAL},
+        ),
     ):
         controller.get_library_items_by_query.assert_any_await(
             limit=MUSICBRAINZ_LINK_BATCH_SIZE,
@@ -436,6 +441,24 @@ async def test_link_run_reports_an_item_whose_lookup_gave_up() -> None:
     assert ctrl._musicbrainz_link_summary["not_found"] == 0
 
 
+async def test_link_run_skips_an_item_that_left_the_library_during_the_run() -> None:
+    """An item merged into another earlier in the run is skipped, neither linked nor failed."""
+    ctrl = _controller()
+    gone, kept = _albums(2)
+    _queue(ctrl, albums=[gone, kept])
+    _mass(ctrl).music.database.get_row.side_effect = [None, {"item_id": 1}]
+
+    with patch(_REPORT_FAILURE) as report_failure:
+        await ctrl._link_library_to_musicbrainz()
+
+    _linked(ctrl).assert_awaited_once_with(kept)
+    report_failure.assert_not_called()
+    _mass(ctrl).music.database.get_row.assert_any_await(DB_TABLE_ALBUMS, {"item_id": 0})
+    assert ctrl._musicbrainz_link_summary is not None
+    assert ctrl._musicbrainz_link_summary["processed"] == {"albums": 1}
+    assert ctrl._musicbrainz_link_summary["failed"] == 0
+
+
 async def test_link_run_stops_when_musicbrainz_starts_rate_limiting() -> None:
     """A cooldown armed mid-batch ends the run; the rest waits for the next run."""
     musicbrainz = _musicbrainz()
@@ -530,11 +553,11 @@ async def test_link_run_relinks_for_a_provider_loaded_since_the_previous_run() -
         "relink artists spotify",
         "relink albums tidal",
         "relink artists tidal",
-        "works",
-        "composers",
         "performers",
         "albums performers",
         "tracks performers",
+        "works",
+        "composers",
     ]
     relink_calls = [
         call.kwargs
@@ -690,6 +713,8 @@ async def test_link_item_resolves_an_artists_musicbrainz_id_first() -> None:
     ctrl._get_artist_mbid = AsyncMock(return_value=(ARTIST_ID, False))  # type: ignore[method-assign]
     ctrl._link_artist_to_musicbrainz = AsyncMock()  # type: ignore[method-assign]
     _mass(ctrl).music.artists.merge_library_artists_by_mbid = AsyncMock(return_value=1)
+    # the artist is no classical composer
+    _mass(ctrl).music.database.get_rows_from_query = AsyncMock(return_value=[])
     artist = Artist(item_id="1", provider="library", name="Radiohead", provider_mappings=set())
 
     await ctrl.link_item_to_musicbrainz(artist)
@@ -743,14 +768,32 @@ async def test_diagnostics_report_the_last_run_and_the_pending_counts() -> None:
                 "albums": 8,
                 "artists": 7,
                 "tracks": 6,
-                "works": 5,
-                "composers": 4,
-                "performers": 3,
-                "album performers": 2,
-                "track performers": 1,
+                "performers": 5,
+                "album performers": 4,
+                "track performers": 3,
+                "works": 2,
+                "composers": 1,
             },
         }
     }
+
+
+@pytest.mark.parametrize(("linking", "musicbrainz"), [(True, None), (False, _musicbrainz())])
+async def test_classical_link_progress_is_zero_while_nothing_is_looked_up(
+    linking: bool, musicbrainz: Mock | None
+) -> None:
+    """Without the MusicBrainz provider or with linking disabled, nothing is left to look up."""
+    ctrl = _controller(linking=linking)
+    _mass(ctrl).get_provider = Mock(return_value=musicbrainz)
+    _mass(ctrl).music.database.get_count_from_query = AsyncMock(return_value=5)
+
+    assert await ctrl.get_classical_link_progress() == {
+        "albums": 0,
+        "recordings": 0,
+        "works": 0,
+        "composers": 0,
+    }
+    _mass(ctrl).music.database.get_count_from_query.assert_not_awaited()
 
 
 # --------------------------------------------------------------------------- #
@@ -1047,3 +1090,81 @@ async def test_relink_query_selects_identified_items_never_looked_up(mass: Music
     )
 
     assert {album.item_id for album in selected} == {tagged.item_id, early.item_id}
+
+
+async def _add_composer(mass: MusicAssistant, name: str) -> Artist:
+    """Add a library artist mapped to qobuz that was never looked up on MusicBrainz."""
+    return await mass.music.artists.add_item_to_library(
+        Artist(
+            item_id="0",
+            provider="library",
+            name=name,
+            provider_mappings={
+                ProviderMapping(item_id=name, provider_domain="qobuz", provider_instance="qobuz_1")
+            },
+        )
+    )
+
+
+async def _add_recorded_track(
+    mass: MusicAssistant, name: str, album: Album, composer: Artist, *, classical: bool
+) -> Track:
+    """Add a library track on the album with a MusicBrainz recording id, crediting the composer."""
+    track = await mass.music.tracks.add_item_to_library(
+        Track(
+            item_id="0",
+            provider="library",
+            name=name,
+            provider_mappings={
+                ProviderMapping(item_id=name, provider_domain="qobuz", provider_instance="qobuz_1")
+            },
+            artists=UniqueList([composer]),
+            album=album,
+            credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)],
+            external_ids={(ExternalID.MB_RECORDING, str(uuid4()))},
+        )
+    )
+    # the flags are stored last, as adding a track classifies it and its album again
+    await _set_classical(mass, DB_TABLE_TRACKS, track.item_id, classical)
+    await _set_classical(mass, DB_TABLE_ALBUMS, album.item_id, classical)
+    return track
+
+
+async def _set_classical(mass: MusicAssistant, table: str, item_id: str, classical: bool) -> None:
+    """Store the classical flag of a library row."""
+    await mass.music.database.execute_write(
+        f"UPDATE {table} SET is_classical = :classical WHERE item_id = :item_id",
+        {"classical": int(classical), "item_id": int(item_id)},
+    )
+
+
+async def test_classical_link_progress_counts_only_the_classical_items(
+    mass: MusicAssistant,
+) -> None:
+    """Classical albums, recordings and composers count, those of pop music do not."""
+    symphonies = await _add_album(mass, "Symphonies", looked_up=None)
+    hits = await _add_album(mass, "Hits", looked_up=None)
+    # an identified album is no longer looked up, the recordings of its tracks still are
+    concertos = await _add_album(mass, "Concertos", looked_up=int(time()), mbid=RELEASE_ID)
+    beethoven = await _add_composer(mass, "Beethoven")
+    await _add_recorded_track(mass, "Eroica", symphonies, beethoven, classical=True)
+    await _add_recorded_track(mass, "Emperor", concertos, beethoven, classical=True)
+    await _add_recorded_track(
+        mass, "Song", hits, await _add_composer(mass, "Songwriter"), classical=False
+    )
+    await mass.music.works.add_item_to_library(
+        Work(
+            item_id="0",
+            provider="library",
+            name="Symphony no. 3",
+            provider_mappings=set(),
+            external_ids={(ExternalID.MB_WORK, WORK_ID)},
+        )
+    )
+
+    assert await mass.metadata.get_classical_link_progress() == {
+        "albums": 1,
+        "recordings": 2,
+        "works": 1,
+        "composers": 1,
+    }

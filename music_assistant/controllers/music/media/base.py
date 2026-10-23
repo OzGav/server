@@ -52,6 +52,7 @@ from music_assistant_models.media_items import (
     MediaItemSummaryType,
     MediaItemType,
     ProviderMapping,
+    Track,
     UniqueList,
 )
 
@@ -219,6 +220,15 @@ class TrackSyncDetails(LibraryItemSyncDetails):
 
     has_album: bool
     has_artists: bool
+    external_ids: set[tuple[ExternalID, str]]
+
+    def lacks_external_ids(self, track: Track) -> bool:
+        """
+        Return True when the provider reports external ids the library track does not hold.
+
+        :param track: The track as the provider currently reports it.
+        """
+        return not normalize_external_ids(track.external_ids) <= self.external_ids
 
 
 @dataclass(slots=True)
@@ -1444,6 +1454,23 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             return await self._merge_library_items_batched(target_id, source_id)
 
     @final
+    async def merge_into_external_id_match(self, item_id: str | int, item: ItemCls) -> int:
+        """
+        Merge a library item into the library item that the given item's external ids identify.
+
+        A candidate must pass the same confirmation as when adding an item to the library.
+
+        :param item_id: Library ID of the item that is merged away when a match is found.
+        :param item: The (provider) item whose external ids are looked up.
+        :return: Library ID of the surviving item, which is item_id when nothing matched.
+        """
+        source_id = int(item_id)
+        if not (target_id := await self._get_library_item_by_external_ids(item, source_id)):
+            return source_id
+        await self.merge_library_items(target_id, source_id)
+        return target_id
+
+    @final
     async def add_provider_mappings(
         self, item_id: str | int, provider_mappings: Iterable[ProviderMapping]
     ) -> None:
@@ -2162,19 +2189,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         if provider_mappings:
             if cur_item := await self.get_library_item_by_prov_mappings(provider_mappings):
                 return int(cur_item.item_id)
-        # fetch candidates per external id (best identifier first) and stop at the
-        # first verified match; external identifiers may be reused, so verify
-        # every candidate before accepting it
-        seen_item_ids: set[str] = set()
-        for external_id_type, external_id in sorted(item.external_ids, key=external_id_sort_key):
-            for cur_item in await self.get_library_items_by_external_id(
-                external_id, external_id_type, limit=None
-            ):
-                if cur_item.item_id in seen_item_ids:
-                    continue
-                seen_item_ids.add(cur_item.item_id)
-                if await self._confirm_library_candidate(cur_item, item):
-                    return int(cur_item.item_id)
+        if library_id := await self._get_library_item_by_external_ids(item):
+            return library_id
         # search by normalized exact name match
         query = (
             f"{self.db_table}.search_name IN :search_names "
@@ -2189,14 +2205,26 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         ):
             if await self._confirm_library_candidate(db_item, item):
                 return int(db_item.item_id)
-        return await self._get_library_item_by_other_match(item)
+        return None
 
-    async def _get_library_item_by_other_match(self, item: ItemCls | ItemMapping) -> int | None:
-        """
-        Return the library id of an item that neither its ids nor its name matched, if any.
-
-        Override in a subclass when a media type knows other evidence of the same item.
-        """
+    @final
+    async def _get_library_item_by_external_ids(
+        self, item: ItemCls | ItemMapping, skip_item_id: int | None = None
+    ) -> int | None:
+        """Return the first library item ID confirmed to match one of the item's external ids."""
+        # fetch candidates per external id (best identifier first) and stop at the
+        # first verified match; external identifiers may be reused, so verify
+        # every candidate before accepting it
+        seen_item_ids: set[str] = {str(skip_item_id)} if skip_item_id else set()
+        for external_id_type, external_id in sorted(item.external_ids, key=external_id_sort_key):
+            for cur_item in await self.get_library_items_by_external_id(
+                external_id, external_id_type, limit=None
+            ):
+                if cur_item.item_id in seen_item_ids:
+                    continue
+                seen_item_ids.add(cur_item.item_id)
+                if await self._confirm_library_candidate(cur_item, item):
+                    return int(cur_item.item_id)
         return None
 
     def _library_match_names(self, item: ItemCls | ItemMapping) -> list[str]:

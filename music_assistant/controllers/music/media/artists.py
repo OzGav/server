@@ -1669,9 +1669,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         """
         Merge the library artists carrying the given MusicBrainz artist id into the oldest.
 
-        Only artists of the same type merge, so an author and a singer are left apart. Works
-        of the merged artists that are then one work by their catalog numbers or names are
-        joined.
+        Only artists of the same type merge, so an author and a singer are left apart.
 
         :param artist_id: Library id of an artist carrying the MusicBrainz id.
         :param mbid: The MusicBrainz artist id.
@@ -1688,14 +1686,9 @@ class ArtistsController(MediaControllerBase[Artist]):
         target_id, *source_ids = sorted(
             {artist_id, *(item_id for item_id, t in artist_types.items() if t == artist_type)}
         )
-        merged = False
         for source_id in source_ids:
             with contextlib.suppress(MediaNotFoundError):  # already merged by a concurrent add
                 await self.merge_library_items(target_id, source_id)
-                merged = True
-        if merged:
-            await self.mass.music.works.join_catalogued_works(target_id)
-            await self.mass.music.works.join_same_named_works(target_id)
         return target_id
 
     async def set_library_artist_name(self, item_id: int, name: str, sort_name: str) -> None:

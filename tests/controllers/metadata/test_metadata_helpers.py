@@ -7,7 +7,9 @@ from music_assistant.controllers.metadata.helpers import (
     _detect_image_format,
     _normalize_imageproxy_format,
     composer_period,
+    musicbrainz_work_name,
 )
+from music_assistant.providers.musicbrainz.models import MusicBrainzAlias, MusicBrainzWork
 
 
 class TestDetectImageFormat:
@@ -65,3 +67,24 @@ class TestNormalizeImageproxyFormat:
 def test_composer_period(birth_year: int, death_year: int | None, expected: Period) -> None:
     """A composer's period follows from the middle of their working life."""
     assert composer_period(birth_year, death_year) == expected
+
+
+@pytest.mark.parametrize(
+    ("language", "aliases", "expected"),
+    [
+        ("de", [("24 Präludien", "de"), ("24 Preludes", "en")], "24 Präludien"),
+        ("nl", [("24 Präludien", "de"), ("24 Preludes", "en")], "24 Preludes"),
+        ("en", [], "24 Préludes, op. 28"),
+    ],
+)
+def test_work_name_prefers_the_language_then_english_then_the_title(
+    language: str, aliases: list[tuple[str, str]], expected: str
+) -> None:
+    """A work is named by its primary alias in the language, else in English, else its title."""
+    work = MusicBrainzWork(
+        id="1",
+        title="24 Préludes, op. 28",
+        aliases=[MusicBrainzAlias(name, name, locale, None, True) for name, locale in aliases],
+    )
+
+    assert musicbrainz_work_name(work, language) == expected

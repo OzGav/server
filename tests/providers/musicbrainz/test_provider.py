@@ -17,6 +17,7 @@ from music_assistant_models.enums import (
     LinkType,
     MediaType,
     ProviderFeature,
+    RecordingSource,
     WorkType,
 )
 from music_assistant_models.errors import InvalidDataError, RateLimited
@@ -1546,6 +1547,39 @@ async def test_resolve_release_by_barcode_rejects_another_album_and_stops_after_
     assert _requested(get_data) == ["release?query", "release/rel-1", "release/rel-2"]
 
 
+async def test_resolve_release_reports_the_barcode_release_that_is_not_the_album() -> None:
+    """The best ranked release a barcode finds that is not the album is reported, the album not."""
+    candidates = {
+        "count": 2,
+        "releases": [_edition("rel-cd", media_format="CD"), _edition("rel-xw")],
+    }
+    lookups = {
+        "release/rel-cd": _release_lookup("rel-cd", title="OK Computer"),
+        "release/rel-xw": _release_lookup("rel-xw", title="OK Computer"),
+    }
+    provider, _ = _routed_provider({"release?query": candidates, **lookups})
+    album = _album_item(external_ids={(ExternalID.BARCODE, BARCODE)})
+    mismatches: list[tuple[str, str]] = []
+
+    release = await provider.resolve_release(
+        album, on_barcode_mismatch=lambda barcode, found: mismatches.append((barcode, found.id))
+    )
+
+    assert release is None
+    assert mismatches == [(BARCODE, "rel-xw")]
+
+    lookups["release/rel-xw"] = _release_lookup("rel-xw")
+    provider, _ = _routed_provider({"release?query": candidates, **lookups})
+    mismatches.clear()
+
+    release = await provider.resolve_release(
+        album, on_barcode_mismatch=lambda barcode, found: mismatches.append((barcode, found.id))
+    )
+
+    assert release is not None
+    assert mismatches == []
+
+
 async def test_resolve_release_tries_at_most_three_barcodes() -> None:
     """However many barcodes an album carries, three are searched at most."""
     provider, get_data = _routed_provider({})
@@ -1771,10 +1805,9 @@ async def test_resolve_recording_by_musicbrainz_id_or_link() -> None:
     )
 
     assert by_id is not None
-
-    assert by_id.id == "rec-1"
+    assert (by_id[0].id, by_id[1]) == ("rec-1", None)
     assert by_link is not None
-    assert by_link.id == "rec-1"
+    assert (by_link[0].id, by_link[1]) == ("rec-1", RecordingSource.URL)
     assert _requested(get_data) == ["recording/rec-1", SPOTIFY_TRACK_URL, "recording/rec-1"]
 
 
@@ -1798,7 +1831,7 @@ async def test_resolve_recording_by_isrc_picks_the_matching_recording() -> None:
     )
 
     assert recording is not None
-    assert recording.id == "rec-radiohead"
+    assert (recording[0].id, recording[1]) == ("rec-radiohead", RecordingSource.ISRC)
     assert _requested(get_data) == [f"isrc/{ISRC}", "recording/rec-radiohead"]
 
 
@@ -1830,7 +1863,7 @@ async def test_resolve_recording_by_isrc_needs_a_credit_for_a_named_artist() -> 
     recording = await provider.resolve_recording(_track_item(artist=None, external_ids=isrc_only))
 
     assert recording is not None
-    assert recording.id == "rec-cover"
+    assert recording[0].id == "rec-cover"
 
 
 async def test_resolve_recording_by_isrc_of_one_recording_needs_no_title() -> None:
@@ -1847,7 +1880,7 @@ async def test_resolve_recording_by_isrc_of_one_recording_needs_no_title() -> No
     )
 
     assert recording is not None
-    assert recording.id == "rec-1"
+    assert recording[0].id == "rec-1"
 
 
 @pytest.mark.parametrize(
@@ -1939,7 +1972,7 @@ async def test_resolve_recording_by_isrc_on_the_album_release_needs_no_artist_cr
 
     recording = await provider.resolve_recording(track)
 
-    assert (recording.id if recording else None) == expected
+    assert (recording[0].id if recording else None) == expected
     provider.mass.music.albums.get_library_item.assert_awaited_once_with("b")
     expected_requests = [f"isrc/{ISRC}"]
     if album_ids:
@@ -2054,7 +2087,7 @@ async def test_resolve_recording_falls_back_to_a_name_search() -> None:
     recording = await provider.resolve_recording(_track_item())
 
     assert recording is not None
-    assert recording.id == "rec-1"
+    assert (recording[0].id, recording[1]) == ("rec-1", RecordingSource.SEARCH)
     assert _requested(get_data) == ["recording?query", "recording/rec-1"]
     assert await provider.resolve_recording(_track_item(album=None)) is None
 
@@ -2808,14 +2841,14 @@ def _work(name: str) -> MusicBrainzWork:
     return MusicBrainzWork.from_raw(_work_lookup(name))
 
 
-async def test_work_details_requests_artist_work_and_series_relations() -> None:
-    """Request the relations a work is enriched from and parse the work off the lookup."""
+async def test_work_details_requests_aliases_and_artist_work_and_series_relations() -> None:
+    """Request the names and relations a work is enriched from and parse the work off the lookup."""
     provider, get_data = _provider(_work_lookup("symphony_5"))
 
     work = await provider.get_work_details(SYMPHONY_5_MBID)
 
     get_data.assert_awaited_once_with(
-        f"work/{SYMPHONY_5_MBID}?inc=artist-rels+work-rels+series-rels"
+        f"work/{SYMPHONY_5_MBID}?inc=aliases+artist-rels+work-rels+series-rels"
     )
     assert work is not None
     assert (work.id, work.title, work.type) == (
@@ -2911,6 +2944,76 @@ def test_work_movements_follow_the_ordering_key_else_their_position() -> None:
         (1, "II. Andante con moto"),
         (2, "Finale"),
         (3, "Coda"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("title", "parent_title", "expected"),
+    [
+        ("Tosca: Atto III. “E lucevan le stelle”", "Tosca: Atto III", "“E lucevan le stelle”"),
+        (
+            "La bohème: Atto I, no. 6. “Che gelida manina!” (Rodolfo)",
+            "La bohème: Atto I. In soffitta",
+            "no. 6. “Che gelida manina!” (Rodolfo)",
+        ),
+        (
+            "Spartacus: Adagio of Spartacus & Phrygia",
+            "Spartacus, op. 82",
+            "Adagio of Spartacus & Phrygia",
+        ),
+        (
+            "La bohème: Atto I. “Già dell'Apocalisse appariscono i segni”",
+            "La bohème: Atto I. In soffitta",
+            "“Già dell'Apocalisse appariscono i segni”",
+        ),
+        ("Turandot: Atto I, no. 2", "Turandot: Atto II", "Turandot: Atto I, no. 2"),
+        (
+            "Ein Sommernachtstraum, op. 21 (op. 61 no. 1): Ouvertüre",
+            "Ein Sommernachtstraum, op. 61",
+            "Ein Sommernachtstraum, op. 21 (op. 61 no. 1): Ouvertüre",
+        ),
+        ("Main Theme", "Schindler's List", "Main Theme"),
+    ],
+)
+def test_part_name_leaves_out_the_start_it_shares_with_its_work(
+    title: str, parent_title: str, expected: str
+) -> None:
+    """A part's name leaves out the start its title shares with its work up to where they part."""
+    part = MusicBrainzWork(id="w", title=title)
+    parent = MusicBrainzWork(
+        id="p",
+        title=parent_title,
+        relations=[MusicBrainzRelation(type="parts", direction="forward", work=part)],
+    )
+
+    movement = parent.part_movement("w")
+
+    assert movement is not None
+    assert movement.name == expected
+
+
+@pytest.mark.parametrize("work_type", [None, "Opera"])
+def test_part_movement_is_numbered_by_its_place_in_the_work_s_list(
+    work_type: str | None,
+) -> None:
+    """A part is numbered by its place in its work's list, not by the number in its title."""
+    keyed = MusicBrainzWork(id="keyed", title="Opera: Atto I, no. 6. Aria")
+    unkeyed = MusicBrainzWork(id="unkeyed", title="Opera: Atto I, no. 9. Duet")
+    parent = MusicBrainzWork(
+        id="p",
+        title="Opera: Atto I",
+        type=work_type,
+        relations=[
+            MusicBrainzRelation(type="parts", direction="forward", work=unkeyed),
+            MusicBrainzRelation(type="parts", direction="forward", work=keyed, ordering_key=1),
+        ],
+    )
+
+    movements = [parent.part_movement(x) for x in ("keyed", "unkeyed")]
+
+    assert [(x.number, x.name) if x else None for x in movements] == [
+        (1, "no. 6. Aria"),
+        (2, "no. 9. Duet"),
     ]
 
 
@@ -3122,6 +3225,7 @@ async def test_artists_by_name_keeps_only_those_carrying_the_name() -> None:
     artists = await provider.get_artists_by_name("Saint-Saëns")
 
     assert [x.id for x in artists] == ["camille"]
+    assert get_data.await_args is not None
     assert get_data.await_args.kwargs["query"] == 'artist:"Saint\\-Saëns" OR alias:"Saint\\-Saëns"'
 
 

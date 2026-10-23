@@ -7,13 +7,12 @@ import pytest
 from music_assistant.helpers.work_titles import (
     TrackWork,
     joined_composer_name,
-    name_different_keys,
-    names_catalogued_part,
-    numbered_piece,
     parent_work_name,
     parse_catalog_numbers,
     parse_work_title,
     part_key,
+    part_label,
+    without_movement_number,
     word_and_number,
 )
 
@@ -78,7 +77,7 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
         (
             "La bohème, Act II: Viva Parpignol!",
             PUCCINI,
-            TrackWork("La bohème, Act II", None, "Viva Parpignol!", None, "La bohème"),
+            TrackWork("La bohème, Act II", None, "Viva Parpignol!", None),
         ),
         (
             "The Nutcracker, Op. 71, Act II: No. 13, Waltz of the Flowers",
@@ -88,15 +87,12 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
                 None,
                 "No. 13, Waltz of the Flowers",
                 None,
-                "The Nutcracker, Op. 71",
             ),
         ),
         (
             'Messiah, HWV 56, Pt. 2: "Hallelujah" (Chorus)',
             "Georg Friedrich Händel",
-            TrackWork(
-                "Messiah, HWV 56, Pt. 2", None, '"Hallelujah" (Chorus)', None, "Messiah, HWV 56"
-            ),
+            TrackWork("Messiah, HWV 56, Pt. 2", None, '"Hallelujah" (Chorus)', None),
         ),
         (
             'La Fanciulla del West, Act I: "Quello che tacete"',
@@ -106,7 +102,6 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
                 None,
                 '"Quello che tacete"',
                 None,
-                "La Fanciulla del West",
             ),
         ),
         (
@@ -117,7 +112,6 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
                 None,
                 "Ride of the Valkyries",
                 None,
-                "The Valkyrie, WWV 86b",
             ),
         ),
         (
@@ -128,7 +122,6 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
                 None,
                 "No. 10, Scene",
                 None,
-                "Swan Lake, Op. 20, TH 12",
             ),
         ),
         (
@@ -139,13 +132,12 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
                 None,
                 "Che gelida manina",
                 None,
-                "La bohème, SC 67",
             ),
         ),
         (
             "Messiah, HWV 56 / Part 2: Hallelujah",
             "Georg Friedrich Händel",
-            TrackWork("Messiah, HWV 56 / Part 2", None, "Hallelujah", None, "Messiah, HWV 56"),
+            TrackWork("Messiah, HWV 56 / Part 2", None, "Hallelujah", None),
         ),
         (
             "St. Matthew Passion, BWV 244, Anhang: Aria",
@@ -155,7 +147,6 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
                 None,
                 "Aria",
                 None,
-                "St. Matthew Passion, BWV 244",
             ),
         ),
         (
@@ -166,7 +157,7 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
         (
             "La bohème, Act II, Scene 1: Viva Parpignol!",
             PUCCINI,
-            TrackWork("La bohème, Act II, Scene 1", None, "Viva Parpignol!", None, "La bohème"),
+            TrackWork("La bohème, Act II, Scene 1", None, "Viva Parpignol!", None),
         ),
         (
             "The Nutcracker, Act II, Scene 3, Op. 71, TH 14: No. 15, Pas de deux",
@@ -176,7 +167,6 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
                 None,
                 "No. 15, Pas de deux",
                 None,
-                "The Nutcracker, Op. 71, TH 14",
             ),
         ),
     ],
@@ -198,12 +188,11 @@ def test_act_or_part_comes_with_its_work(
                 None,
                 "No. 2 Waltz: Tempo di valse",
                 None,
-                "Swan Lake Ballet, Op. 20",
             ),
         ),
         (
             "Swan Lake, Op. 20: Act 2: No. 10 Scene",
-            TrackWork("Swan Lake, Op. 20, Act 2", None, "No. 10 Scene", None, "Swan Lake, Op. 20"),
+            TrackWork("Swan Lake, Op. 20, Act 2", None, "No. 10 Scene", None),
         ),
         (
             "Symphony No. 5 in C minor, Op. 67: I. Allegro con brio: Coda",
@@ -219,7 +208,7 @@ def test_work_ends_at_its_catalog_number(title: str, expected: TrackWork) -> Non
 def test_aria_quoted_straight_after_the_colon() -> None:
     """A quoted aria straight after the colon is the movement, as with a space in between."""
     assert parse_work_title('La Bohème, Act I:"Che gelida manina"', PUCCINI) == TrackWork(
-        "La Bohème, Act I", None, '"Che gelida manina"', None, "La Bohème"
+        "La Bohème, Act I", None, '"Che gelida manina"', None
     )
 
 
@@ -265,8 +254,42 @@ def test_aria_quoted_straight_after_the_colon() -> None:
             'Beethoven: Piano Concerto No. 5 in E-flat major, Op. 73 "Emperor": Mvt. III-Rondo',
             BEETHOVEN,
             TrackWork(
-                'Piano Concerto No. 5 in E-flat major, Op. 73 "Emperor"', None, "Mvt. III-Rondo"
+                'Piano Concerto No. 5 in E-flat major, Op. 73 "Emperor"', None, "Mvt. III-Rondo", 3
             ),
+        ),
+        (
+            'Beethoven: Piano Concerto No. 5 in E-flat major, Op. 73 "Emperor": Mvt. III-Rondo: '
+            "Allegro",
+            BEETHOVEN,
+            TrackWork(
+                'Piano Concerto No. 5 in E-flat major, Op. 73 "Emperor"',
+                None,
+                "Mvt. III-Rondo: Allegro",
+                3,
+            ),
+        ),
+        (
+            "Rimsky-Korsakov: Scheherazade Symphonic Suite, Op. 35, Mvt. 3 The Young Prince And "
+            "The Princess (Andantino quasi allegretto)",
+            "Nikolai Rimsky-Korsakov",
+            TrackWork(
+                "Scheherazade Symphonic Suite, Op. 35",
+                None,
+                "Mvt. 3 The Young Prince And The Princess (Andantino quasi allegretto)",
+                3,
+            ),
+        ),
+        (
+            "Schubert: Symphony No. 8 in B minor, D. 759: Mvt. I-Allegro moderato (excerpt)",
+            "Franz Schubert",
+            TrackWork(
+                "Symphony No. 8 in B minor, D. 759", None, "Mvt. I-Allegro moderato (excerpt)", 1
+            ),
+        ),
+        (
+            "Beethoven: Symphony No. 5 in C minor, Op. 67: Mvt. I Allegro con brio",
+            BEETHOVEN,
+            TrackWork("Symphony No. 5 in C minor, Op. 67", None, "Mvt. I Allegro con brio", 1),
         ),
         (
             'Mozart: Symphony No. 41 in C major, K. 551 "Jupiter" Allegro vivace (excerpt)',
@@ -385,7 +408,7 @@ def test_composer_work_and_dashed_movement(title: str, composer: str, expected: 
         ("Klavierkonzert Nr. 2: Adagio", TrackWork("Klavierkonzert Nr. 2", None, "Adagio")),
         (
             "La bohème, Act II, Scene 1: Viva Parpignol!",
-            TrackWork("La bohème, Act II, Scene 1", None, "Viva Parpignol!", None, "La bohème"),
+            TrackWork("La bohème, Act II, Scene 1", None, "Viva Parpignol!", None),
         ),
         ("Peer Gynt: II. Ases Tod", TrackWork("Peer Gynt", None, "II. Ases Tod", 2)),
         (
@@ -508,6 +531,13 @@ def test_catalog_number_keeps_its_number_within_the_opus(title: str, expected: l
         ("Swan Lake, Act II, Op. 20, TH 12", "Swan Lake, Act 2"),
         ("The Nutcracker, Act II, Scene 3, Op. 71, TH 14", "The Nutcracker, Op. 71, Act II"),
         ("Matthäus-Passion, BWV 244, Anhang", "St. Matthew Passion, BWV 244, Anhang"),
+        ("Matthäus-Passion, BWV 244: Teil I", "St. Matthew Passion, BWV 244, Part I"),
+        ("Messiah, HWV 56: Part II", "Messiah, HWV 56, Pt. 2"),
+        ("Turandot: Atto III", "Turandot, Act 3"),
+        ("Turandot: Atto III, scena 1", "Turandot, Act III"),
+        ("Carmen: Acte I", "Carmen, Act I"),
+        ("Die Walküre: Akt 1", "Die Walküre, Act I"),
+        ("Die Meistersinger von Nürnberg: Zweiter Aufzug / Aufzug 2", "Meistersinger, Act II"),
     ],
 )
 def test_same_part_written_differently(first: str, second: str) -> None:
@@ -520,23 +550,6 @@ def test_slashed_act_is_part_of_the_same_work() -> None:
     """An act after a slash is part of the work the same act after a comma is part of."""
     assert parent_work_name("La bohème, SC 67 / Act 1") == "La bohème, SC 67"
     assert parent_work_name("La bohème, SC 67, Act I") == "La bohème, SC 67"
-
-
-@pytest.mark.parametrize(
-    ("work", "expected"),
-    [
-        ('Messiah, HWV 56: Part II, no. 44. Chorus "Hallelujah"', True),
-        ("Sonata in B-flat major, D. 960: No. 3 Scherzo", True),
-        ("Symphony No. 94, Hob. I:94: II. Andante", True),
-        ("The Nutcracker, Act II, Scene 3, Op. 71, TH 14", True),
-        ("Messiah, HWV 56", False),
-        ("Symphony No. 94 in G major, Hob. I:94", False),
-        ("Symphony No. 5: I. Allegro", False),
-    ],
-)
-def test_catalogued_part(work: str, expected: bool) -> None:
-    """A title naming an act or going on after its catalog number names a part of the work."""
-    assert names_catalogued_part(work) is expected
 
 
 @pytest.mark.parametrize(
@@ -554,11 +567,24 @@ def test_different_parts_have_different_keys(first: str, second: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "work", ["Symphony No. 5, Op. 67", "Symphony No. 3 Part 2", "La bohème, Scene 1"]
+    "work",
+    [
+        "Symphony No. 5, Op. 67",
+        "Symphony No. 3 Part 2",
+        "La bohème, Scene 1",
+        "Rigoletto: Atto III. “La donna è mobile” (Duca)",
+        "Matthäus-Passion, BWV 244: Teil II, XXXVIa. Rezitativ",
+        "La bohème: Atto I. In soffitta",
+    ],
 )
 def test_whole_work_has_no_part_key(work: str) -> None:
-    """A work that is not an act or part has no part key."""
+    """A work that is not an act or part, or a piece within one, has no part key."""
     assert part_key(work) is None
+
+
+def test_act_after_a_colon_is_part_of_the_work_before_it() -> None:
+    """An act a MusicBrainz title names after a colon is part of the work before the colon."""
+    assert parent_work_name("Turandot: Atto III") == "Turandot"
 
 
 @pytest.mark.parametrize(
@@ -583,25 +609,6 @@ def test_joined_composer_name(name: str, title: str, expected: str | None) -> No
 
 
 @pytest.mark.parametrize(
-    ("work", "expected"),
-    [
-        (
-            "Piano Sonata No. 11 in A major, K 331, No. 3 Rondo Alla Turca",
-            ("K 331", 3, "Rondo Alla Turca"),
-        ),
-        ("Serenade for Strings in C major, Op. 48, No. 2 Waltz", ("Op. 48", 2, "Waltz")),
-        ("Fantasie in C major, Op. 17, No. 1", ("Op. 17", 1, None)),
-        ("Serenade, Op. 48, No. 2, TH 48", ("Op. 48", 2, None)),
-        ("Piano Sonata No. 11 in A Major, K. 331", None),
-        ("Symphony No. 5 in C minor, Op. 67", None),
-    ],
-)
-def test_numbered_piece(work: str, expected: tuple[str, int, str | None] | None) -> None:
-    """A work titled as a numbered piece of an opus gives its opus, number and name."""
-    assert numbered_piece(work) == expected
-
-
-@pytest.mark.parametrize(
     ("name", "expected"),
     [
         ("Variation No. 1", ("variation", 1)),
@@ -622,24 +629,59 @@ def test_word_and_number(name: str, expected: tuple[str, int] | None) -> None:
 
 
 @pytest.mark.parametrize(
-    ("title", "other_title", "expected"),
+    ("work", "expected"),
     [
-        ("Violin Concerto in A Minor, BWV 1041", "Violin Concerto in E major, BWV 1041", True),
-        ("Violin Concerto in A Minor, BWV 1041", "Violin Concerto in A minor, BWV 1041", False),
-        ("Violin Concerto in A minor", "Violinkonzert a-Moll", False),
-        ("Symphony in E-flat major", "Symphony in E flat major", False),
-        ("Symphony in E-flat major", "Symphony in E♭ major", False),
-        ("Symphony in E-flat major", "Sinfonie Es-Dur", False),
-        ("Symphony in E-flat major", "Symphony in E major", True),
-        ("Sonata in F sharp minor", "Sonata in F# minor", False),
-        ("Sonata in F sharp minor", "Sonate fis-Moll", False),
-        ("Sonata in B-flat major", "Sonate B-Dur", False),
-        ("Sonata in B minor", "Sonate h-Moll", False),
-        ("Sonata in B minor", "Sonate b-Moll", True),
-        ("Mass in C, Op. 86", "Mass in C minor, Op. 86", False),
-        ("Toccata and Fugue, BWV 565", "Toccata and Fugue in D Minor, BWV 565", False),
+        ("Tosca, SC 69 / Act 3", "Act III"),
+        ("Rigoletto / Act 2", "Act II"),
+        ("Rigoletto, Act III", "Act III"),
+        ("Turandot: Atto III", "Act III"),
+        ("Swan Lake, Act II, Scene 1, Op. 20", "Act II, Scene 1"),
+        ("Messiah, HWV 56, Pt. 2", "Part II"),
+        ("La bohème: Atto I. In soffitta", "Act I"),
+        ("Luisa Miller: Atto II. “L'intrigo”", "Act II"),
+        ("Don Carlo: Atto I (II)", "Act I"),
+        # a scene of an act with its own name is no act
+        ('Die Meistersinger, WWV 96: Akt III, Scene V. "Sankt Krispin"', None),
+        ("La Damnation de Faust: Quatrième Partie", None),
+        ("Symphony No. 5. Allegro", None),
+        ("Symphony No. 5", None),
     ],
 )
-def test_name_different_keys(title: str, other_title: str, expected: bool) -> None:
-    """Titles differ in key only when both name one, however each spells it."""
-    assert name_different_keys(title, other_title) is expected
+def test_act_or_part_is_shown_in_english_with_a_roman_number(
+    work: str, expected: str | None
+) -> None:
+    """An act or part closing a work name, or before its subtitle, shows with a Roman number."""
+    assert part_label(work) == expected
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        (
+            "Lakmé (Opera): Act 1, Flower Duet",
+            TrackWork("Lakmé (Opera), Act 1", None, "Flower Duet", None),
+        ),
+        (
+            "Rigoletto: Act 3, La donna è mobile",
+            TrackWork("Rigoletto, Act 3", None, "La donna è mobile", None),
+        ),
+        ("Rigoletto: Act 3", TrackWork("Rigoletto", None, "Act 3", None)),
+    ],
+)
+def test_act_opening_the_movement_is_part_of_the_work(title: str, expected: TrackWork) -> None:
+    """An act opening the text after the work is the act the movement belongs to."""
+    assert parse_work_title(title, classical=True) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("02. Christe", "Christe"),
+        ("No. 3, O mio babbino caro", "O mio babbino caro"),
+        ("IV. In the Hall of the Mountain King", "In the Hall of the Mountain King"),
+        ("O soave fanciulla", "O soave fanciulla"),
+    ],
+)
+def test_movement_name_loses_the_number_it_opens_with(name: str, expected: str) -> None:
+    """A movement name without its opening number reads as the movement's own name."""
+    assert without_movement_number(name) == expected

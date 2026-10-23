@@ -96,10 +96,6 @@ CONF_RECORDING_WORKS_CATCH_UP_DONE = "classical_recording_works_catch_up_done"
 # another MusicBrainz lookup once
 CONF_COMPOSERLESS_WORKS_CATCH_UP_DONE = "classical_composerless_works_catch_up_done"
 
-# TEMP(classical 5b work join): remove before release
-# core config key recording that the library works that are the same work were joined once
-CONF_SAME_WORKS_JOIN_DONE = "classical_same_works_join_done"
-
 # TEMP(classical 5c work composers): remove before release
 # core config key recording that the library works without composers were given the
 # composers credited on their tracks once

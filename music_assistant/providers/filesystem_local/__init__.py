@@ -3022,7 +3022,8 @@ class LocalFileSystemProvider(MusicProvider):
         if track_work:
             track.movement_name = track.movement_name or track_work.movement_name
             track.movement_number = track.movement_number or track_work.movement_number
-            if classical_file or not tags.works:
+            # a recording of several works gets its work from their ids, on MusicBrainz
+            if (classical_file or not tags.works) and len(tags.musicbrainz_workids) < 2:
                 self._set_track_work(track, track_work)
         # the MusicBrainz work ids the linked work does not carry stay on the track for
         # enrichment, which may hold several as a recording can be linked to several works
@@ -3272,7 +3273,7 @@ class LocalFileSystemProvider(MusicProvider):
 
     def _set_track_work(self, track: Track, track_work: TrackWork) -> None:
         """
-        Set the work a track's tags name, for the library to add with the track.
+        Set the work a track's tags name, added with the track when the tags give its id.
 
         :param track: The track parsed from the file.
         :param track_work: The work the tags name.
