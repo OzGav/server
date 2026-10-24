@@ -1669,9 +1669,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         """
         Merge the library artists carrying the given MusicBrainz artist id into the oldest.
 
-        Only artists of the same type merge, so an author and a singer are left apart. Works
-        of the merged artists that are then one work by their catalog numbers or names are
-        joined.
+        Only artists of the same type merge, so an author and a singer are left apart.
 
         :param artist_id: Library id of an artist carrying the MusicBrainz id.
         :param mbid: The MusicBrainz artist id.
@@ -1688,14 +1686,9 @@ class ArtistsController(MediaControllerBase[Artist]):
         target_id, *source_ids = sorted(
             {artist_id, *(item_id for item_id, t in artist_types.items() if t == artist_type)}
         )
-        merged = False
         for source_id in source_ids:
             with contextlib.suppress(MediaNotFoundError):  # already merged by a concurrent add
                 await self.merge_library_items(target_id, source_id)
-                merged = True
-        if merged:
-            await self.mass.music.works.join_catalogued_works(target_id)
-            await self.mass.music.works.join_same_named_works(target_id)
         return target_id
 
     async def set_library_artist_name(self, item_id: int, name: str, sort_name: str) -> None:
@@ -2016,6 +2009,23 @@ class ArtistsController(MediaControllerBase[Artist]):
                 "artists must have the same role."
             )
             raise InvalidDataError(msg)
+
+    async def _merge_library_item_references(self, target_id: int, source_id: int) -> None:
+        """Have the link run read the performers of a merged artist's classical tracks again."""
+        # a track's performers were matched to its artists as they were when it was read, so
+        # an artist that lacked the MusicBrainz id the other one carries was missed
+        marker = f"json_extract({DB_TABLE_TRACKS}.metadata, '$.last_musicbrainz_recording_lookup')"
+        recording = has_musicbrainz_id(
+            f"{DB_TABLE_TRACKS}.item_id", MediaType.TRACK, ExternalID.MB_RECORDING
+        )
+        await self.mass.music.database.execute_write(
+            f"UPDATE {DB_TABLE_TRACKS} "
+            "SET metadata = json_remove(metadata, '$.last_musicbrainz_recording_lookup') "
+            f"WHERE is_classical = 1 AND json_valid(metadata) AND {marker} NOT NULL "
+            f"AND {recording} AND item_id IN (SELECT track_id FROM {DB_TABLE_TRACK_ARTISTS} "
+            "WHERE artist_id = :source_id AND role != :composer)",
+            {"source_id": source_id, "composer": ArtistRole.COMPOSER.value},
+        )
 
     async def _remove_music_artist_from_library(self, db_id: int, recursive: bool) -> None:
         # recursively also remove the albums and tracks the artist is a main artist of

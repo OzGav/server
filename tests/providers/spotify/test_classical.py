@@ -130,7 +130,7 @@ def test_album_without_its_tracks_is_not_tagged() -> None:
 
 
 def test_work_title_gives_work_movement_and_composer() -> None:
-    """The first artist of a "Work: Piece" track is its composer and the work's composer."""
+    """The first artist of a "Work: Piece" track is its composer, the rest names the work."""
     track = parse_track(
         _track_obj("La bohème, Act II: Viva Parpignol!", ("Giacomo Puccini", *PERFORMERS)),
         _make_provider(),
@@ -142,14 +142,10 @@ def test_work_title_gives_work_movement_and_composer() -> None:
     assert track.movement_number is None
     assert isinstance(track.work, Work)
     assert track.work.name == "La bohème, Act II"
-    assert [x.name for x in track.work.composers] == ["Giacomo Puccini"]
-    assert track.work.parent_work is not None
-    assert track.work.parent_work.name == "La bohème"
-    assert track.work.parent_work.provider == INSTANCE_ID
 
 
 def test_numbered_movement_and_catalog_number() -> None:
-    """A numbered movement gives its number, and the work keeps its catalog number."""
+    """A numbered movement gives its number, the work its name with the catalog number."""
     track = parse_track(
         _track_obj(
             "Elgar: Cello Concerto in E Minor, Op. 85: I. Adagio - Moderato",
@@ -162,8 +158,6 @@ def test_numbered_movement_and_catalog_number() -> None:
     assert track.movement_name == "I. Adagio - Moderato"
     assert isinstance(track.work, Work)
     assert track.work.name == "Cello Concerto in E Minor, Op. 85"
-    assert track.work.catalog_numbers == ["Op. 85"]
-    assert track.work.parent_work is None
 
 
 def test_title_naming_another_composer_credits_no_performer() -> None:
@@ -179,7 +173,6 @@ def test_title_naming_another_composer_credits_no_performer() -> None:
     assert _composer_names(track) == []
     assert isinstance(track.work, Work)
     assert track.work.name == "Miserere"
-    assert list(track.work.composers) == []
     assert (track.movement_name, track.movement_number) == ("01. Miserere Mei, Deus", 1)
 
 

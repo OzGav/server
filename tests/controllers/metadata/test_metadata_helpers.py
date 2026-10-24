@@ -7,7 +7,9 @@ from music_assistant.controllers.metadata.helpers import (
     _detect_image_format,
     _normalize_imageproxy_format,
     composer_period,
+    musicbrainz_work_name,
 )
+from music_assistant.providers.musicbrainz.models import MusicBrainzAlias, MusicBrainzWork
 
 
 class TestDetectImageFormat:
@@ -65,3 +67,53 @@ class TestNormalizeImageproxyFormat:
 def test_composer_period(birth_year: int, death_year: int | None, expected: Period) -> None:
     """A composer's period follows from the middle of their working life."""
     assert composer_period(birth_year, death_year) == expected
+
+
+@pytest.mark.parametrize(
+    ("language", "aliases", "expected"),
+    [
+        ("de", [("24 Präludien", "de"), ("24 Preludes", "en")], "24 Präludien"),
+        ("nl", [("24 Präludien", "de"), ("24 Preludes", "en")], "24 Preludes"),
+        ("en", [], "24 Préludes, op. 28"),
+    ],
+)
+def test_work_name_prefers_the_language_then_english_then_the_title(
+    language: str, aliases: list[tuple[str, str]], expected: str
+) -> None:
+    """A work is named by its primary alias in the language, else in English, else its title."""
+    work = MusicBrainzWork(
+        id="1",
+        title="24 Préludes, op. 28",
+        aliases=[MusicBrainzAlias(name, name, locale, None, True) for name, locale in aliases],
+    )
+
+    assert musicbrainz_work_name(work, language) == expected
+
+
+@pytest.mark.parametrize(
+    ("aliases", "expected"),
+    [
+        (
+            [
+                ("Щелкунчик", "ru", "Work name"),
+                ("Nussknacker", None, "Search hint"),
+                ("Casse-Noisette", "fr", "Work name"),
+                ("The Nutcracker", "en", "Work name"),
+            ],
+            "The Nutcracker",
+        ),
+        ([("Casse-Noisette", "fr", "Work name")], "Casse-Noisette"),
+        ([("Nussknacker", None, "Search hint"), ("Щелкунчик", "ru", None)], "Щелкунчик, op. 71"),
+    ],
+)
+def test_work_name_of_a_non_latin_title_falls_back_to_a_latin_alias(
+    aliases: list[tuple[str, str | None, str | None]], expected: str
+) -> None:
+    """A title not in Latin script gives way to a Latin alias, English first, else stays."""
+    work = MusicBrainzWork(
+        id="1",
+        title="Щелкунчик, op. 71",
+        aliases=[MusicBrainzAlias(name, name, locale, kind) for name, locale, kind in aliases],
+    )
+
+    assert musicbrainz_work_name(work, "nl") == expected

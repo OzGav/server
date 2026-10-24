@@ -194,8 +194,6 @@ async def test_work_given_apart_from_the_title_gives_work_movement_and_credits()
 
     assert isinstance(track.work, Work)
     assert track.work.name == "Symphony No. 5 in C minor, Op. 67"
-    assert track.work.catalog_numbers == ["Op. 67"]
-    assert [x.name for x in track.work.composers] == ["Ludwig van Beethoven"]
     assert track.movement_name == "I. Allegro con brio"
     assert track.movement_number == 1
     # the orchestra the performers string names without an id comes from the album's artists,
@@ -218,8 +216,8 @@ async def test_hyphenated_names_stay_whole_in_the_performers() -> None:
     assert "Hans-Rudolf Müller, Recording Engineer" in (track.metadata.performers or set())
 
 
-async def test_opera_title_gives_act_under_the_opera_and_singers_by_voice() -> None:
-    """A title naming the act puts it under the opera, a director conducts without a conductor."""
+async def test_opera_title_gives_the_act_and_singers_by_voice() -> None:
+    """A title naming the act names the work, a director conducts without a conductor."""
     tosca = 'Tosca, S. 69, IGP 17, Act I: "Gente là dentro!!" (Cavaradossi, Angelotti, Tosca)'
     floriana_cavalli = {"id": 1, "name": "Floriana Cavalli"}
     album = _album_obj(
@@ -236,8 +234,6 @@ async def test_opera_title_gives_act_under_the_opera_and_singers_by_voice() -> N
 
     assert isinstance(track.work, Work)
     assert track.work.name == "Tosca, S. 69, IGP 17, Act I"
-    assert track.work.parent_work is not None
-    assert track.work.parent_work.name == "Tosca, S. 69, IGP 17"
     assert track.movement_name == '"Gente là dentro!!" (Cavaradossi, Angelotti, Tosca)'
     assert track.movement_number is None
     assert _credits(track) == {

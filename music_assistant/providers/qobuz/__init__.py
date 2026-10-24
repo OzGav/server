@@ -900,7 +900,7 @@ class QobuzProvider(MusicProvider):
         if classical_work := track_work(
             track.name, track_obj.get("work"), composer.name if composer else None
         ):
-            set_track_work(track, classical_work, composer)
+            set_track_work(track, classical_work)
 
     def _album_artists(
         self, album_obj: dict[str, Any], track_objs: list[dict[str, Any]]

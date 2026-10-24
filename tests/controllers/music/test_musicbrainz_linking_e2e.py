@@ -13,6 +13,7 @@ from music_assistant_models.enums import (
     ExternalID,
     MediaType,
     ProviderType,
+    RecordingSource,
 )
 from music_assistant_models.errors import MediaNotFoundError
 from music_assistant_models.media_items import Album, Artist, ProviderMapping, Track, UniqueList
@@ -428,7 +429,8 @@ async def _set_recording_id(mass: MusicAssistant, track: Track, recording_id: st
 async def _link_track(mass: MusicAssistant, track: Track, recording_id: str) -> None:
     """Run the MusicBrainz link step on a library track that resolves to the recording."""
     recording = MusicBrainzRecording(id=recording_id, title="Track 1", length=201000)
-    with patch.object(MusicbrainzProvider, "resolve_recording", AsyncMock(return_value=recording)):
+    resolved = AsyncMock(return_value=(recording, RecordingSource.ISRC))
+    with patch.object(MusicbrainzProvider, "resolve_recording", resolved):
         await mass.metadata.link_item_to_musicbrainz(
             await mass.music.tracks.get_library_item(track.item_id)
         )

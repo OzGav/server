@@ -18,6 +18,7 @@ from music_assistant_models.enums import (
     MediaType,
     ProviderFeature,
     ProviderType,
+    RecordingSource,
     SortDirection,
     SortField,
 )
@@ -58,6 +59,7 @@ from music_assistant.controllers.music.constants import SIMILAR_ITEMS_LIMIT
 from music_assistant.controllers.music.helpers import (
     provider_mappings_for_update,
     search_name_match_clause,
+    set_track_recording_id,
 )
 from music_assistant.controllers.music.listing import apply_listing, resolve_listing_sort
 from music_assistant.controllers.music.listing_cache import Listing
@@ -680,7 +682,7 @@ class TracksController(MediaControllerBase[Track]):
 
         :param item_id: Provider-native track ID.
         :param provider_instance_id_or_domain: Music provider instance ID or domain.
-        :param mbid: MusicBrainz recording ID.
+        :param mbid: MusicBrainz recording ID an AcoustID fingerprint lookup found.
         :param acoustid: AcoustID UUID.
         :param isrcs: ISRC codes.
         """
@@ -702,8 +704,7 @@ class TracksController(MediaControllerBase[Track]):
             return
 
         changed = False
-        if mbid and not track.mbid:
-            track.mbid = mbid
+        if mbid and set_track_recording_id(track, mbid, RecordingSource.ACOUSTID):
             changed = True
         if acoustid and not any(
             ext_id[0] == ExternalID.ACOUSTID and ext_id[1] == acoustid
@@ -1731,6 +1732,7 @@ class TracksController(MediaControllerBase[Track]):
         item.metadata.lrc_lyrics = normalize_lrc_lyrics(
             item.metadata.lrc_lyrics or extract_lrc_lyrics(item.metadata.lyrics)
         )
+        self._mark_own_recording_id(item)
         await self._split_joined_composers(item)
         await self._credit_performing_composer(item)
         work_id = await self._get_or_add_work_id(item)
@@ -1760,7 +1762,6 @@ class TracksController(MediaControllerBase[Track]):
         await self._set_track_artists(db_id, item.artists)
         await self._set_credits(db_id, item.credits)
         if work_id:
-            await self.mass.music.works.credit_track_composers(work_id)
             await self.credit_work_composers(work_id)
         # handle track album
         if item.album:
@@ -1785,6 +1786,7 @@ class TracksController(MediaControllerBase[Track]):
         """Update Track record in the database, merging data."""
         db_id = int(item_id)  # ensure integer
         cur_item = await self.get_library_item(db_id)
+        self._mark_own_recording_id(update)
         joined_names = await self._split_joined_composers(update)
         composer_names = await self._credit_performing_composer(update, cur_item)
         metadata = update.metadata if overwrite else cur_item.metadata.update(update.metadata)
@@ -1881,7 +1883,6 @@ class TracksController(MediaControllerBase[Track]):
                     },
                 )
         if work_id:
-            await self.mass.music.works.credit_track_composers(work_id)
             await self.credit_work_composers(work_id)
         # update/set track album
         if update.album and set_album:
@@ -2001,24 +2002,23 @@ class TracksController(MediaControllerBase[Track]):
         """
         Return the library id of a track's work, adding the work if needed, None without a work.
 
-        A track that is a numbered piece of an opus the library holds, as "K 331, No. 3" of the
-        "K. 331" sonata, becomes a movement of that work, with the number and name of the piece.
-        A track without a work joins the library work its title's catalog numbers name.
+        A work the source names without a MusicBrainz work id, such as one read from the track's
+        title, is not added. When the track carries one MusicBrainz work id of its own, its work
+        is that MusicBrainz work instead, added under the name the source gives.
         """
         if not track.work:
-            return await self.mass.music.works.get_catalogued_work_id(
-                track.name, [x.artist for x in track.credits if x.role == ArtistRole.COMPOSER]
-            )
-        # a numbered movement of its own is a movement of the piece, not the piece
-        if (
-            isinstance(track.work, Work)
-            and track.movement_number is None
-            and (opus := await self.mass.music.works.get_opus_work_id(track.work))
+            return None
+        works = self.mass.music.works
+        if (work_id := await works.get_or_add_library_work_id(track.work)) or not isinstance(
+            track.work, Work
         ):
-            work_id, track.movement_number, movement_name = opus
-            track.movement_name = movement_name or track.movement_name
             return work_id
-        return await self.mass.music.works.get_or_add_library_work_id(track.work)
+        work_ids = [value for id_type, value in track.external_ids if id_type == ExternalID.MB_WORK]
+        if len(work_ids) != 1:
+            return None
+        return await works.get_or_add_library_work_id(
+            replace(track.work, external_ids={(ExternalID.MB_WORK, work_ids[0])})
+        )
 
     async def _split_joined_composers(self, track: Track) -> set[str]:
         """
@@ -2139,6 +2139,12 @@ class TracksController(MediaControllerBase[Track]):
         return set(replacements)
 
     @staticmethod
+    def _mark_own_recording_id(item: Track) -> None:
+        """Mark the recording id a provider track carries, as a file's tags give it, as its own."""
+        if item.provider != "library" and item.mbid and not item.metadata.recording_source:
+            item.metadata.recording_source = RecordingSource.TAG
+
+    @staticmethod
     def _recording_ids(track: Track) -> set[str]:
         """Return the distinct MusicBrainz recording ids of a track."""
         return {
@@ -2197,7 +2203,8 @@ class TracksController(MediaControllerBase[Track]):
     def _sync_details_query_parts(self) -> tuple[str, str, dict[str, Any]]:
         """Return extra (columns, joins, params) for the tracks sync-details query."""
         # the sync loop needs to know if the track has (valid) album and artist links
-        # to be able to backfill missing ones on existing library tracks
+        # to be able to backfill missing ones on existing library tracks, and which
+        # external ids it holds to store newly reported ones
         extra_columns = f"""
             , EXISTS (
                 SELECT 1 FROM album_tracks
@@ -2210,6 +2217,7 @@ class TracksController(MediaControllerBase[Track]):
                 WHERE track_artists.track_id = tracks.item_id
                 AND track_artists.role = '{ArtistRole.MAIN_ARTIST.value}'
             ) AS has_artists
+            , {self._external_ids_query()} AS external_ids
         """
         return extra_columns, "", {}
 
@@ -2221,6 +2229,10 @@ class TracksController(MediaControllerBase[Track]):
             provider_mappings=self._parse_sync_details_mappings(db_row),
             has_album=bool(db_row["has_album"]),
             has_artists=bool(db_row["has_artists"]),
+            external_ids={
+                (ExternalID(id_type), value)
+                for id_type, value in json_loads(db_row["external_ids"])
+            },
         )
 
     def _parse_summary_row(

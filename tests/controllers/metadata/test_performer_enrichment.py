@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, PropertyMock, patch
 
 import pytest
-from music_assistant_models.enums import ArtistRole, ExternalID
+from music_assistant_models.enums import ArtistRole, ExternalID, RecordingSource
+from music_assistant_models.errors import MediaNotFoundError
 from music_assistant_models.media_items import (
     Album,
     Artist,
@@ -20,10 +21,10 @@ from music_assistant_models.media_items import (
     Track,
     UniqueList,
     Work,
+    WorkMovement,
 )
-from music_assistant_models.media_items.metadata import MediaItemMetadata
 
-from music_assistant.constants import DB_TABLE_TRACKS
+from music_assistant.constants import DB_TABLE_TRACKS, DB_TABLE_WORKS
 from music_assistant.controllers.cache import BYPASS_CACHE
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.constants import REFRESH_INTERVAL
@@ -36,7 +37,9 @@ from music_assistant.controllers.metadata.performer_enrichment import (
     _relations_naming,
 )
 from music_assistant.controllers.music.classical import PERFORMING_ROLES
-from music_assistant.providers.musicbrainz.models import MusicBrainzRelease
+from music_assistant.controllers.music.helpers import fill_track_from_recording
+from music_assistant.helpers.json import json_dumps
+from music_assistant.providers.musicbrainz.models import MusicBrainzRecording, MusicBrainzRelease
 from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider
 
 if TYPE_CHECKING:
@@ -112,11 +115,12 @@ def _controller(mass: MusicAssistant, lookups: dict[str, dict[str, Any]]) -> Met
     return ctrl
 
 
-def _requests(ctrl: MetaDataController) -> list[str]:
-    """Return the endpoints MusicBrainz was asked for."""
+def _requests(ctrl: MetaDataController, works: bool = True) -> list[str]:
+    """Return the endpoints MusicBrainz was asked for, without the work lookups if not works."""
     musicbrainz = cast("MusicbrainzProvider", ctrl._musicbrainz_provider())
     get_data = cast("AsyncMock", musicbrainz._api_client.get_data)
-    return [call.args[0] for call in get_data.await_args_list]
+    endpoints = [call.args[0] for call in get_data.await_args_list]
+    return endpoints if works else [x for x in endpoints if not x.startswith("work/")]
 
 
 def _record_bypass(ctrl: MetaDataController) -> list[tuple[str, bool]]:
@@ -268,7 +272,9 @@ async def test_credited_performers_get_their_musicbrainz_ids(music_mass: MusicAs
     await _read_album(ctrl, track)
 
     # the album lookup asks for the performers of its recordings
-    assert _requests(ctrl)[0].endswith("+artist-rels+recording-level-rels+work-rels+place-rels")
+    assert _requests(ctrl)[0].endswith(
+        "+artist-rels+recording-level-rels+work-rels+work-level-rels+place-rels"
+    )
     assert await _mbid(music_mass, "Nigel Kennedy") == KENNEDY_MBID
     assert await _mbid(music_mass, "English Chamber Orchestra") == ECO_MBID
     # the composer is no performer of the recording
@@ -503,6 +509,39 @@ async def test_track_naming_only_its_composer_gets_the_recordings_performers(
     assert await _mbid(music_mass, "English Chamber Orchestra") == ECO_MBID
 
 
+async def test_track_artist_its_new_work_credits_as_composer_gets_the_recordings_performers(
+    music_mass: MusicAssistant,
+) -> None:
+    """A track artist the work the recording gives the track composed is no performer."""
+    ctrl = _controller(
+        music_mass,
+        {"release/": _lookup(BEST_CLASSICAL), f"artist/{ECO_MBID}": _eco_with_spotify_link()},
+    )
+    vivaldi = await music_mass.music.artists.add_item_to_library(_artist("Antonio Vivaldi"))
+    await music_mass.music.artists.add_item_to_library(_artist("Nigel Kennedy"))
+    await music_mass.music.works.add_item_to_library(
+        Work(
+            item_id="La primavera",
+            provider=PROVIDER_INSTANCE,
+            name="La primavera",
+            provider_mappings=set(),
+            composers=UniqueList([vivaldi]),
+            external_ids={(ExternalID.MB_WORK, KENNEDY_WORK)},
+        )
+    )
+    # the file names its composer as its artist only
+    track = await _kennedy_album(music_mass, ["Antonio Vivaldi"], [])
+
+    with patch.object(music_mass.music, "get_provider_instances", _spotify_instances()):
+        await _read_album(ctrl, track)
+
+    assert {
+        ("Antonio Vivaldi", ArtistRole.COMPOSER, None),
+        ("Nigel Kennedy", ArtistRole.SOLOIST, "violin"),
+        ("English Chamber Orchestra", ArtistRole.ORCHESTRA, None),
+    } <= await _credits(music_mass, track)
+
+
 async def test_performer_linked_to_no_music_provider_is_not_added(
     music_mass: MusicAssistant,
 ) -> None:
@@ -624,8 +663,26 @@ async def test_moved_file_without_its_roles_is_read_again(music_mass: MusicAssis
     assert await _albums_due(music_mass) == {(await _library_album(music_mass, track)).item_id}
 
 
+async def test_track_of_a_merged_artist_is_read_again(music_mass: MusicAssistant) -> None:
+    """A track read while crediting an unidentified artist gets its role once that one merges."""
+    identified = await music_mass.music.artists.add_item_to_library(
+        _artist("Nigel Kennedy", KENNEDY_MBID)
+    )
+    ctrl = _controller(music_mass, {"release/": _lookup(BEST_CLASSICAL)})
+    track = await _kennedy_album(music_mass, ["Kennedy"], [])
+    await _read_album(ctrl, track)
+    assert ("Kennedy", ArtistRole.MAIN_ARTIST, None) in await _credits(music_mass, track)
+    unidentified = (await music_mass.music.tracks.get_library_item(track.item_id)).artists[0]
+
+    await music_mass.music.artists.merge_library_items(identified.item_id, unidentified.item_id)
+
+    assert await _albums_due(music_mass) == {(await _library_album(music_mass, track)).item_id}
+    await _read_album(ctrl, track)
+    assert ("Nigel Kennedy", ArtistRole.SOLOIST, "violin") in await _credits(music_mass, track)
+
+
 # --------------------------------------------------------------------------- #
-#  recording years                                                             #
+#  recording years                                                            #
 # --------------------------------------------------------------------------- #
 
 
@@ -698,21 +755,206 @@ async def test_track_keeps_the_work_ids_it_has(music_mass: MusicAssistant) -> No
     assert await _work_ids(music_mass, track) == {OTHER_MBID}
 
 
-@pytest.mark.parametrize(("work_mbid", "looked_up_again"), [(None, True), (OTHER_MBID, False)])
-async def test_track_gaining_work_ids_has_its_unidentified_work_looked_up_again(
-    music_mass: MusicAssistant, work_mbid: str | None, looked_up_again: bool
+async def test_track_without_a_work_joins_the_library_work_of_its_recording(
+    music_mass: MusicAssistant,
 ) -> None:
-    """A track taking its recording's work ids has its unidentified work looked up again."""
+    """A track without a work joins the library work its recording on the release performs."""
     ctrl = _controller(music_mass, {"release/": _lookup(BEST_CLASSICAL)})
     work = await music_mass.music.works.add_item_to_library(
         Work(
-            item_id="Spring",
+            item_id="La primavera",
             provider=PROVIDER_INSTANCE,
-            name="Spring",
+            name="La primavera",
             provider_mappings=set(),
-            external_ids={(ExternalID.MB_WORK, work_mbid)} if work_mbid else set(),
-            metadata=MediaItemMetadata(last_musicbrainz_lookup=1),
+            external_ids={(ExternalID.MB_WORK, KENNEDY_WORK)},
         )
+    )
+    track = await _kennedy_album(music_mass)
+
+    await _read_album(ctrl, track)
+
+    stored = await _stored_work(music_mass, track)
+    assert stored is not None
+    assert stored.item_id == work.item_id
+    assert len(_requests(ctrl)) == 1
+
+
+async def test_track_without_a_work_gets_its_work_added_from_musicbrainz(
+    music_mass: MusicAssistant,
+) -> None:
+    """The work of a track's recording is added from MusicBrainz and filled in right away."""
+    ctrl = _controller(
+        music_mass,
+        {
+            "release/": _lookup(BEST_CLASSICAL),
+            f"work/{KENNEDY_WORK}": _work_lookup(KENNEDY_WORK, KENNEDY),
+        },
+    )
+    track = await _kennedy_album(music_mass)
+
+    await _read_album(ctrl, track)
+
+    stored = await _stored_work(music_mass, track)
+    assert stored is not None
+    assert (stored.name, stored.mbid) == (KENNEDY, KENNEDY_WORK)
+    assert [x.name for x in stored.composers] == ["Antonio Vivaldi"]
+    assert stored.metadata.last_musicbrainz_lookup is not None
+
+
+async def test_tracks_with_the_same_file_work_id_share_one_added_work(
+    music_mass: MusicAssistant,
+) -> None:
+    """Tracks whose files name the same work id without a work name join one added work."""
+    recording = _lookup("recording_o_mio_babbino_caro")
+    ctrl = _controller(
+        music_mass,
+        {
+            f"recording/{recording['id']}": recording,
+            f"work/{OTHER_MBID}": _work_lookup(OTHER_MBID, "Gianni Schicchi"),
+        },
+    )
+    tracks = []
+    for number, recording_id in enumerate((recording["id"], KENNEDY_MBID), start=1):
+        file_track = _track(f"Part {number}", recording_id, ["Amanda Roocroft"], [], _album())
+        file_track.track_number = number
+        file_track.external_ids.add((ExternalID.MB_WORK, OTHER_MBID))
+        tracks.append(await _add(music_mass, file_track))
+
+    for track in tracks:
+        assert await ctrl._link_track_performers(track)
+
+    works = [await _stored_work(music_mass, track) for track in tracks]
+    assert works[0] is not None
+    assert works[1] is not None
+    assert works[0].item_id == works[1].item_id
+    assert works[0].name == "Gianni Schicchi"
+    holders = await music_mass.music.works.get_library_items_by_external_id(
+        OTHER_MBID, ExternalID.MB_WORK, limit=None
+    )
+    assert len(holders) == 1
+
+
+async def test_track_naming_several_works_gets_no_work(music_mass: MusicAssistant) -> None:
+    """A track whose file names several works that are no parts of one work gets no work."""
+    ctrl = _controller(music_mass, {"work/": _work_lookup(OTHER_MBID, "Gianni Schicchi")})
+    file_track = _track("Part", OTHER_MBID, ["Amanda Roocroft"], [], _album())
+    file_track.external_ids.update(
+        {(ExternalID.MB_WORK, OTHER_MBID), (ExternalID.MB_WORK, ECO_MBID)}
+    )
+    track = await _add(music_mass, file_track)
+
+    assert await ctrl._link_track_performers(track)
+
+    assert await _stored_work(music_mass, track) is None
+
+
+@pytest.mark.parametrize(
+    ("sources", "trusted"),
+    [
+        ((RecordingSource.SEARCH,), False),
+        ((None,), False),
+        ((RecordingSource.SEARCH, RecordingSource.RELEASE), True),
+    ],
+)
+async def test_only_a_reliably_found_recording_gives_work_and_performers(
+    music_mass: MusicAssistant, sources: tuple[RecordingSource | None, ...], trusted: bool
+) -> None:
+    """A recording found by a name search alone, or of unknown source, gives the track nothing."""
+    recording = _lookup("recording_o_mio_babbino_caro")
+    ctrl = _controller(
+        music_mass,
+        {
+            f"recording/{recording['id']}": recording,
+            "work/": _work_lookup(OTHER_MBID, "Gianni Schicchi"),
+        },
+    )
+    await music_mass.music.artists.add_item_to_library(_artist("Amanda Roocroft"))
+    track = await _add(
+        music_mass,
+        _track(
+            "Gianni Schicchi",
+            None,
+            ["Giacomo Puccini"],
+            [("Giacomo Puccini", ArtistRole.COMPOSER, None)],
+            _album(),
+        ),
+    )
+    # each link of the track's recording id, as the MusicBrainz link step stores it
+    for source in sources:
+        library_track = await music_mass.music.tracks.get_library_item(track.item_id)
+        fill_track_from_recording(library_track, MusicBrainzRecording.from_raw(recording), source)
+        await music_mass.music.tracks.update_item_in_library(track.item_id, library_track)
+    track = await music_mass.music.tracks.get_library_item(track.item_id)
+    assert track.metadata.recording_source == sources[-1]
+
+    assert await ctrl._link_track_performers(track)
+
+    work_ids = {"433001da-5c32-3d5b-9794-5b3dfabb0457"} if trusted else set()
+    assert await _work_ids(music_mass, track) == work_ids
+    assert (await _stored_work(music_mass, track) is not None) == trusted
+    credited = {name for name, _, _ in await _credits(music_mass, track)}
+    assert ("Amanda Roocroft" in credited) == trusted
+    stored = await music_mass.music.tracks.get_library_item(track.item_id)
+    assert stored.metadata.last_musicbrainz_recording_lookup is not None
+
+
+async def test_track_with_its_own_recording_id_gets_the_work_of_its_recording(
+    music_mass: MusicAssistant,
+) -> None:
+    """A recording id a file's tags give, or AcoustID finds, is reliable enough for a work."""
+    recording = _lookup("recording_o_mio_babbino_caro")
+    ctrl = _controller(
+        music_mass,
+        {
+            f"recording/{recording['id']}": recording,
+            "work/": _work_lookup("433001da-5c32-3d5b-9794-5b3dfabb0457", "Gianni Schicchi"),
+        },
+    )
+    tagged = await _add(
+        music_mass, _track("Tagged", recording["id"], ["Amanda Roocroft"], [], _album())
+    )
+    fingerprinted = await _add(
+        music_mass, _track("Fingerprinted", None, ["Amanda Roocroft"], [], _album(), 2)
+    )
+    await music_mass.music.tracks.set_identifiers(
+        "Fingerprinted", PROVIDER_INSTANCE, mbid=KENNEDY_MBID
+    )
+
+    assert await ctrl._link_track_performers(tagged)
+
+    sources = [
+        (await music_mass.music.tracks.get_library_item(x.item_id)).metadata.recording_source
+        for x in (tagged, fingerprinted)
+    ]
+    assert sources == [RecordingSource.TAG, RecordingSource.ACOUSTID]
+    stored = await _stored_work(music_mass, tagged)
+    assert stored is not None
+    assert stored.mbid == "433001da-5c32-3d5b-9794-5b3dfabb0457"
+
+
+async def test_track_that_is_not_classical_gets_no_work(music_mass: MusicAssistant) -> None:
+    """A track that is not classical is never given a work."""
+    ctrl = _controller(music_mass, {"work/": _work_lookup(KENNEDY_WORK, KENNEDY)})
+    track = await _add(music_mass, _track("Pop", None, ["Pop"], [], _album(), classical=False))
+    assert not track.is_classical
+
+    await ctrl._add_track_work(track.item_id, {KENNEDY_WORK})
+
+    assert await _stored_work(music_mass, track) is None
+    assert _requests(ctrl) == []
+
+
+async def test_track_with_a_work_keeps_it(music_mass: MusicAssistant) -> None:
+    """A track with a work keeps it when its recording performs another one."""
+    ctrl = _controller(
+        music_mass,
+        {
+            "release/": _lookup(BEST_CLASSICAL),
+            f"work/{KENNEDY_WORK}": _work_lookup(KENNEDY_WORK, KENNEDY),
+        },
+    )
+    work = await music_mass.music.works.add_item_to_library(
+        Work(item_id="Seasons", provider=PROVIDER_INSTANCE, name="Seasons", provider_mappings=set())
     )
     spring = _track(
         "Spring",
@@ -726,8 +968,183 @@ async def test_track_gaining_work_ids_has_its_unidentified_work_looked_up_again(
 
     await _read_album(ctrl, track)
 
-    stored = await music_mass.music.works.get_library_item(work.item_id)
-    assert (stored.metadata.last_musicbrainz_lookup is None) == looked_up_again
+    stored = await _stored_work(music_mass, track)
+    assert stored is not None
+    assert stored.item_id == work.item_id
+    assert not any(x.startswith("work/") for x in _requests(ctrl))
+
+
+async def test_file_track_of_a_movement_moves_onto_its_parent_when_its_work_is_linked(
+    music_mass: MusicAssistant,
+) -> None:
+    """A file track whose work is a movement by its tags becomes a movement of the work above."""
+    concerto_id = "00000000-0000-0000-0000-000000000002"
+    ctrl = _controller(
+        music_mass,
+        {
+            f"work/{KENNEDY_WORK}": _part_lookup(KENNEDY_WORK, KENNEDY, concerto_id, 1),
+            f"work/{concerto_id}": _work_lookup(
+                concerto_id, "La primavera", [(KENNEDY_WORK, KENNEDY, 1)]
+            ),
+        },
+    )
+    concerto = await _add_work(music_mass, "La primavera", concerto_id)
+    movement = await _add_work(music_mass, KENNEDY, KENNEDY_WORK, concerto)
+    track = await _add_track_on(music_mass, movement)
+
+    await ctrl._link_work_to_musicbrainz(movement)
+
+    stored_track = await music_mass.music.tracks.get_library_item(track.item_id)
+    assert stored_track.work is not None
+    assert stored_track.work.item_id == concerto.item_id
+    assert stored_track.movement_number == 1
+    with pytest.raises(MediaNotFoundError):
+        await music_mass.music.works.get_library_item(movement.item_id)
+
+
+async def test_recording_of_a_whole_scene_stores_its_pieces_under_it(
+    music_mass: MusicAssistant,
+) -> None:
+    """A recording performing a scene of the act it is on leaves its pieces under the scene."""
+    act_id = "00000000-0000-0000-0000-000000000004"
+    ctrl = _controller(music_mass, {"release/": _with_scene(act_id)})
+    act = await _add_work(music_mass, "Opera: Act I", act_id)
+    await _set_movements(
+        music_mass,
+        act,
+        [
+            WorkMovement(number=1, name="no. 1", mbid=OTHER_MBID),
+            WorkMovement(number=2, name="no. 2: Scene", mbid=KENNEDY_WORK),
+        ],
+    )
+    track = await _add_track_on(music_mass, act)
+
+    await _read_album(ctrl, track)
+
+    stored = await music_mass.music.works.get_library_item(act.item_id)
+    assert [(x.number, x.name, x.parent) for x in stored.metadata.movements or []] == [
+        (1, "no. 1", None),
+        (2, "no. 2: Scene", None),
+        (2001, "Recitative", 2),
+        (2002, "Aria", 2),
+    ]
+    assert _requests(ctrl) == _requests(ctrl, works=False)
+
+
+async def test_pieces_of_a_scene_stay_through_the_first_lookup_of_its_act(
+    music_mass: MusicAssistant,
+) -> None:
+    """Pieces stored before the act is looked up go under its place there and stay."""
+    act_id = "00000000-0000-0000-0000-000000000004"
+    ctrl = _controller(
+        music_mass,
+        {
+            "release/": _with_scene(act_id),
+            f"work/{act_id}": _work_lookup(
+                act_id,
+                "Opera: Act I",
+                [(OTHER_MBID, "Opera: Act I, no. 1", 1), (KENNEDY_WORK, "Opera: Act I, no. 2", 2)],
+            ),
+        },
+    )
+    act = await _add_work(music_mass, "Opera: Act I", act_id)
+    track = await _add_track_on(music_mass, act)
+    await _read_album(ctrl, track)
+
+    await ctrl._link_work_to_musicbrainz(await music_mass.music.works.get_library_item(act.item_id))
+
+    stored = await music_mass.music.works.get_library_item(act.item_id)
+    assert [(x.number, x.parent) for x in stored.metadata.movements or []] == [
+        (1, None),
+        (2, None),
+        (2001, 2),
+        (2002, 2),
+    ]
+
+
+async def test_scene_without_a_place_in_its_act_not_looked_up_stores_its_pieces(
+    music_mass: MusicAssistant,
+) -> None:
+    """A scene MusicBrainz gives no place in its act stores its pieces under its number there."""
+    act_id = "00000000-0000-0000-0000-000000000004"
+    ctrl = _controller(
+        music_mass,
+        {
+            "release/": _with_scene(act_id, None),
+            f"work/{act_id}": _work_lookup(
+                act_id,
+                "Opera: Act I",
+                [
+                    (OTHER_MBID, "Opera: Act I, no. 1", 1),
+                    ("00000000-0000-0000-0000-000000000005", "Opera: Act I, no. 3", 3),
+                    (KENNEDY_WORK, "Opera: Act I, no. 4", None),
+                ],
+            ),
+        },
+    )
+    act = await _add_work(music_mass, "Opera: Act I", act_id)
+    track = await _add_track_on(music_mass, act)
+
+    await _read_album(ctrl, track)
+
+    stored = await music_mass.music.works.get_library_item(act.item_id)
+    assert [(x.number, x.parent) for x in stored.metadata.movements or []] == [
+        (4001, 4),
+        (4002, 4),
+    ]
+
+
+async def test_scene_moving_onto_its_act_leaves_its_pieces_under_it(
+    music_mass: MusicAssistant,
+) -> None:
+    """A file track of a whole scene moves onto the act, which keeps the scene's pieces."""
+    act_id = "00000000-0000-0000-0000-000000000004"
+    scene = _scene_relations(act_id)
+    ctrl = _controller(
+        music_mass,
+        {
+            f"work/{KENNEDY_WORK}": {"id": KENNEDY_WORK, "title": KENNEDY, "relations": scene},
+            f"work/{act_id}": _work_lookup(act_id, "Opera: Act I", [(KENNEDY_WORK, KENNEDY, 2)]),
+        },
+    )
+    act = await _add_work(music_mass, "Opera: Act I", act_id)
+    movement = await _add_work(music_mass, KENNEDY, KENNEDY_WORK, act)
+    track = await _add_track_on(music_mass, movement)
+
+    await ctrl._link_work_to_musicbrainz(movement)
+
+    stored_track = await music_mass.music.tracks.get_library_item(track.item_id)
+    assert stored_track.work is not None
+    assert (stored_track.work.item_id, stored_track.movement_number) == (act.item_id, 2)
+    stored = await music_mass.music.works.get_library_item(act.item_id)
+    assert [(x.number, x.name, x.parent) for x in stored.metadata.movements or []] == [
+        (2001, "Recitative", 2),
+        (2002, "Aria", 2),
+    ]
+
+
+async def test_file_track_of_a_whole_act_becomes_the_act_of_its_opera(
+    music_mass: MusicAssistant,
+) -> None:
+    """A file track whose work is an act by its tags shows as that act of the opera."""
+    opera_id = "00000000-0000-0000-0000-000000000003"
+    act_id = "00000000-0000-0000-0000-000000000004"
+    ctrl = _controller(
+        music_mass,
+        {
+            f"work/{act_id}": _part_lookup(act_id, "Opera: Act I", opera_id, 1),
+            f"work/{opera_id}": _work_lookup(opera_id, "Opera", [(act_id, "Opera: Act I", 1)]),
+        },
+    )
+    opera = await _add_work(music_mass, "Opera", opera_id)
+    act = await _add_work(music_mass, "Opera: Act I", act_id, opera)
+    track = await _add_track_on(music_mass, act)
+
+    await ctrl._link_work_to_musicbrainz(act)
+
+    stored_track = await music_mass.music.tracks.get_library_item(track.item_id)
+    assert stored_track.work is not None
+    assert (stored_track.work.item_id, stored_track.movement_number) == (opera.item_id, 1)
 
 
 async def test_artist_of_another_name_is_matched_by_its_provider_link(
@@ -793,7 +1210,7 @@ async def test_artist_holding_the_relations_id_is_matched_without_a_lookup(
     await _read_album(ctrl, track)
 
     assert ("ECO Players", ArtistRole.ORCHESTRA, None) in await _credits(music_mass, track)
-    assert len(_requests(ctrl)) == 1
+    assert len(_requests(ctrl, works=False)) == 1
 
 
 # TEMP(classical 5a catch-up): remove before release
@@ -844,7 +1261,7 @@ async def test_album_is_read_with_one_request(music_mass: MusicAssistant) -> Non
 
     await _read_album(ctrl, track)
 
-    assert len(_requests(ctrl)) == 1
+    assert len(_requests(ctrl, works=False)) == 1
     assert _requests(ctrl)[0].startswith(f"release/{_release(BEST_CLASSICAL).id}?")
     assert await _albums_due(music_mass) == set()
 
@@ -891,7 +1308,7 @@ async def test_track_without_an_identified_album_is_read_on_its_own(
 
     assert await ctrl._link_track_performers(track)
 
-    assert len(_requests(ctrl)) == 1
+    assert len(_requests(ctrl, works=False)) == 1
     assert await _mbid(music_mass, "Amanda Roocroft") is not None
     assert await _tracks_due(music_mass) == set()
 
@@ -928,16 +1345,21 @@ async def test_recording_without_performers_is_read_again_once_stale(
     assert _recording_due(await music_mass.music.tracks.get_library_item(track.item_id)) is due
 
 
-async def test_link_run_reads_the_performers_after_the_other_phases() -> None:
-    """The performer phases come last and read albums and tracks through their own steps."""
+async def test_link_run_reads_the_performers_before_the_works() -> None:
+    """The performer phases read albums and tracks through their own steps, before the works."""
     ctrl = MetaDataController.__new__(MetaDataController)
     ctrl.mass = MagicMock()
 
     phases = ctrl._musicbrainz_link_phases({})
 
-    assert [x.name for x in phases[-2:]] == ["album performers", "track performers"]
-    assert phases[-2].link == ctrl._link_album_performers
-    assert phases[-1].link == ctrl._link_track_performers
+    assert [x.name for x in phases[-4:]] == [
+        "album performers",
+        "track performers",
+        "works",
+        "composers",
+    ]
+    assert phases[-4].link == ctrl._link_album_performers
+    assert phases[-3].link == ctrl._link_track_performers
 
 
 # --------------------------------------------------------------------------- #
@@ -982,7 +1404,7 @@ async def test_forced_album_update_credits_a_performer_skipped_before(
         x.position for x in stored.credits if x.role != ArtistRole.ORCHESTRA
     )
     release = f"release/{_release(BEST_CLASSICAL).id}"
-    assert bypassed == [
+    assert [x for x in bypassed if not x[0].startswith("work/")] == [
         (release, False),
         (release, True),
         (f"artist/{ECO_MBID}", True),
@@ -1138,6 +1560,156 @@ async def test_fallback_lookups_stop_while_musicbrainz_is_rate_limiting(
     assert await _albums_due(music_mass) == {album.item_id}
 
 
+# --------------------------------------------------------------------------- #
+#  hints on what MusicBrainz lacks                                             #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("linked", [False, True])
+async def test_album_tracks_without_a_work_are_logged_once_per_album(
+    music_mass: MusicAssistant, caplog: pytest.LogCaptureFixture, linked: bool
+) -> None:
+    """The classical tracks of an album whose recordings name no work are logged in one line."""
+    lookup = _lookup(BEST_CLASSICAL) if linked else _without_relations(BEST_CLASSICAL, "work")
+    ctrl = _hinting_controller(music_mass, {"release/": lookup}, caplog)
+    track = await _kennedy_album(music_mass)
+    album = await _library_album(music_mass, track)
+
+    assert await ctrl._link_album_performers(album, reread=True)
+    assert await ctrl._link_album_performers(album, reread=True)
+
+    expected = (
+        'Classical tracks of album "Album" are not linked to a work on MusicBrainz (1 of 1), '
+        "link their recordings to their works: "
+        f"https://musicbrainz.org/release/{lookup['id']}/edit-relationships"
+    )
+    assert _hints(caplog, "not linked to a work") == ([] if linked else [(logging.INFO, expected)])
+
+
+async def test_album_hint_counts_the_tracks_read_in_earlier_runs(
+    music_mass: MusicAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The hint counts every classical track of the album, also those an earlier run read."""
+    lookup = _lookup(BEST_CLASSICAL)
+    for medium in lookup["media"]:
+        for release_track in medium["tracks"]:
+            recording = release_track["recording"]
+            recording["relations"] = [
+                x for x in recording["relations"] if x["target-type"] != "work"
+            ]
+    track = await _kennedy_album(music_mass)
+    # an earlier run, stopped before it logged its hint, read the first track
+    await _read_album(_controller(music_mass, {"release/": lookup}), track)
+    await _add(
+        music_mass,
+        _track(
+            "Gianni Schicchi",
+            _recording_id(BEST_CLASSICAL, "O mio babbino caro (Gianni Schicchi)"),
+            ["Amanda Roocroft"],
+            album=_album(_release(BEST_CLASSICAL).id),
+            number=2,
+        ),
+    )
+    ctrl = _hinting_controller(music_mass, {"release/": lookup}, caplog)
+
+    await _read_album(ctrl, track)
+
+    assert [x for _, x in _hints(caplog, "not linked to a work")] == [
+        'Classical tracks of album "Album" are not linked to a work on MusicBrainz (2 of 2), '
+        "link their recordings to their works: "
+        f"https://musicbrainz.org/release/{lookup['id']}/edit-relationships"
+    ]
+
+
+@pytest.mark.parametrize("linked", [False, True])
+async def test_single_track_without_a_work_is_logged_once(
+    music_mass: MusicAssistant, caplog: pytest.LogCaptureFixture, linked: bool
+) -> None:
+    """A classical track read on its own whose recording names no work is logged with it."""
+    recording = _lookup("recording_o_mio_babbino_caro")
+    if not linked:
+        recording["relations"] = [x for x in recording["relations"] if x["target-type"] != "work"]
+    ctrl = _hinting_controller(
+        music_mass,
+        {
+            f"recording/{recording['id']}": recording,
+            "work/": _work_lookup("433001da-5c32-3d5b-9794-5b3dfabb0457", "Gianni Schicchi"),
+        },
+        caplog,
+    )
+    track = await _add(
+        music_mass, _track("Tagged", recording["id"], ["Amanda Roocroft"], [], _album())
+    )
+
+    assert await ctrl._link_track_performers(track)
+    assert await ctrl._link_track_performers(track)
+
+    expected = (
+        'Classical track "Tagged" is not linked to a work on MusicBrainz, link its recording to '
+        f"its work: https://musicbrainz.org/recording/{recording['id']}"
+    )
+    assert _hints(caplog, "not linked to a work") == ([] if linked else [(logging.DEBUG, expected)])
+
+
+@pytest.mark.parametrize(
+    "artists",
+    [
+        ("Nigel Kennedy", "English Chamber Orchestra"),
+        # a track naming only its composer shows no performer at all
+        ("Antonio Vivaldi",),
+    ],
+)
+async def test_recording_without_performers_is_logged_once(
+    music_mass: MusicAssistant, caplog: pytest.LogCaptureFixture, artists: tuple[str, ...]
+) -> None:
+    """A recording naming no performers is logged for a track without performer credits."""
+    lookup = _without_relations(BEST_CLASSICAL, "artist")
+    ctrl = _hinting_controller(music_mass, {"release/": lookup}, caplog)
+    track = await _kennedy_album(
+        music_mass, artists, [("Antonio Vivaldi", ArtistRole.COMPOSER, None)]
+    )
+    album = await _library_album(music_mass, track)
+
+    assert await ctrl._link_album_performers(album, reread=True)
+    assert await ctrl._link_album_performers(album, reread=True)
+
+    recording_id = _recording_id(BEST_CLASSICAL, KENNEDY)
+    expected = (
+        'Recording of "Spring" names no performers on MusicBrainz, add them: '
+        f"https://musicbrainz.org/recording/{recording_id}"
+    )
+    assert _hints(caplog, "names no performers") == [(logging.DEBUG, expected)]
+
+
+@pytest.mark.parametrize("on_spotify", [True, False])
+async def test_performer_under_a_fuller_musicbrainz_name_is_logged_once(
+    music_mass: MusicAssistant, caplog: pytest.LogCaptureFixture, on_spotify: bool
+) -> None:
+    """A performer the recording names by a fuller name is logged with the link to add there."""
+    ctrl = _hinting_controller(music_mass, {"release/": _lookup(BEST_CLASSICAL)}, caplog)
+    track = await _kennedy_album(
+        music_mass,
+        ["Kennedy", "English Chamber Orchestra"],
+        [("Antonio Vivaldi", ArtistRole.COMPOSER, None)],
+    )
+    if on_spotify:
+        await _map_to_spotify(music_mass, "Kennedy", "kennedySpotifyId00000")
+    album = await _library_album(music_mass, track)
+
+    with patch.object(music_mass.music, "get_provider_instances", _spotify_instances()):
+        assert await ctrl._link_album_performers(album)
+        assert await ctrl._link_album_performers(album, reread=True)
+
+    expected = (
+        'Performer "Kennedy" of "Spring" is probably MusicBrainz artist "Nigel Kennedy", add '
+        "https://open.spotify.com/artist/kennedySpotifyId00000 to their MusicBrainz page: "
+        f"https://musicbrainz.org/artist/{KENNEDY_MBID}"
+    )
+    assert _hints(caplog, "is probably MusicBrainz artist") == (
+        [(logging.DEBUG, expected)] if on_spotify else []
+    )
+
+
 def _eco_with_spotify_link() -> dict[str, Any]:
     """Return a MusicBrainz artist lookup of the English Chamber Orchestra, linked to Spotify."""
     return {
@@ -1153,6 +1725,34 @@ def _eco_with_spotify_link() -> dict[str, Any]:
             }
         ],
     }
+
+
+def _hinting_controller(
+    mass: MusicAssistant, lookups: dict[str, dict[str, Any]], caplog: pytest.LogCaptureFixture
+) -> MetaDataController:
+    """Return a controller as _controller does, logging its hints to caplog."""
+    ctrl = _controller(mass, lookups)
+    ctrl.logger = logging.getLogger("test_performer_hints")
+    caplog.set_level(logging.DEBUG, logger="test_performer_hints")
+    return ctrl
+
+
+def _hints(caplog: pytest.LogCaptureFixture, text: str) -> list[tuple[int, str]]:
+    """Return the level and message of each logged record holding the given text."""
+    return [(x.levelno, x.getMessage()) for x in caplog.records if text in x.getMessage()]
+
+
+def _without_relations(release: str, target_type: str) -> dict[str, Any]:
+    """Return a fixture release lookup whose Four Seasons recording lacks relations of a type."""
+    lookup = _lookup(release)
+    for medium in lookup["media"]:
+        for track in medium["tracks"]:
+            if track["recording"]["title"] == KENNEDY:
+                relations = track["recording"]["relations"]
+                track["recording"]["relations"] = [
+                    x for x in relations if x["target-type"] != target_type
+                ]
+    return lookup
 
 
 def _spotify_instances() -> Mock:
@@ -1182,10 +1782,118 @@ async def _map_to_spotify(mass: MusicAssistant, name: str, spotify_id: str) -> N
     )
 
 
+def _scene_relations(
+    act_id: str, title: str = KENNEDY, position: int | None = 2
+) -> list[dict[str, Any]]:
+    """Return the relations of the Four Seasons work as a scene of an act, with two pieces."""
+    return [
+        {
+            "type": "parts",
+            "direction": "backward",
+            "ordering-key": position,
+            "work": {"id": act_id, "title": "Opera: Act I"},
+        },
+        *(
+            {
+                "type": "parts",
+                "direction": "forward",
+                "ordering-key": position,
+                "work": {
+                    "id": f"00000000-0000-0000-0001-00000000000{position}",
+                    "title": f"{title}: {piece}",
+                },
+            }
+            for position, piece in ((1, "Recitative"), (2, "Aria"))
+        ),
+    ]
+
+
+def _with_scene(act_id: str, position: int | None = 2) -> dict[str, Any]:
+    """Return the fixture release lookup whose Four Seasons work is a scene of the given act."""
+    lookup = _lookup(BEST_CLASSICAL)
+    for medium in lookup["media"]:
+        for track in medium["tracks"]:
+            for relation in track["recording"].get("relations", []):
+                if relation.get("work", {}).get("id") == KENNEDY_WORK:
+                    relation["work"]["relations"] = _scene_relations(
+                        act_id, relation["work"]["title"], position
+                    )
+    return lookup
+
+
+async def _set_movements(mass: MusicAssistant, work: Work, movements: list[WorkMovement]) -> None:
+    """Store the movements of a library work."""
+    await mass.music.database.execute_write(
+        f"UPDATE {DB_TABLE_WORKS} SET metadata = json_set(metadata, '$.movements', "
+        "json(:movements)) WHERE item_id = :work_id",
+        {"movements": json_dumps([x.to_dict() for x in movements]), "work_id": int(work.item_id)},
+    )
+
+
 async def _work_ids(mass: MusicAssistant, track: Track) -> set[str]:
     """Return the MusicBrainz work ids a library track carries."""
     stored = await mass.music.tracks.get_library_item(track.item_id)
     return {value for id_type, value in stored.external_ids if id_type == ExternalID.MB_WORK}
+
+
+def _work_lookup(
+    mbid: str, title: str, parts: Sequence[tuple[str, str, int | None]] = ()
+) -> dict[str, Any]:
+    """Return a MusicBrainz work lookup of a work listing the given parts, by id, title and place."""
+    relations = [
+        {
+            "type": "parts",
+            "direction": "forward",
+            "ordering-key": position,
+            "work": {"id": part_id, "title": part_title},
+        }
+        for part_id, part_title, position in parts
+    ]
+    return {"id": mbid, "title": title, "relations": relations}
+
+
+def _part_lookup(mbid: str, title: str, parent_id: str, position: int) -> dict[str, Any]:
+    """Return a MusicBrainz work lookup of a work that is a part of the given work."""
+    relation = {
+        "type": "parts",
+        "direction": "backward",
+        "ordering-key": position,
+        "work": {"id": parent_id, "title": ""},
+    }
+    return {"id": mbid, "title": title, "relations": [relation]}
+
+
+async def _add_work(mass: MusicAssistant, name: str, mbid: str, parent: Work | None = None) -> Work:
+    """Store a library work with a MusicBrainz id, below the given parent work."""
+    return await mass.music.works.add_item_to_library(
+        Work(
+            item_id=name,
+            provider=PROVIDER_INSTANCE,
+            name=name,
+            provider_mappings=set(),
+            external_ids={(ExternalID.MB_WORK, mbid)},
+            parent_work=ItemMapping.from_item(parent) if parent else None,
+        )
+    )
+
+
+async def _add_track_on(mass: MusicAssistant, work: Work) -> Track:
+    """Store the Four Seasons track of the fixture release on a work, the way a file names it."""
+    spring = _track(
+        "Spring",
+        _recording_id(BEST_CLASSICAL, KENNEDY),
+        ["Nigel Kennedy"],
+        [("Antonio Vivaldi", ArtistRole.COMPOSER, None)],
+        _album(_release(BEST_CLASSICAL).id),
+    )
+    spring.work = ItemMapping.from_item(work)
+    return await _add(mass, spring)
+
+
+async def _stored_work(mass: MusicAssistant, track: Track) -> Work | None:
+    """Return the library work of a library track, None without one."""
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    return await mass.music.works.get_library_item(stored.work.item_id) if stored.work else None
 
 
 async def _holders(mass: MusicAssistant, mbid: str) -> list[Artist]:

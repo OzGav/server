@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from itertools import groupby
 from time import time
 from typing import TYPE_CHECKING, Any, Final, cast
+from urllib.parse import urlencode
 
 import aiohttp
 from music_assistant_models.auth import Scope
@@ -18,11 +21,14 @@ from music_assistant_models.enums import (
     ListingType,
     MediaType,
     ProviderFeature,
+    RecordingSource,
     SortDirection,
     SortField,
 )
 from music_assistant_models.errors import (
     InvalidDataError,
+    InvalidProviderID,
+    InvalidProviderURI,
     MediaNotFoundError,
     MusicAssistantError,
     ProviderUnavailableError,
@@ -66,12 +72,14 @@ from music_assistant.helpers.external_ids import (
     normalize_external_id,
 )
 from music_assistant.helpers.json import serialize_to_json
-from music_assistant.helpers.uri import share_url_provider
+from music_assistant.helpers.logging import log_once
+from music_assistant.helpers.uri import parse_uri, share_url_provider
 from music_assistant.models.music_provider import (
     PROVIDER_FETCH_ERRORS,
     MusicProvider,
     provider_fetch_log_level,
 )
+from music_assistant.providers.musicbrainz.constants import MAGICISRC_URL, MUSICBRAINZ_WEB_URL
 from music_assistant.providers.musicbrainz.provider import (
     is_digital_release,
     relation_urls,
@@ -87,7 +95,7 @@ from .base import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Hashable, Mapping, Sequence
 
     from music_assistant import MusicAssistant
     from music_assistant.providers.musicbrainz import MusicbrainzProvider
@@ -95,6 +103,7 @@ if TYPE_CHECKING:
         MusicBrainzBarcodeRelease,
         MusicBrainzRecording,
         MusicBrainzRelease,
+        MusicBrainzTrack,
     )
 
 
@@ -133,6 +142,8 @@ class AlbumsController(MediaControllerBase[Album]):
     def __init__(self, mass: MusicAssistant) -> None:
         """Initialize class."""
         super().__init__(mass)
+        # the releases whose missing ISRCs were logged, so each is logged once
+        self._logged_hints: set[Hashable] = set()
         # register (extra) api handlers
         api_base = self.api_base
         self.mass.register_api_command(
@@ -707,9 +718,12 @@ class AlbumsController(MediaControllerBase[Album]):
         Carry an album's MusicBrainz identity and provider links over to its library tracks.
 
         The library tracks at a matching position on the release get its recording id and
-        ISRCs. For each provider the album is mapped to but one or more of its library
-        tracks are not, the provider's tracklist is matched to the library tracks by ISRC
-        or position and the matching provider tracks are linked.
+        ISRCs. A streaming service's tracks take the release's recordings in order across discs,
+        whatever their titles, when the library holds the service's whole album, as many tracks
+        as the release has, and the release links that service's album or every length is known
+        and agrees. For each provider the album is mapped to but one or more of its library
+        tracks are not, the provider's tracklist is matched to the library tracks by ISRC or
+        position and the matching provider tracks are linked.
 
         :param album: The library album.
         :param db_tracks: The album's library tracks.
@@ -736,7 +750,7 @@ class AlbumsController(MediaControllerBase[Album]):
         ]
         async with self.mass.music.database.deferred_commit():
             if release is not None:
-                merged = await self._link_tracks_to_release(db_tracks, release)
+                merged = await self._link_tracks_to_release(album, db_tracks, release)
                 db_tracks = [x for x in db_tracks if x.item_id not in merged]
             if not link_providers:
                 return
@@ -1108,34 +1122,165 @@ class AlbumsController(MediaControllerBase[Album]):
         return bool(db_item.mbid) and holder.mbid in (None, db_item.mbid)
 
     async def _link_tracks_to_release(
-        self, db_tracks: Sequence[Track], release: MusicBrainzRelease
+        self, album: Album, db_tracks: Sequence[Track], release: MusicBrainzRelease
     ) -> set[str]:
         """
         Fill the recording ids and ISRCs of a release in on the library tracks at its positions.
 
+        A track holding another recording id is left alone where it only lines up with the
+        release by its order. The ISRCs the tracks have that their recordings lack are logged
+        once per release.
+
+        :param album: The library album the release identifies.
+        :param db_tracks: The album's library tracks.
+        :param release: The album's MusicBrainz release.
         :return: The library ids of the tracks merged into another one of the tracks.
         """
-        recordings = {
-            (medium.position, track.position): track.recording
+        release_tracks = [
+            track
+            for medium in sorted(release.media, key=lambda medium: medium.position)
+            for track in medium.tracks
+        ]
+        by_position = {
+            (medium.position, track.position): track
             for medium in release.media
             for track in medium.tracks
-            if track.position and track.recording
+            if track.position
         }
+        # MagicISRC numbers the tracks of a release across its mediums
+        track_numbers = {track.id: number for number, track in enumerate(release_tracks, 1)}
+        by_order = self._release_tracks_by_order(
+            album, db_tracks, release, release_tracks, await _linked_albums(release)
+        )
+        missing_isrcs: dict[int, str] = {}
         merged: set[str] = set()
         for db_track in db_tracks:
             if db_track.item_id in merged:
                 continue
-            # a digital release stores its single disc as disc 0 or 1
-            recording = recordings.get((db_track.disc_number or 1, db_track.track_number))
-            if recording is None or not _recording_matches_track(recording, db_track):
+            if release_track := by_order.get(db_track.item_id):
+                recording_id = release_track.recording.id if release_track.recording else None
+                if db_track.mbid and db_track.mbid != recording_id:
+                    continue
+            else:
+                # a digital release stores its single disc as disc 0 or 1
+                position = (db_track.disc_number or 1, db_track.track_number)
+                release_track = by_position.get(position)
+                if release_track is None or not _recording_matches_track(release_track, db_track):
+                    continue
+            if (recording := release_track.recording) is None:
                 continue
-            changed = fill_track_from_recording(db_track, recording)
+            if missing := sorted(_isrcs(db_track) - _recording_isrcs(recording)):
+                missing_isrcs[track_numbers[release_track.id]] = missing[0]
+            changed = fill_track_from_recording(db_track, recording, RecordingSource.RELEASE)
             if not changed and db_track.metadata.last_musicbrainz_lookup is not None:
                 continue
             db_track.metadata.last_musicbrainz_lookup = int(time())
             merged |= await self.mass.music.tracks.merge_recording_duplicates(db_track)
             await self.mass.music.tracks.update_item_in_library(db_track.item_id, db_track)
+        if missing_isrcs:
+            log_once(
+                self.logger,
+                self._logged_hints,
+                ("release_isrcs", release.id),
+                logging.DEBUG,
+                'Album "%s" has ISRCs MusicBrainz lacks, add them all at once with MagicISRC: %s?%s',
+                release.title,
+                MAGICISRC_URL,
+                urlencode(
+                    {
+                        "mbid": release.id,
+                        **{f"isrc{number}": isrc for number, isrc in sorted(missing_isrcs.items())},
+                    }
+                ),
+            )
         return merged
+
+    def _release_tracks_by_order(
+        self,
+        album: Album,
+        db_tracks: Sequence[Track],
+        release: MusicBrainzRelease,
+        release_tracks: Sequence[MusicBrainzTrack],
+        linked_albums: set[tuple[str, str]],
+    ) -> dict[str, MusicBrainzTrack]:
+        """
+        Return the release track each library track is by its order on a streaming service.
+
+        Per service, the album's tracks on it line up with the release when they are numbered
+        from 1 on each disc without gaps, there are as many as the release has, and either the
+        release links the album on that service or every length is known and agrees with the
+        release track at the same place across its mediums. A service whose known lengths do
+        not all agree is logged once.
+
+        :param album: The library album the release identifies.
+        :param db_tracks: The album's library tracks.
+        :param release: The album's MusicBrainz release.
+        :param release_tracks: The release's tracks across its mediums, in order.
+        :param linked_albums: The (provider domain, album id) pairs the release links to.
+        :return: The release track per library track id.
+        """
+        matched: dict[str, MusicBrainzTrack] = {}
+        # local files carry their own recording ids, numbered as the user tagged them
+        domains = {
+            x.provider_domain
+            for track in db_tracks
+            for x in track.provider_mappings
+            if (
+                provider := self.mass.get_provider(x.provider_instance, provider_type=MusicProvider)
+            )
+            and provider.is_streaming_provider
+        }
+        for domain in sorted(domains):
+            service_tracks = sorted(
+                (
+                    track
+                    for track in db_tracks
+                    if any(x.provider_domain == domain for x in track.provider_mappings)
+                ),
+                key=lambda track: (track.disc_number or 1, track.track_number or 0),
+            )
+            if len(service_tracks) != len(release_tracks) or not _numbered_from_one(service_tracks):
+                continue
+            pairs = list(zip(service_tracks, release_tracks, strict=True))
+            linked = any(
+                (x.provider_domain, x.item_id) in linked_albums
+                for x in album.provider_mappings
+                if x.provider_domain == domain
+            )
+            agreeing = [_lengths_agree(release_track, track) for track, release_track in pairs]
+            if differing := [
+                number for number, agrees in enumerate(agreeing, 1) if agrees is False
+            ]:
+                log_once(
+                    self.logger,
+                    self._logged_hints,
+                    ("release_lengths", release.id, domain),
+                    logging.INFO,
+                    (
+                        'MusicBrainz links album "%s" on %s to release %s/release/%s, but the '
+                        "lengths of tracks %s (counted across discs) differ; if %s plays another "
+                        "version, remove the link from the release"
+                    )
+                    if linked
+                    else (
+                        'Album "%s" on %s has the track count of MusicBrainz release '
+                        "%s/release/%s, but the lengths of tracks %s (counted across discs) "
+                        "differ; it may be another edition on %s or a wrong length on "
+                        "MusicBrainz, compare with another service"
+                    ),
+                    album.name,
+                    domain,
+                    MUSICBRAINZ_WEB_URL,
+                    release.id,
+                    ", ".join(map(str, differing)),
+                    domain,
+                )
+            # the release's link to the album says it is this release, lengths or not
+            if not linked and not all(agreeing):
+                continue
+            for track, release_track in pairs:
+                matched.setdefault(track.item_id, release_track)
+        return matched
 
     async def _link_tracks_to_provider_album(
         self, db_tracks: Sequence[Track], mapping: ProviderMapping
@@ -1651,19 +1796,47 @@ def _release_group_ids(
     }
 
 
-def _recording_matches_track(recording: MusicBrainzRecording, track: Track) -> bool:
-    """Return whether a release's recording is the given library track, by title or ISRC."""
-    if recording.length is not None and track.duration:
-        if abs(recording.length / 1000 - track.duration) > _TRACK_DURATION_TOLERANCE:
-            return False
+async def _linked_albums(release: MusicBrainzRelease) -> set[tuple[str, str]]:
+    """Return the (provider domain, album id) pairs of the streaming albums a release links to."""
+    linked: set[tuple[str, str]] = set()
+    for url in relation_urls(release.relations):
+        if not url.startswith(("http://", "https://")):
+            continue
+        with contextlib.suppress(InvalidProviderURI, InvalidProviderID):
+            media_type, domain, item_id = await parse_uri(url, validate_id=True)
+            if media_type == MediaType.ALBUM:
+                linked.add((domain, item_id))
+    return linked
+
+
+def _recording_matches_track(release_track: MusicBrainzTrack, track: Track) -> bool:
+    """Return whether a release track's recording is the given library track, by title or ISRC."""
+    recording = release_track.recording
+    if recording is None or _lengths_agree(release_track, track) is False:
+        return False
     # a streaming title may name only the movement ("I. Allegro con brio") where MusicBrainz
     # names the work as well, so a shared ISRC identifies the recording too
-    recording_isrcs = {
-        normalize_external_id(ExternalID.ISRC, x) for x in recording.isrcs or [] if is_valid_isrc(x)
-    }
     return compare_strings(recording.title, track.name, strict=False) or bool(
-        recording_isrcs & _isrcs(track)
+        _recording_isrcs(recording) & _isrcs(track)
     )
+
+
+def _lengths_agree(release_track: MusicBrainzTrack, track: Track) -> bool | None:
+    """Return whether a release track's length is a library track's, None when one is unknown."""
+    # the length on the release can differ from the recording's, as on a remaster
+    length = release_track.length or (release_track.recording and release_track.recording.length)
+    if not length or not track.duration:
+        return None
+    return abs(length / 1000 - track.duration) <= _TRACK_DURATION_TOLERANCE
+
+
+def _numbered_from_one(tracks: Sequence[Track]) -> bool:
+    """Return whether tracks sorted by disc and number are numbered 1 to n on each disc."""
+    for _, disc_tracks in groupby(tracks, key=lambda x: x.disc_number or 1):
+        numbers = [x.track_number for x in disc_tracks]
+        if numbers != list(range(1, len(numbers) + 1)):
+            return False
+    return True
 
 
 def _matching_provider_track(db_track: Track, provider_tracks: Sequence[Track]) -> Track | None:
@@ -1693,6 +1866,13 @@ def _durations_agree(track: Track, other: Track) -> bool:
     if not track.duration or not other.duration:
         return True
     return abs(track.duration - other.duration) <= _TRACK_DURATION_TOLERANCE
+
+
+def _recording_isrcs(recording: MusicBrainzRecording) -> set[str]:
+    """Return a MusicBrainz recording's valid ISRCs in canonical form."""
+    return {
+        normalize_external_id(ExternalID.ISRC, x) for x in recording.isrcs or [] if is_valid_isrc(x)
+    }
 
 
 def _isrcs(track: Track) -> set[str]:

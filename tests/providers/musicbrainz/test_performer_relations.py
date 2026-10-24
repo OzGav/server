@@ -231,7 +231,7 @@ async def test_release_details_request_the_relations_of_its_recordings() -> None
 
     get_data.assert_awaited_once_with(
         "release/rel-1?inc=artist-credits+aliases+labels+release-groups+recordings+isrcs"
-        "+url-rels+genres+artist-rels+recording-level-rels+work-rels+place-rels"
+        "+url-rels+genres+artist-rels+recording-level-rels+work-rels+work-level-rels+place-rels"
     )
     assert sum(len(x.performing_relations) for x in _recordings(release).values()) == 25
 

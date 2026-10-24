@@ -11,43 +11,44 @@ roles. Credits are never renamed, changed or removed, and a performer the track 
 credit is only added to a track that credits no artist but its composers, or when an album's
 metadata update is forced. Such a track gets the performers the recording names that it does
 not credit yet, taken from the library's own artists or added to the library when MusicBrainz
-links them to a loaded music provider.
+links them to a loaded music provider. A classical track without a work gets the work its
+file names by MusicBrainz id, or else the work of its recording, unless the recording was found
+by a name search alone or it is not known how it was found. A recording performing a whole group
+of pieces, such as a scene of an act, gives the work listing that group the group's pieces.
 """
 
 from __future__ import annotations
 
+import logging
 from time import time
 from typing import TYPE_CHECKING
 
-from music_assistant_models.enums import ArtistRole, ExternalID, MediaType
+from music_assistant_models.enums import ArtistRole, ExternalID, MediaType, RecordingSource
 from music_assistant_models.errors import InvalidDataError
 from music_assistant_models.media_items import Credit, ItemMapping
 
-from music_assistant.constants import (
-    DB_TABLE_EXTERNAL_ID_LOOKUP,
-    DB_TABLE_TRACKS,
-    DB_TABLE_WORKS,
-)
+from music_assistant.constants import DB_TABLE_TRACKS
 from music_assistant.controllers.music.classical import PERFORMING_ROLES
 from music_assistant.controllers.music.helpers import provider_mappings_from_urls
-from music_assistant.helpers.compare import compare_strings
-from music_assistant.providers.musicbrainz.provider import relation_urls
+from music_assistant.helpers.compare import compare_strings, is_named_by
+from music_assistant.helpers.logging import log_once
+from music_assistant.providers.musicbrainz.constants import MUSICBRAINZ_WEB_URL
+from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider, relation_urls
 
 from .constants import MUSICBRAINZ_LINK_DOMAINS, REFRESH_INTERVAL
 
 if TYPE_CHECKING:
-    import logging
-    from collections.abc import Sequence
+    from collections.abc import Collection, Hashable, Sequence
 
-    from music_assistant_models.media_items import Album, Artist, MediaItemType, Track
+    from music_assistant_models.media_items import Album, Artist, MediaItemType, Track, Work
 
     from music_assistant import MusicAssistant
     from music_assistant.providers.musicbrainz.models import (
         MusicBrainzArtist,
         MusicBrainzRecording,
         MusicBrainzRelation,
+        MusicBrainzWork,
     )
-    from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider
 
 # the performing roles a credit and a MusicBrainz relation may hold to name the same performer
 _ROLE_FAMILIES: tuple[frozenset[ArtistRole], ...] = (
@@ -61,14 +62,16 @@ class PerformerEnrichmentMixin:
     """
     MusicBrainz performer enrichment for the MetaDataController.
 
-    Expects to be mixed with a class providing ``mass``, ``logger``,
-    ``schedule_update_metadata``, ``_musicbrainz_provider``, ``_match_library_artist`` and
-    ``_add_musicbrainz_artist``.
+    Expects to be mixed with a class providing ``mass``, ``logger``, ``_logged_hints``,
+    ``schedule_update_metadata``, ``_musicbrainz_provider``, ``_match_library_artist``,
+    ``_add_musicbrainz_artist``, ``_add_track_work``, ``_musicbrainz_work_hierarchy``,
+    ``_move_movement_tracks`` and ``_store_group_pieces``.
     """
 
     if TYPE_CHECKING:
         mass: MusicAssistant
         logger: logging.Logger
+        _logged_hints: set[Hashable]
 
         def schedule_update_metadata(  # noqa: D102
             self, item: MediaItemType, force_refresh: bool = False
@@ -82,6 +85,20 @@ class PerformerEnrichmentMixin:
             self, mb_artist: MusicBrainzArtist, album: Album | None = None, fresh: bool = False
         ) -> Artist | None: ...
 
+        async def _add_track_work(self, track_id: str, work_ids: Collection[str]) -> None: ...
+
+        async def _musicbrainz_work_hierarchy(
+            self, musicbrainz: MusicbrainzProvider, work: Work
+        ) -> list[MusicBrainzWork]: ...
+
+        async def _move_movement_tracks(
+            self, work: Work, hierarchy: Sequence[MusicBrainzWork]
+        ) -> None: ...
+
+        async def _store_group_pieces(
+            self, work_id: int, number: int, mb_group: MusicBrainzWork
+        ) -> None: ...
+
     async def _link_album_performers(self, album: Album, reread: bool = False) -> bool:
         """
         Read the recordings of an album's classical tracks, return whether it could.
@@ -94,9 +111,10 @@ class PerformerEnrichmentMixin:
             return False
         if not album.mbid:
             return True
+        album_tracks = await self.mass.music.albums.get_library_album_tracks(album.item_id)
         tracks = [
             track
-            for track in await self.mass.music.albums.get_library_album_tracks(album.item_id)
+            for track in album_tracks
             if _recording_due(track) or (reread and track.is_classical and track.mbid)
         ]
         if not tracks:
@@ -110,13 +128,39 @@ class PerformerEnrichmentMixin:
             recordings = release.recordings_by_id()
         for track in tracks:
             assert track.mbid is not None  # for type checking
-            if not (recording := recordings.get(track.mbid.casefold())):
+            on_release = (recording := recordings.get(track.mbid.casefold())) is not None
+            if not on_release:
                 if musicbrainz.rate_limited:
                     # the tracks left are read on the next run
                     return False
                 # a track not on the album's release is looked up on its own
                 recording = await _get_recording(musicbrainz, track.mbid)
-            await self._apply_recording(track.item_id, recording, album, reread)
+                if recording and _lacks_work(track, recording, on_release):
+                    self._log_recording_without_work(track, recording)
+            await self._apply_recording(track.item_id, recording, album, reread, on_release)
+        # counted over the whole album, as a run stopped by a time-out reads only some tracks
+        classical = [x for x in album_tracks if x.is_classical]
+        without_work = sum(
+            1
+            for x in classical
+            if x.mbid
+            and x.mbid.casefold() in recordings
+            and _lacks_work(x, recordings[x.mbid.casefold()], on_release=True)
+        )
+        if without_work:
+            log_once(
+                self.logger,
+                self._logged_hints,
+                ("release_works", album.mbid),
+                logging.INFO,
+                'Classical tracks of album "%s" are not linked to a work on MusicBrainz (%s of %s), '
+                "link their recordings to their works: %s/release/%s/edit-relationships",
+                album.name,
+                without_work,
+                len(classical),
+                MUSICBRAINZ_WEB_URL,
+                album.mbid,
+            )
         return True
 
     async def _link_track_performers(self, track: Track) -> bool:
@@ -124,9 +168,10 @@ class PerformerEnrichmentMixin:
         if not (musicbrainz := self._musicbrainz_provider()):
             return False
         if track.mbid:
-            await self._apply_recording(
-                track.item_id, await _get_recording(musicbrainz, track.mbid)
-            )
+            recording = await _get_recording(musicbrainz, track.mbid)
+            if recording and _lacks_work(track, recording, on_release=False):
+                self._log_recording_without_work(track, recording)
+            await self._apply_recording(track.item_id, recording)
         return True
 
     async def _apply_recording(
@@ -135,19 +180,37 @@ class PerformerEnrichmentMixin:
         recording: MusicBrainzRecording | None,
         album: Album | None = None,
         reread: bool = False,
+        on_release: bool = False,
     ) -> None:
         """
         Identify a track's credited performers on its recording and store its recording year.
+
+        A classical track without a work gets the work of its file's MusicBrainz work id, or
+        of its recording. A recording found by a name search alone gives the track nothing.
 
         :param track_id: Library id of the track.
         :param recording: The track's MusicBrainz recording, None when MusicBrainz lacks it.
         :param album: The album the track is read through, named when a performer is not added.
         :param reread: Credit the performers the track still misses with fresh MusicBrainz data.
+        :param on_release: The recording is on the release of the album the track is read through.
         """
         # read again, as identifying the album's earlier tracks may have merged its artists
         track = await self.mass.music.tracks.get_library_item(track_id)
+        # a classical name search is composer, album and track title, which dozens of
+        # performances share (35 releases are called "Symphonies Nos. 40 & 41"), so its
+        # first hit may be another orchestra's recording, with other performers and year
+        if recording and not _recording_trusted(track, on_release):
+            recording = None
+        work_ids = {value for id_type, value in track.external_ids if id_type == ExternalID.MB_WORK}
         if recording:
+            if not work_ids:
+                work_ids = set(recording.performance_work_ids)
             await self._store_recording_works(track, recording)
+        await self._add_track_work(track.item_id, work_ids)
+        if recording:
+            # read again, as the work may have credited its composers, who are no performers
+            track = await self.mass.music.tracks.get_library_item(track_id)
+            await self._store_recording_pieces(track, recording)
             relations = recording.performing_relations
             composers = {x.artist.item_id for x in track.credits if x.role == ArtistRole.COMPOSER}
             # the performers no credit names, which a credit of another name may still be
@@ -173,6 +236,19 @@ class PerformerEnrichmentMixin:
                     main_artists[credit.artist.item_id] = (artist, naming)
             await self._credit_performing_main_artists(track, main_artists)
             await self._credit_recording_performers(track, relations, album, reread)
+            if relations:
+                await self._log_performers_named_otherwise(track, unnamed, identified)
+            elif _lacks_performer_roles(track):
+                log_once(
+                    self.logger,
+                    self._logged_hints,
+                    ("recording_performers", recording.id),
+                    logging.DEBUG,
+                    'Recording of "%s" names no performers on MusicBrainz, add them: %s/recording/%s',
+                    track.name,
+                    MUSICBRAINZ_WEB_URL,
+                    recording.id,
+                )
         await self._mark_recording_read(
             int(track.item_id), recording.recording_year if recording else None
         )
@@ -181,8 +257,8 @@ class PerformerEnrichmentMixin:
         """
         Give a track without MusicBrainz work ids those of the works its recording performs.
 
-        The track's library work, when MusicBrainz has not identified it, is looked up again
-        on the next link run.
+        When the track's library work is one of these works, such as an aria, the tracks
+        performing it move onto the library work above it, such as the act, as its movements.
 
         :param track: The library track.
         :param recording: The track's MusicBrainz recording.
@@ -195,21 +271,36 @@ class PerformerEnrichmentMixin:
             track.item_id,
             {*track.external_ids, *((ExternalID.MB_WORK, work_id) for work_id in work_ids)},
         )
-        await self.mass.music.database.execute_write(
-            f"UPDATE {DB_TABLE_WORKS} "
-            "SET metadata = json_remove(metadata, '$.last_musicbrainz_lookup') "
-            f"WHERE item_id = (SELECT work_id FROM {DB_TABLE_TRACKS} WHERE item_id = :track_id) "
-            "AND json_valid(metadata) AND NOT EXISTS ("
-            f"SELECT 1 FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} "
-            f"WHERE {DB_TABLE_EXTERNAL_ID_LOOKUP}.media_type = :media_type "
-            f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.external_id_type = :id_type "
-            f"AND {DB_TABLE_EXTERNAL_ID_LOOKUP}.item_id = {DB_TABLE_WORKS}.item_id)",
-            {
-                "track_id": int(track.item_id),
-                "media_type": MediaType.WORK.value,
-                "id_type": ExternalID.MB_WORK.value,
-            },
-        )
+        if (
+            track.work
+            and (work := await self.mass.music.works.get_library_item(track.work.item_id)).mbid
+            in work_ids
+            and (musicbrainz := self._musicbrainz_provider())
+        ):
+            await self._move_movement_tracks(
+                work, await self._musicbrainz_work_hierarchy(musicbrainz, work)
+            )
+
+    async def _store_recording_pieces(self, track: Track, recording: MusicBrainzRecording) -> None:
+        """
+        Store the pieces of the groups a recording performs whole in the work of its track.
+
+        A group is a work MusicBrainz splits into pieces, such as a scene of an act, that the
+        track's work lists as one of its movements. Its pieces come with the recording when it
+        is read through its release.
+
+        :param track: The library track.
+        :param recording: The track's MusicBrainz recording.
+        """
+        if not track.work or not (musicbrainz := self._musicbrainz_provider()):
+            return
+        work = await self.mass.music.works.get_library_item(track.work.item_id)
+        for relation in recording.relations or ():
+            group = relation.work
+            if relation.type != "performance" or not group or not group.movements:
+                continue
+            if (number := await _group_number(musicbrainz, work, group)) is not None:
+                await self._store_group_pieces(int(work.item_id), number, group)
 
     async def _relations_linking(
         self,
@@ -369,6 +460,65 @@ class PerformerEnrichmentMixin:
             {"now": int(time()), "year": recording_year, "track_id": track_id},
         )
 
+    def _log_recording_without_work(self, track: Track, recording: MusicBrainzRecording) -> None:
+        """Log that a classical track's recording is linked to no work on MusicBrainz."""
+        log_once(
+            self.logger,
+            self._logged_hints,
+            ("recording_work", recording.id),
+            logging.DEBUG,
+            'Classical track "%s" is not linked to a work on MusicBrainz, '
+            "link its recording to its work: %s/recording/%s",
+            track.name,
+            MUSICBRAINZ_WEB_URL,
+            recording.id,
+        )
+
+    async def _log_performers_named_otherwise(
+        self,
+        track: Track,
+        unnamed: Sequence[MusicBrainzRelation],
+        identified: dict[str, Artist],
+    ) -> None:
+        """
+        Log the performers a track credits whose MusicBrainz artist goes by a fuller name.
+
+        :param track: The library track.
+        :param unnamed: The performing relations of its recording no credit names.
+        :param identified: The library artists identified on the recording, by credited artist id.
+        """
+        if not self.logger.isEnabledFor(logging.DEBUG):
+            return
+        composers = {x.artist.item_id for x in track.credits if x.role == ArtistRole.COMPOSER}
+        for credit in track.credits:
+            if credit.artist.item_id in identified or credit.artist.item_id in composers:
+                continue
+            mb_artists = {
+                x.artist.id: x.artist
+                for x in _relations_of_role(credit, unnamed)
+                if x.artist and is_named_by(credit.artist.name, x.artist)
+            }
+            if len(mb_artists) != 1:
+                continue
+            (mb_artist,) = mb_artists.values()
+            artist = await self.mass.music.artists.get_library_item(credit.artist.item_id)
+            if artist.mbid or not (urls := MusicbrainzProvider.reverse_lookup_urls(artist)):
+                continue
+            log_once(
+                self.logger,
+                self._logged_hints,
+                ("performer_name", artist.uri),
+                logging.DEBUG,
+                'Performer "%s" of "%s" is probably MusicBrainz artist "%s", '
+                "add %s to their MusicBrainz page: %s/artist/%s",
+                artist.name,
+                track.name,
+                mb_artist.name,
+                urls[0],
+                MUSICBRAINZ_WEB_URL,
+                mb_artist.id,
+            )
+
 
 async def _get_recording(
     musicbrainz: MusicbrainzProvider, recording_id: str
@@ -378,6 +528,67 @@ async def _get_recording(
         return await musicbrainz.get_recording_relations(recording_id)
     except InvalidDataError:
         return None
+
+
+async def _group_number(
+    musicbrainz: MusicbrainzProvider, work: Work, group: MusicBrainzWork
+) -> int | None:
+    """
+    Return the number a work lists a MusicBrainz group of pieces under, None when it does not.
+
+    The work's own movements tell it, else its movements on MusicBrainz, as a work not looked
+    up yet has no movements.
+
+    :param musicbrainz: The MusicBrainz provider.
+    :param work: The library work.
+    :param group: The MusicBrainz work of the group, with its relations.
+    """
+    group_id = group.id.casefold()
+    for movement in work.metadata.movements or []:
+        if movement.parent is None and movement.mbid and movement.mbid.casefold() == group_id:
+            return movement.number
+    if not work.mbid or not any(
+        x.work and x.work.id.casefold() == work.mbid.casefold() for x in group.parent_relations
+    ):
+        return None
+    try:
+        mb_work = await musicbrainz.get_work_details(work.mbid)
+    except InvalidDataError:
+        return None
+    place = mb_work.part_movement(group.id) if mb_work else None
+    return place.number if place else None
+
+
+def _recording_trusted(track: Track, on_release: bool) -> bool:
+    """
+    Return whether a track's recording is identified reliably enough to give it a work.
+
+    :param track: The library track.
+    :param on_release: The recording is on the release of the album the track is read through.
+    """
+    return on_release or track.metadata.recording_source not in (None, RecordingSource.SEARCH)
+
+
+def _lacks_work(track: Track, recording: MusicBrainzRecording, on_release: bool) -> bool:
+    """
+    Return whether a track's reliably identified recording is linked to no work on MusicBrainz.
+
+    A track whose file names its work is not counted.
+
+    :param track: The library track.
+    :param recording: The track's MusicBrainz recording.
+    :param on_release: The recording is on the release of the album the track is read through.
+    """
+    return (
+        not recording.performance_work_ids
+        and _recording_trusted(track, on_release)
+        and not any(id_type == ExternalID.MB_WORK for id_type, _ in track.external_ids)
+    )
+
+
+def _lacks_performer_roles(track: Track) -> bool:
+    """Return whether a track credits no artist in a performing role."""
+    return not any(x.role in PERFORMING_ROLES for x in track.credits)
 
 
 def _recording_due(track: Track) -> bool:

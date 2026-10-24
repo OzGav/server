@@ -288,7 +288,6 @@ async def test_kleiber_album_tracks_get_composer_conductor_orchestra_and_work(
     assert CLASSICAL_GENRE_NAME in (first.metadata.genres or set())
     assert isinstance(first.work, Work)
     assert first.work.name == "Symphony No. 5 in C Minor, Op. 67"
-    assert [x.name for x in first.work.composers] == ["Ludwig Van Beethoven"]
     assert (first.movement_name, first.movement_number) == ("I. Allegro con brio", 1)
     assert second.movement_number == 2
 
@@ -318,14 +317,12 @@ async def test_tosca_director_conducts_and_composer_gets_its_proper_name(
     }
     assert isinstance(track.work, Work)
     assert track.work.name == "Tosca, S.69, IGP 17, Act I"
-    assert track.work.parent_work is not None
-    assert track.work.parent_work.name == "Tosca, S.69, IGP 17"
 
 
-async def test_boheme_gives_voices_lyricists_and_the_act_under_the_opera(
+async def test_boheme_gives_voices_lyricists_and_the_act(
     media_manager: TidalMediaManager, provider_mock: Mock
 ) -> None:
-    """Voices written as one word make soloists, and the act is a part of the opera."""
+    """Voices written as one word make soloists, and the title names the act."""
     provider_mock.api.get_jsonapi.return_value = _track_doc(BOHEME_TRACK)
     provider_mock.api.get.return_value = {}
 
@@ -345,8 +342,6 @@ async def test_boheme_gives_voices_lyricists_and_the_act_under_the_opera(
     )
     assert isinstance(track.work, Work)
     assert track.work.name == "La bohème, Act I"
-    assert track.work.parent_work is not None
-    assert track.work.parent_work.name == "La bohème"
     assert track.movement_name == "Questo mar rosso"
 
 

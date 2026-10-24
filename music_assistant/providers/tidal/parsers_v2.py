@@ -455,7 +455,7 @@ def _set_classical_details(
     if classical_work := parse_work_title(
         track.name, composer.name if composer else None, classical=True
     ):
-        set_track_work(track, classical_work, composer)
+        set_track_work(track, classical_work)
 
 
 def _related_tracks(doc: JsonApiDocument, resource: dict[str, Any]) -> list[dict[str, Any]]:

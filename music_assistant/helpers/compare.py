@@ -896,21 +896,13 @@ def compare_work(base_item: Work, compare_item: Work) -> bool:
     """
     Compare two works and return True if they match.
 
-    Works match on their MusicBrainz work id. Without one, their titles must match the way
-    artist and album names do and they must share a composer, or both have no composer.
+    Works match only on their MusicBrainz work id.
     """
     if compare_item_ids(base_item, compare_item):
         return True
-    external_id_match = compare_external_ids(
-        base_item.external_ids, compare_item.external_ids, ExternalID.MB_WORK
+    return bool(
+        compare_external_ids(base_item.external_ids, compare_item.external_ids, ExternalID.MB_WORK)
     )
-    if external_id_match is not None:
-        return external_id_match
-    if not compare_strings(base_item.name, compare_item.name, strict=True):
-        return False
-    if base_item.composers and compare_item.composers:
-        return compare_artists(list(base_item.composers), list(compare_item.composers))
-    return not base_item.composers and not compare_item.composers
 
 
 def compare_item_mapping(
