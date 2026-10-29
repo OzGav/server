@@ -10,7 +10,12 @@ from uuid import uuid4
 
 import pytest
 from music_assistant_models.enums import ArtistRole, ExternalID, Period
-from music_assistant_models.media_items import Artist, ItemMapping, ProviderMapping, Track
+from music_assistant_models.media_items import (
+    Artist,
+    ItemMapping,
+    ProviderMapping,
+    Track,
+)
 
 from music_assistant.helpers.tags import AudioTags
 from music_assistant.mass import MusicAssistant
@@ -443,6 +448,71 @@ async def test_movement_tags_win_over_a_split_movement_title(
         4,
     )
     assert _work_ids(track) == {movement_work_id}
+
+
+async def test_movement_titles_without_a_work_tag_keep_their_movements(
+    provider: LocalFileSystemProvider, mass: MusicAssistant
+) -> None:
+    """Tracks titled as numbered movements keep their movements, a work only by their own id."""
+    token = _token()
+    work_id = str(uuid4())
+    first_path, second_path = f"{token}/Album/01.flac", f"{token}/Album/02.flac"
+    first = await _add_track(
+        provider,
+        first_path,
+        _tags(
+            first_path,
+            title=f"Symphony {token}: I. Allegro",
+            album=f"Album {token}",
+            composer=f"Composer {token}",
+            musicbrainzworkid=[work_id],
+        ),
+    )
+    second = await _add_track(
+        provider,
+        second_path,
+        _tags(
+            second_path,
+            title=f"Symphony {token}: II. Adagio",
+            album=f"Album {token}",
+            composer=f"Composer {token}",
+            movementname="Adagio molto",
+        ),
+    )
+
+    assert first.work is not None
+    assert (await mass.music.works.get_library_item(first.work.item_id)).mbid == work_id
+    assert second.work is None
+    assert (first.movement_name, first.movement_number) == ("I. Allegro", 1)
+    assert (second.movement_name, second.movement_number) == ("Adagio molto", 2)
+    assert _work_ids(first) == {work_id}
+
+
+async def test_pop_track_with_a_work_tag_gets_no_work(
+    provider: LocalFileSystemProvider, mass: MusicAssistant
+) -> None:
+    """A pop song tagged with its work gets no work, keeps the work id and is not classical."""
+    token = _token()
+    work_id = str(uuid4())
+    path = f"{token}/Album/01.flac"
+    tags = _tags(
+        path,
+        album=f"Album {token}",
+        artist=f"Band {token}",
+        composer=f"Songwriter {token}",
+        work=[f"Song {token}"],
+        musicbrainzworkid=[work_id],
+        genre="Rock",
+    )
+
+    track = await _add_track(provider, path, tags)
+
+    assert track.work is None
+    assert _work_ids(track) == {work_id}
+    assert not await mass.music.works.library_items(search=f"Song {token}")
+    full_track = await mass.music.tracks.get_library_item(track.item_id)
+    assert not full_track.metadata.classical_tag
+    assert not full_track.is_classical
 
 
 @pytest.mark.parametrize(

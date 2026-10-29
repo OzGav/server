@@ -1,4 +1,4 @@
-"""Tests for the role-typed artist credits of library tracks and albums."""
+"""Tests for the role-typed artist credits of library tracks."""
 
 from __future__ import annotations
 
