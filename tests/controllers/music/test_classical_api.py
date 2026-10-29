@@ -1344,6 +1344,72 @@ class TestWorkTracks:
         ] * 2
 
 
+@pytest.fixture(scope="class", name="complete_play_library")
+async def complete_play_library_fixture(music_mass_class: MusicAssistant) -> _Library:
+    """Return a class-scoped library of works with recordings of differing completeness."""
+    lib = await _new_library(music_mass_class, ("verdi", "puccini", "abbado", "karajan", "solti"))
+    for key, composer, parent in (
+        ("Requiem", "verdi", None),
+        ("Gloria", "verdi", None),
+        ("Tosca", "puccini", None),
+        ("Tosca I", "puccini", "Tosca"),
+        ("Tosca II", "puccini", "Tosca"),
+        ("Tosca III", "puccini", "Tosca"),
+        ("Bohème", "puccini", None),
+        ("Bohème I", "puccini", "Bohème"),
+        ("Bohème II", "puccini", "Bohème"),
+    ):
+        await _add_work(lib, key, composer, parent=parent)
+    await _set_musicbrainz_movements(
+        lib,
+        "Requiem",
+        [WorkMovement(number=x, name=name, mbid=str(uuid4())) for x, name in ((1, "I"), (2, "II"))],
+    )
+    for key, work, conductor, movement, duration in (
+        ("Abbado Introit", "Requiem", "abbado", 1, 100),
+        ("Abbado Dies irae", "Requiem", "abbado", 2, 100),
+        ("Karajan Introit", "Requiem", "karajan", 1, 1000),
+        ("Abbado Gloria", "Gloria", "abbado", None, 100),
+        ("Karajan Gloria", "Gloria", "karajan", None, 500),
+        ("Abbado Act I", "Tosca I", "abbado", None, 300),
+        ("Karajan Act I", "Tosca I", "karajan", None, 2000),
+        ("Karajan Act II", "Tosca II", "karajan", None, 2000),
+        ("Abbado Act III", "Tosca III", "abbado", None, 100),
+        ("Solti Act III", "Tosca III", "solti", None, 1500),
+        ("Abbado Bohème I", "Bohème I", "abbado", None, 3000),
+        ("Karajan Bohème I", "Bohème I", "karajan", None, 2000),
+        ("Karajan Bohème II", "Bohème II", "karajan", None, 1500),
+    ):
+        await _add_track(lib, key, work, conductor, movement=movement, duration=duration)
+    return lib
+
+
+class TestWorkTracksPlayTheMostComplete:
+    """Playing a work plays its most complete recording, or one performance of its parts."""
+
+    @pytest.mark.parametrize(
+        ("work", "expected"),
+        [
+            # a complete recording wins over a longer one that is not
+            ("Requiem", ["Abbado Introit", "Abbado Dies irae"]),
+            # without movements to complete, the longest wins
+            ("Gloria", ["Karajan Gloria"]),
+            # the performance of all parts wins over a longer one of a part listed before it
+            ("Bohème", ["Karajan Bohème I", "Karajan Bohème II"]),
+            # a part the performance of the most parts leaves out plays its most complete recording
+            ("Tosca", ["Karajan Act I", "Karajan Act II", "Solti Act III"]),
+        ],
+    )
+    async def test_work_tracks(
+        self, complete_play_library: _Library, work: str, expected: list[str]
+    ) -> None:
+        """A work plays its most complete own recording, else one performance across its parts."""
+        lib = complete_play_library
+        tracks = await lib.mass.music.classical.work_tracks(lib.work_id(work))
+
+        assert [x.name for x in tracks] == expected
+
+
 @pytest.fixture(scope="class", name="one_act_library")
 async def one_act_library_fixture(music_mass_class: MusicAssistant) -> _Library:
     """Return a class-scoped library of a one-act opera, its tracks naming their numbers."""
@@ -3195,6 +3261,7 @@ async def _add_track(
     movement: int | None = None,
     movement_name: str | None = None,
     role: ArtistRole | None = ArtistRole.CONDUCTOR,
+    duration: int = 0,
 ) -> None:
     """
     Store a classical library track of a work under its key, its performer as main artist.
@@ -3207,6 +3274,7 @@ async def _add_track(
     :param movement: The movement number of the track.
     :param movement_name: The movement name of the track.
     :param role: The role the performer is credited in, None for no credit.
+    :param duration: The duration of the track in seconds.
     """
     artist = lib.artists[performer]
     lib.tracks[key] = await lib.mass.music.tracks.add_item_to_library(
@@ -3220,6 +3288,7 @@ async def _add_track(
             work=ItemMapping.from_item(lib.works[work]),
             movement_number=movement,
             movement_name=movement_name,
+            duration=duration,
             metadata=MediaItemMetadata(classical_tag=True),
         )
     )

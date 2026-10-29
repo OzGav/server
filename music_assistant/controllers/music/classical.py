@@ -605,21 +605,32 @@ class ClassicalController:
         """
         Get the tracks that playing a work plays, in the order they play.
 
-        These are the tracks of the first recording of the work itself, as listed by recordings.
-        A work without one plays the first recording of each of its parts, in the work's order.
+        These are the tracks of the most complete recording of the work itself: a complete one
+        first, then the longest. A work without one plays the performance of the most of its parts,
+        the longest on a tie, and the most complete recording of each part that one leaves out, in
+        the work's order.
 
         :param item_id: The library id of the work.
         """
-        firsts: dict[str, Recording] = {}
-        for recording in await self.recordings(item_id):
-            firsts.setdefault(recording.work.item_id, recording)
-        if own := firsts.get(item_id):
-            picked = [own]
-        else:
-            # the recordings of the parts follow in the work's order
-            picked = [
-                x for x in firsts.values() if x.parent_work and x.parent_work.item_id == item_id
-            ]
+        recordings = await self.recordings(item_id)
+        if own := [x for x in recordings if x.work.item_id == item_id]:
+            return max(own, key=_completeness).tracks
+        parts = [x for x in recordings if x.parent_work and x.parent_work.item_id == item_id]
+        # the recordings of one performance share their key past the work id, across the parts
+        performances: dict[str, dict[str, Recording]] = defaultdict(dict)
+        for recording in parts:
+            performances[recording.key.partition("-")[2]][recording.work.item_id] = recording
+        played = max(
+            performances.values(),
+            key=lambda x: (len(x), sum(r.duration for r in x.values())),
+            default={},
+        )
+        most_complete = {x.work.item_id: x for x in sorted(parts, key=_completeness)}
+        picked = [
+            played.get(x, most_complete[x]) for x in dict.fromkeys(r.work.item_id for r in parts)
+        ]
+        # in the order of the movements the parts are, else of their names
+        picked.sort(key=lambda x: min(x.movement_numbers, default=float("inf")))
         return [track for recording in picked for track in recording.tracks]
 
     async def other_tracks(
@@ -1814,6 +1825,11 @@ def _track_performing_credits(track: Track) -> list[Credit]:
         for position, x in enumerate(track.artists)
         if x.item_id not in composer_ids
     ]
+
+
+def _completeness(recording: Recording) -> tuple[bool, int]:
+    """Return how complete a recording is, as a sort key: complete first, then the longest."""
+    return bool(recording.complete), recording.duration
 
 
 def _recording_sort_key(recording: Recording) -> tuple[Any, ...]:
