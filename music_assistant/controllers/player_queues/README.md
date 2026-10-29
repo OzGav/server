@@ -116,7 +116,7 @@ analogous to how the Player Controller pairs runtime state with the wire `Player
   afterwards nothing reaches them, and the track being started needs the source slot they hold.
 - **Shuffle is a queue setting; only the media's own order overrides it.** Shuffle stays as the
   user left it across everything they play, except when the media carries an order of its own:
-  starting an album, podcast, podcast episode, audiobook or audio source (`ORDERED_MEDIA_TYPES`)
+  starting an album, work, podcast, podcast episode, audiobook or audio source (`ORDERED_MEDIA_TYPES`)
   with *play* or *replace* switches shuffle off, because those are sequenced content rather than a
   pool of tracks. An artist counts as sequenced too when it plays its albums under an album
   order. Top tracks, an artist without albums, and authors or narrators keep the queue's shuffle. An explicit `shuffle` argument on `play_media` always wins, and the first item of

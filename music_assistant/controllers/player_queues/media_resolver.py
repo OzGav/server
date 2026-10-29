@@ -85,7 +85,7 @@ from music_assistant.models.music_provider import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-    from music_assistant_models.media_items import ProviderMapping
+    from music_assistant_models.media_items import ProviderMapping, Work
 
     from music_assistant.controllers.music.media.album_tracks import AlbumListing
     from music_assistant.controllers.player_queues.controller import PlayerQueuesController
@@ -147,7 +147,7 @@ class MediaResolver:
         """
         Return the playable tracks for a media item, honoring the user's selection preferences.
 
-        Resolves an umbrella media item (artist, album, genre, playlist, finite radio) to the
+        Resolves an umbrella media item (artist, album, genre, work, playlist, finite radio) to the
         tracks that playing it would enqueue, and a dynamic radio to its next batch; a track
         resolves to itself, other types to an empty list.
 
@@ -170,6 +170,8 @@ class MediaResolver:
             return await self.get_artist_tracks(cast("Artist", media_item))
         if media_item.media_type == MediaType.GENRE:
             return await self.get_genre_tracks(cast("Genre", media_item), None)
+        if media_item.media_type == MediaType.WORK:
+            return await self.get_work_tracks(cast("Work", media_item))
         if media_item.media_type == MediaType.PLAYLIST:
             return [
                 track
@@ -341,6 +343,16 @@ class MediaResolver:
             # nothing could be played at all, so surface the reason instead of an empty list
             raise provider_error
         return result
+
+    async def get_work_tracks(self, work: Work) -> list[Track]:
+        """
+        Return the playable tracks of a library work, in the order they play.
+
+        :param work: The work to play.
+        """
+        self.logger.info("Fetching tracks to play for work %s", work.name)
+        tracks = await self.mass.music.classical.work_tracks(work.item_id)
+        return [track for track in tracks if track.available]
 
     async def get_dynamic_source_tracks(self, item: MediaItemType) -> list[Track]:
         """
@@ -1164,6 +1176,11 @@ class MediaResolver:
             genre_tracks = await self.get_genre_tracks(media_item, start_item)
             self._mark_container_played(media_item, genre_tracks, userid, queue_id)
             return self._played_from(media_item, genre_tracks, pin=False)
+        if media_item.media_type == MediaType.WORK:
+            media_item = cast("Work", media_item)
+            work_tracks = await self.get_work_tracks(media_item)
+            # only the tracks of a work are recorded as played, as they are when played directly
+            return self._played_from(media_item, work_tracks)
         if media_item.media_type == MediaType.AUDIOBOOK:
             media_item = cast("Audiobook", media_item)
             # ensure we grab the correct/latest resume point info

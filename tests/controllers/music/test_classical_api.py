@@ -7,7 +7,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -61,8 +63,12 @@ from music_assistant.controllers.music.classical import (
     _with_title_work_type,
     _WorkTrack,
 )
+from music_assistant.controllers.player_queues.media_resolver import MediaResolver
 from music_assistant.mass import MusicAssistant
 from tests.common import set_music_source_access
+
+if TYPE_CHECKING:
+    from music_assistant.controllers.player_queues import PlayerQueuesController
 
 
 def _artist_mapping(name: str) -> ItemMapping:
@@ -1029,6 +1035,73 @@ class TestPartsOfWorks:
         )
 
         assert (row.work_count, row.recording_count) == (1, 4)
+
+
+@pytest.fixture(scope="class", name="play_library")
+async def play_library_fixture(music_mass_class: MusicAssistant) -> _Library:
+    """Return a class-scoped library of works with and without recordings of their own."""
+    lib = await _new_library(music_mass_class, ("verdi", "abbado", "karajan", "solti"))
+    await _add_work(lib, "Requiem", "verdi")
+    await _add_work(lib, "Aida", "verdi")
+    await _add_work(lib, "Ritorna vincitor", "verdi", parent="Aida")
+    await _add_work(lib, "Celeste Aida", "verdi", parent="Aida")
+    await _add_work(lib, "Otello", "verdi")
+    await _add_work(lib, "Ave Maria", "verdi", parent="Otello")
+    await _add_work(lib, "Nabucco", "verdi")
+    for key, work, conductor, movement in (
+        ("Karajan Introit", "Requiem", "karajan", 1),
+        ("Abbado Introit", "Requiem", "abbado", 1),
+        ("Abbado Dies irae", "Requiem", "abbado", 2),
+        ("Solti Celeste", "Celeste Aida", "solti", None),
+        ("Abbado Celeste", "Celeste Aida", "abbado", None),
+        ("Karajan Ritorna", "Ritorna vincitor", "karajan", None),
+        ("Solti Otello", "Otello", "solti", None),
+        ("Solti Ave Maria", "Ave Maria", "solti", None),
+    ):
+        await _add_track(lib, key, work, conductor, movement=movement)
+    return lib
+
+
+class TestWorkTracks:
+    """Playing a work plays one recording of it, or one of each of its parts."""
+
+    @pytest.mark.parametrize(
+        ("work", "expected"),
+        [
+            # the first recording of the work
+            ("Requiem", ["Abbado Introit", "Abbado Dies irae"]),
+            # the first recording of each part, in the work's order
+            ("Aida", ["Abbado Celeste", "Karajan Ritorna"]),
+            # a recording of the work itself wins over those of its parts
+            ("Otello", ["Solti Otello"]),
+            ("Nabucco", []),
+        ],
+    )
+    async def test_work_tracks(
+        self, play_library: _Library, work: str, expected: list[str]
+    ) -> None:
+        """A work plays its first own recording, else the first recording of each part."""
+        tracks = await play_library.mass.music.classical.work_tracks(play_library.work_id(work))
+
+        assert [x.name for x in tracks] == expected
+
+    async def test_a_work_address_resolves_to_its_tracks(self, play_library: _Library) -> None:
+        """A work's address resolves to the work, which plays as the container of its tracks."""
+        mass = play_library.mass
+        work_id = play_library.work_id("Aida")
+        resolver = MediaResolver(
+            cast("PlayerQueuesController", SimpleNamespace(mass=mass, logger=Mock()))
+        )
+
+        work = await mass.music.get_item_by_uri(f"library://work/{work_id}")
+        resolved = await resolver._resolve_media_items(work)
+
+        assert isinstance(work, Work)
+        assert work.uri == f"library://work/{work_id}"
+        assert [x.item.name for x in resolved] == ["Abbado Celeste", "Karajan Ritorna"]
+        assert [x.origin.container.uri for x in resolved if x.origin and x.origin.container] == [
+            work.uri
+        ] * 2
 
 
 @pytest.fixture(scope="class", name="main_artist_library")

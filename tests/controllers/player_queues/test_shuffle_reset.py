@@ -32,6 +32,7 @@ from music_assistant_models.media_items import (
     ProviderMapping,
     Radio,
     Track,
+    Work,
 )
 from music_assistant_models.player_queue import PlayerQueue
 from music_assistant_models.queue_item import QueueItem
@@ -118,6 +119,7 @@ def _ordered_item(media_type: MediaType) -> Any:
     """Build a media item of one of the types that carry an order of their own."""
     cls = {
         MediaType.ALBUM: Album,
+        MediaType.WORK: Work,
         MediaType.AUDIOBOOK: Audiobook,
         MediaType.PODCAST: Podcast,
         MediaType.PODCAST_EPISODE: PodcastEpisode,
@@ -325,6 +327,19 @@ async def test_an_album_switches_shuffle_off_for_a_derived_enqueue_option() -> N
     assert ctrl.get_config_value.call_args.args[0] == "default_enqueue_option_album"
     assert _queue(ctrl).shuffle_enabled is False
     assert _played_order(ctrl) == ALBUM_TRACKS
+
+
+async def test_a_work_takes_the_enqueue_default_of_an_album() -> None:
+    """A work plays as an album does, but is kept as neither a source nor an autoplay seed."""
+    ctrl = _controller(shuffle_enabled=True)
+
+    await ctrl.play_media("q1", _ordered_item(MediaType.WORK))
+
+    assert ctrl.get_config_value.call_args.args[0] == "default_enqueue_option_album"
+    assert _queue(ctrl).shuffle_enabled is False
+    assert _played_order(ctrl) == ALBUM_TRACKS
+    assert ctrl._queue_data["q1"].enqueued_media_items == []
+    assert ctrl._queue_data["q1"].source_items == []
 
 
 async def test_an_album_restores_the_order_of_the_items_that_stay_in_the_queue() -> None:

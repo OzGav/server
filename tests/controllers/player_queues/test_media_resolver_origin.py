@@ -33,6 +33,7 @@ from music_assistant_models.media_items import (
     Radio,
     Track,
     UniqueList,
+    Work,
 )
 from music_assistant_models.queue_item import QueueItemOrigin
 
@@ -711,6 +712,39 @@ async def test_an_artist_play_records_the_artist_without_a_pin() -> None:
 
     assert _container(resolved[0]).media_type == MediaType.ARTIST
     assert _pin(resolved[0]) == (None, None)
+
+
+async def test_a_work_play_plays_its_available_tracks_without_recording_the_work() -> None:
+    """A work plays the tracks its classical listing picks, each played from the work only."""
+    resolver = _resolver()
+    work = Work(item_id="7", provider="library", name="Requiem", provider_mappings=set())
+    gone = ProviderMapping(
+        item_id="t2", provider_domain="tidal", provider_instance=TIDAL, available=False
+    )
+    unavailable = _track("t2", "library", gone)
+    tracks = [_track("t1", "library", _mapping(TIDAL, "t1")), unavailable]
+    work_tracks = AsyncMock(return_value=tracks)
+    resolver.mass.music.classical.work_tracks = work_tracks  # type: ignore[method-assign]
+
+    resolved = await resolver._resolve_media_items(work, userid="u1", queue_id="q1")
+
+    work_tracks.assert_awaited_once_with("7")
+    assert [x.item for x in resolved] == tracks[:1]
+    assert _container(resolved[0]) == ItemMapping.from_item(work)
+    assert _pin(resolved[0]) == (None, None)
+    # only its tracks are recorded as played, when they play
+    cast("Mock", resolver.mass.music.mark_item_played).assert_not_called()
+    assert await resolver.get_tracks_for_playback(work) == tracks[:1]
+
+
+async def test_a_work_without_recordings_plays_nothing_and_is_not_marked_played() -> None:
+    """A work without recordings resolves to nothing, as an empty album does."""
+    resolver = _resolver()
+    work = Work(item_id="7", provider="library", name="Nabucco", provider_mappings=set())
+    resolver.mass.music.classical.work_tracks = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+    assert await resolver._resolve_media_items(work) == []
+    cast("Mock", resolver.mass.music.mark_item_played).assert_not_called()
 
 
 async def test_a_podcast_pins_its_episodes_to_the_podcasts_provider() -> None:
