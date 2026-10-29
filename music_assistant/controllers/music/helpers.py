@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any, Final
 
-from music_assistant_models.enums import ExternalID, ImageType
+from music_assistant_models.enums import ArtistEntityType, ArtistRole, ExternalID, ImageType, Period
 from music_assistant_models.errors import InvalidProviderID, InvalidProviderURI
 from music_assistant_models.helpers import create_safe_string, get_global_cache_value
 from music_assistant_models.media_items import (
@@ -20,9 +20,21 @@ from music_assistant_models.media_items import (
 from music_assistant_models.media_items.metadata import LifeSpan
 from music_assistant_models.unique_list import UniqueList
 
-from music_assistant.constants import DB_TABLE_TRACK_ARTISTS, DB_TABLE_TRACK_CREDITS
+from music_assistant.constants import (
+    DB_TABLE_ARTISTS,
+    DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
+    DB_TABLE_WORK_ARTISTS,
+)
+from music_assistant.controllers.music.constants import (
+    COMPOSER_PERIOD_START_YEARS,
+    COMPOSER_WORKING_LIFE_END_OFFSET,
+    COMPOSER_WORKING_LIFE_START_AGE,
+)
+from music_assistant.helpers.datetime import utc
 from music_assistant.helpers.external_ids import is_valid_isrc
 from music_assistant.helpers.uri import canonical_provider_url, discogs_id_from_url, parse_uri
+from music_assistant.providers.musicbrainz.models import release_year
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -41,6 +53,15 @@ MIN_FTS_TERM_LENGTH: Final[int] = 3
 CREDITED_TRACK_ARTISTS: Final[str] = (
     f"(SELECT track_id, artist_id FROM {DB_TABLE_TRACK_ARTISTS} "
     f"UNION ALL SELECT track_id, artist_id FROM {DB_TABLE_TRACK_CREDITS})"
+)
+
+# only a classical artist credited as a composer, on a track or a work, carries a period
+IS_CLASSICAL_COMPOSER: Final[str] = (
+    f"({DB_TABLE_ARTISTS}.is_classical = 1 AND ("
+    f"EXISTS (SELECT 1 FROM {DB_TABLE_TRACK_CREDITS} ta WHERE ta.artist_id = "
+    f"{DB_TABLE_ARTISTS}.item_id AND ta.role = '{ArtistRole.COMPOSER.value}') "
+    f"OR EXISTS (SELECT 1 FROM {DB_TABLE_WORK_ARTISTS} wa WHERE wa.artist_id = "
+    f"{DB_TABLE_ARTISTS}.item_id AND wa.role = '{ArtistRole.COMPOSER.value}')))"
 )
 
 
@@ -67,6 +88,42 @@ def search_name_match_clause(
         f"{db_table}.item_id IN "
         f"(SELECT rowid FROM {db_table}_fts WHERE {db_table}_fts MATCH :{param_name})"
     )
+
+
+def composer_period(birth_year: int, death_year: int | None) -> Period:
+    """
+    Return the classical period of a composer, judged by the middle of their working life.
+
+    :param birth_year: The year the composer was born.
+    :param death_year: The year the composer died, None for a living composer.
+    """
+    start = birth_year + COMPOSER_WORKING_LIFE_START_AGE
+    # a living composer is still working
+    end = death_year - COMPOSER_WORKING_LIFE_END_OFFSET if death_year else utc().year
+    midpoint = (start + end) // 2
+    return next(
+        (period for year, period in reversed(COMPOSER_PERIOD_START_YEARS) if midpoint >= year),
+        Period.MEDIEVAL,
+    )
+
+
+def life_span_period(artist: Artist) -> Period | None:
+    """
+    Return the classical period a composer's stored life span gives, None when it gives none.
+
+    :param artist: The artist, a person with a known year of birth, and of death once died.
+    """
+    life_span = artist.metadata.life_span
+    if (
+        artist.metadata.artist_entity_type != ArtistEntityType.PERSON
+        or not life_span
+        or not (birth_year := release_year(life_span.begin))
+    ):
+        return None
+    death_year = release_year(life_span.end)
+    if life_span.ended and not death_year:
+        return None  # died in an unknown year, so their working life is unknown too
+    return composer_period(birth_year, death_year)
 
 
 def sort_search_result[SortItemT: MediaItemType | ItemMapping](

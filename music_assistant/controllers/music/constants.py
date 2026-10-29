@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from music_assistant_models.enums import SortDirection, SortField
+from music_assistant_models.enums import Period, SortDirection, SortField
 
 CONF_RESET_DB = "reset_db"
 DEFAULT_SYNC_INTERVAL = 12 * 60  # default sync interval in minutes
@@ -150,3 +150,18 @@ AUDIO_ANALYSIS_MOVE_BATCH_SIZE: Final[int] = 5000
 # twice (decoded and packed) while it converts. Progress is logged once per this many rows.
 AUDIO_ANALYSIS_PACK_BATCH_SIZE: Final[int] = 100
 AUDIO_ANALYSIS_PACK_PROGRESS_ROWS: Final[int] = 2000
+
+# a composer's working life, from which their period is estimated, is taken to start at this
+# age and to end this many years before their death
+COMPOSER_WORKING_LIFE_START_AGE = 25
+COMPOSER_WORKING_LIFE_END_OFFSET = 5
+
+# the first year of each classical period after the medieval one, oldest first
+COMPOSER_PERIOD_START_YEARS = (
+    (1400, Period.RENAISSANCE),
+    (1600, Period.BAROQUE),
+    (1750, Period.CLASSICAL),
+    (1820, Period.ROMANTIC),
+    (1900, Period.MODERN),
+    (1975, Period.CONTEMPORARY),
+)

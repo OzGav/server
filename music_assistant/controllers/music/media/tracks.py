@@ -50,6 +50,7 @@ from music_assistant.constants import (
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACK_CREDITS,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORK_ARTISTS,
     DB_TABLE_WORKS,
 )
 from music_assistant.controllers.music.constants import SIMILAR_ITEMS_LIMIT
@@ -713,6 +714,26 @@ class TracksController(MediaControllerBase[Track]):
             return
 
         await self.update_item_in_library(int(track.item_id), track)
+
+    async def credit_work_composers(self, work_id: int) -> None:
+        """
+        Credit a work's composers on each of its library tracks that credits no composer.
+
+        :param work_id: Library id of the work.
+        """
+        added = await self.mass.music.database.execute_write(
+            f"INSERT OR IGNORE INTO {DB_TABLE_TRACK_CREDITS}"
+            "(track_id, artist_id, role, position) "
+            "SELECT t.item_id, wa.artist_id, wa.role, wa.position "
+            f"FROM {DB_TABLE_TRACKS} t JOIN {DB_TABLE_WORK_ARTISTS} wa "
+            "ON wa.work_id = t.work_id AND wa.role = :composer "
+            "WHERE t.work_id = :work_id "
+            f"AND NOT EXISTS (SELECT 1 FROM {DB_TABLE_TRACK_CREDITS} ta "
+            "WHERE ta.track_id = t.item_id AND ta.role = :composer)",
+            {"work_id": work_id, "composer": ArtistRole.COMPOSER.value},
+        )
+        if added:
+            await self.mass.music.classification.update_item(MediaType.WORK, work_id)
 
     async def get_preview_url(self, provider_instance_id_or_domain: str, item_id: str) -> str:
         """Return url to short preview sample."""
@@ -1595,6 +1616,7 @@ class TracksController(MediaControllerBase[Track]):
         item.metadata.lrc_lyrics = normalize_lrc_lyrics(
             item.metadata.lrc_lyrics or extract_lrc_lyrics(item.metadata.lyrics)
         )
+        work_id = await self.mass.music.works.get_library_work_id(item.work) if item.work else None
         db_id = await self.mass.music.database.insert(
             self.db_table,
             {
@@ -1607,9 +1629,7 @@ class TracksController(MediaControllerBase[Track]):
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
                 "classical_tag": bool(item.metadata.classical_tag),
-                "work_id": await self.mass.music.works.get_library_work_id(item.work)
-                if item.work
-                else None,
+                "work_id": work_id,
                 "movement_number": item.movement_number,
                 "movement_total": item.movement_total,
                 "movement_name": item.movement_name,
@@ -1623,6 +1643,8 @@ class TracksController(MediaControllerBase[Track]):
         resolved_artists: dict[tuple[str, str], int] = {}
         await self._set_track_artists(db_id, item.artists, resolved_artists=resolved_artists)
         await self._set_credits(db_id, item.credits, resolved_artists=resolved_artists)
+        if work_id:
+            await self.credit_work_composers(work_id)
         # handle track album
         if item.album:
             await self._set_track_album(
@@ -1698,10 +1720,15 @@ class TracksController(MediaControllerBase[Track]):
                 "movement_name": preferred.movement_name or fallback.movement_name,
             },
         )
+        external_ids = update.external_ids if overwrite else cur_item.external_ids
+        if overwrite and from_streaming:
+            # stored work ids came from MusicBrainz, whose recording read again compares them
+            external_ids = {
+                *external_ids,
+                *(x for x in cur_item.external_ids if x[0] == ExternalID.MB_WORK),
+            }
         # update/set external id lookup table
-        await self.set_external_ids(
-            db_id, update.external_ids if overwrite else cur_item.external_ids
-        )
+        await self.set_external_ids(db_id, external_ids)
         # update/set provider_mappings table
         provider_mappings = provider_mappings_for_update(
             cur_item.provider_mappings, update.provider_mappings, overwrite
@@ -1720,6 +1747,8 @@ class TracksController(MediaControllerBase[Track]):
             replace=replace_credits,
             resolved_artists=resolved_artists,
         )
+        if work_id:
+            await self.credit_work_composers(work_id)
         # update/set track album
         if update.album and set_album:
             await self._set_track_album(

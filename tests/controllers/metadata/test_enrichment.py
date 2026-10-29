@@ -13,6 +13,7 @@ from music_assistant_models.enums import (
     ExternalID,
     ImageType,
     MediaType,
+    Period,
     ProviderFeature,
 )
 from music_assistant_models.errors import (
@@ -43,6 +44,7 @@ from music_assistant.controllers.metadata.enrichment import MetadataEnrichmentMi
 from music_assistant.controllers.music.helpers import fill_track_from_recording
 from music_assistant.controllers.music.listing_cache import Listing
 from music_assistant.providers.musicbrainz.models import (
+    MusicBrainzAlias,
     MusicBrainzArtist,
     MusicBrainzRecording,
     MusicBrainzRelation,
@@ -1073,14 +1075,24 @@ def _logged_musicbrainz_unavailable(enrichment: MetadataEnrichmentMixin) -> bool
 
 
 def _album(external_ids: set[tuple[ExternalID, str]] | None = None, **kwargs: Any) -> Album:
-    """Return a library album without provider mappings."""
+    """Return a library album, without provider mappings unless given."""
+    kwargs.setdefault("provider_mappings", set())
     return Album(
         item_id="1",
         provider="library",
         name="In Rainbows",
-        provider_mappings=set(),
         external_ids=external_ids or set(),
         **kwargs,
+    )
+
+
+def _library_mapping(in_library: bool = True) -> ProviderMapping:
+    """Return a mapping of an album on a local file source, added to the library or not."""
+    return ProviderMapping(
+        item_id="in-rainbows",
+        provider_domain="filesystem",
+        provider_instance="files",
+        in_library=in_library,
     )
 
 
@@ -1748,3 +1760,215 @@ async def test_track_identity_with_linking_disabled_fills_ids_but_links_nothing(
     assert (ExternalID.ISRC, "GBSTK0700001") in track.external_ids
     assert track.metadata.last_musicbrainz_lookup is not None
     _mass(enrichment).music.tracks.link_musicbrainz_mappings.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("is_classical", "expected"), [(True, "Copland, Aaron"), (False, None)])
+async def test_artist_identity_offers_musicbrainz_sort_name_for_classical_artists(
+    is_classical: bool, expected: str | None
+) -> None:
+    """A classical artist is offered the sort name MusicBrainz knows; other artists are not."""
+    details = MusicBrainzArtist(id=OTHER_MBID, name="Aaron Copland", sort_name="Copland, Aaron")
+    enrichment = _enrichment(_musicbrainz(artist=details))
+    # a classical artist the library holds as no composer
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": 0}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Aaron Copland",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        is_classical=is_classical,
+    )
+    default_sort_name = artist.sort_name
+
+    await enrichment._link_artist_to_musicbrainz(artist)
+
+    assert artist.sort_name == (expected or default_sort_name)
+
+
+def _rubinstein() -> MusicBrainzArtist:
+    """Return a composer whose MusicBrainz main name is in Cyrillic script."""
+    return MusicBrainzArtist(
+        id=OTHER_MBID,
+        name="Антон Григорьевич Рубинштейн",
+        sort_name="Рубинштейн, Антон Григорьевич",
+        aliases=[
+            MusicBrainzAlias("Anton Rubinstein", "Rubinstein, Anton", locale="en", primary=True)
+        ],
+    )
+
+
+async def _link_classical_artist(
+    name: str, sort_name: str | None, is_composer: bool, details: MusicBrainzArtist | None = None
+) -> tuple[Artist, MagicMock, MetadataEnrichmentMixin]:
+    """
+    Link a classical artist holding a MusicBrainz id.
+
+    :param name: The library name of the artist.
+    :param sort_name: The library sort name of the artist, made from its name if None.
+    :param is_composer: Whether the library credits the artist as a classical composer.
+    :param details: The MusicBrainz artist of the id, Anton Rubinstein if None.
+    :return: The artist, the MusicBrainz provider stub and the enrichment mixin.
+    """
+    musicbrainz = _musicbrainz(artist=details or _rubinstein())
+    enrichment = _enrichment(musicbrainz)
+    artists = _mass(enrichment).music.artists
+    artists.set_library_artist_name = AsyncMock()
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": int(is_composer)}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name=name,
+        sort_name=sort_name,
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        is_classical=True,
+    )
+    await enrichment._link_artist_to_musicbrainz(artist)
+    return artist, musicbrainz, enrichment
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "is_composer", "details", "renamed"),
+    [
+        # the English name MusicBrainz gives a Cyrillic main name
+        ("Rubenstein", True, None, True),
+        ("Rubenstein", False, None, False),
+        ("Антон Рубинштейн", False, None, True),
+        # an ensemble's native name in Latin script wins over its English alias
+        (
+            "Wiener Philharmoniker",
+            False,
+            MusicBrainzArtist(
+                id=OTHER_MBID,
+                name="Wiener Philharmoniker",
+                sort_name="Wiener Philharmoniker",
+                aliases=[
+                    MusicBrainzAlias(
+                        "Vienna Philharmonic", "Vienna Philharmonic", locale="en", primary=True
+                    )
+                ],
+            ),
+            False,
+        ),
+    ],
+)
+async def test_artist_identity_gives_a_composer_its_musicbrainz_name(
+    name: str, is_composer: bool, details: MusicBrainzArtist | None, renamed: bool
+) -> None:
+    """
+    A composer holding an id takes the name MusicBrainz gives it in Latin script.
+
+    A classical artist not credited as composer keeps its own name, unless it is in another
+    script.
+    """
+    artist, musicbrainz, enrichment = await _link_classical_artist(name, None, is_composer, details)
+
+    musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
+    set_name = _mass(enrichment).music.artists.set_library_artist_name
+    if renamed:
+        set_name.assert_awaited_once_with(1, "Anton Rubinstein", "Rubinstein, Anton")
+        assert (artist.name, artist.sort_name) == ("Anton Rubinstein", "Rubinstein, Anton")
+    else:
+        set_name.assert_not_awaited()
+        assert artist.name == name
+
+
+@pytest.mark.asyncio
+async def test_artist_identity_leaves_a_composer_already_named_alone() -> None:
+    """A composer already carrying its MusicBrainz name costs no lookup and no rename."""
+    _artist, musicbrainz, enrichment = await _link_classical_artist(
+        "Anton Rubinstein", "Rubinstein, Anton", is_composer=True
+    )
+
+    musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
+    _mass(enrichment).music.database.get_rows_from_query.assert_not_awaited()
+    _mass(enrichment).music.artists.set_library_artist_name.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------- #
+#  composer periods                                                            #
+# --------------------------------------------------------------------------- #
+
+
+async def _refresh_composer(
+    life_span: LifeSpan,
+    *,
+    entity_type: ArtistEntityType = ArtistEntityType.PERSON,
+    is_classical_composer: bool = True,
+    period: Period | None = None,
+) -> Artist:
+    """Refresh an artist whose metadata provider reports the given life span and return it."""
+    # is_classical_composer is whether the library holds the artist as a classical composer
+    enrichment = _enrichment()
+    provider = _metadata_provider("musicbrainz", ProviderFeature.ARTIST_METADATA)
+    provider.get_artist_metadata = AsyncMock(
+        return_value=MediaItemMetadata(artist_entity_type=entity_type, life_span=life_span)
+    )
+    enrichment.providers = [provider]  # type: ignore[misc]
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": int(is_classical_composer)}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Johann Sebastian Bach",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, "24f1766e-9635-4d58-a4d4-9413f9f98a4c")},
+        period=period,
+    )
+    await enrichment._update_artist_metadata(artist, force_refresh=True)
+    _mass(enrichment).music.artists.update_item_in_library.assert_awaited_once_with("1", artist)
+    return artist
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("life_span", "expected"),
+    [
+        (LifeSpan(begin="1685-03-21", end="1750-07-28", ended=True), Period.BAROQUE),
+        (LifeSpan(begin="1450", ended=True), None),
+        (LifeSpan(end="1750", ended=True), None),
+    ],
+)
+async def test_artist_refresh_gives_a_composer_the_period_of_their_life_span(
+    life_span: LifeSpan, expected: Period | None
+) -> None:
+    """A composer gets a period from their dates; without a birth or known death year, none."""
+    artist = await _refresh_composer(life_span)
+
+    assert artist.period == expected
+
+
+@pytest.mark.asyncio
+async def test_artist_refresh_keeps_the_period_of_the_tags() -> None:
+    """A period the artist already has, such as one from the genre tags, is kept."""
+    artist = await _refresh_composer(
+        LifeSpan(begin="1685", end="1750", ended=True), period=Period.ROMANTIC
+    )
+
+    assert artist.period == Period.ROMANTIC
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entity_type", "is_classical_composer"),
+    [(ArtistEntityType.GROUP, True), (ArtistEntityType.PERSON, False)],
+)
+async def test_artist_refresh_gives_no_period_to_other_artists(
+    entity_type: ArtistEntityType, is_classical_composer: bool
+) -> None:
+    """A group, or a person the library does not hold as a classical composer, gets no period."""
+    artist = await _refresh_composer(
+        LifeSpan(begin="1685", end="1750", ended=True),
+        entity_type=entity_type,
+        is_classical_composer=is_classical_composer,
+    )
+
+    assert artist.period is None

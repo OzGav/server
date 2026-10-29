@@ -29,7 +29,7 @@ from music_assistant_models.enums import (
     SortField,
 )
 from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
-from music_assistant_models.media_items import Album, Artist, BrowseFolder, Track
+from music_assistant_models.media_items import Album, Artist, BrowseFolder, Track, Work
 
 from music_assistant.constants import (
     CONF_LANGUAGE,
@@ -41,6 +41,7 @@ from music_assistant.constants import (
     DB_TABLE_PLAYLISTS,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORKS,
     VERBOSE_LOG_LEVEL,
 )
 from music_assistant.controllers.tasks.context import (
@@ -87,6 +88,7 @@ from .constants import (
 from .enrichment import MetadataEnrichmentMixin
 from .images import ImageProxyMixin
 from .radio import RadioArtworkMixin
+from .work_enrichment import WorkEnrichmentMixin
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import CoreConfig
@@ -114,7 +116,7 @@ class _LinkPhase:
 
 
 class MetaDataController(
-    ImageProxyMixin, RadioArtworkMixin, MetadataEnrichmentMixin, CoreController
+    ImageProxyMixin, RadioArtworkMixin, MetadataEnrichmentMixin, WorkEnrichmentMixin, CoreController
 ):
     """Controller that handles metadata retrieval and management for media items."""
 
@@ -395,14 +397,15 @@ class MetaDataController(
             },
         )
 
-    async def link_item_to_musicbrainz(self, item: Artist | Album | Track) -> None:
+    async def link_item_to_musicbrainz(self, item: Artist | Album | Track | Work) -> None:
         """
         Identify a library item on MusicBrainz and link it to the music providers known there.
 
         Only the item's identifiers and provider links are filled in; the full metadata
-        refresh is left to :meth:`update_metadata`.
+        refresh is left to :meth:`update_metadata`. A work, which no music provider holds,
+        has its empty fields filled in from MusicBrainz instead.
 
-        :param item: The library artist, album or track.
+        :param item: The library artist, album, track or work.
         """
         if isinstance(item, Artist):
             merge_mbid: str | None = None
@@ -425,6 +428,8 @@ class MetaDataController(
         elif isinstance(item, Album):
             await self._link_album_to_musicbrainz(item)
             await self.mass.music.albums.update_item_in_library(item.item_id, item)
+        elif isinstance(item, Work):
+            await self._link_work_to_musicbrainz(item)
         else:
             await self._link_track_to_musicbrainz(item)
             await self.mass.music.tracks.update_item_in_library(item.item_id, item)
@@ -457,6 +462,26 @@ class MetaDataController(
                 "SerializableType", self._corrupt_metadata_rows
             )
         return diagnostics
+
+    async def get_classical_link_progress(self) -> dict[str, int]:
+        """
+        Return how many classical items the MusicBrainz link task still has to look up.
+
+        Counts the classical albums still to identify (``albums``) and the works still to look
+        up (``works``). Both are zero while the MusicBrainz provider is not loaded or linking
+        through MusicBrainz is disabled, as nothing is looked up then.
+        """
+        selections = (
+            (
+                "albums",
+                DB_TABLE_ALBUMS,
+                f"{DB_TABLE_ALBUMS}.is_classical = 1 AND {_albums_to_identify_query()}",
+            ),
+            ("works", DB_TABLE_WORKS, _works_to_enrich_query()),
+        )
+        if self._musicbrainz_provider() is None or not self.link_providers_via_musicbrainz:
+            return {name: 0 for name, _, _ in selections}
+        return await self._count_link_selections(*selections)
 
     async def _get_track_lyrics(
         self,
@@ -752,7 +777,7 @@ class MetaDataController(
             if budget <= 0 or rate_limited:
                 break
             update_current_task_progress_text(f"Searching for {phase.name}")
-            items: list[Artist | Album | Track] = await self._get_scan_batch(
+            items: list[Artist | Album | Track | Work] = await self._get_scan_batch(
                 phase.controller,
                 phase.table,
                 phase.query,
@@ -870,6 +895,15 @@ class MetaDataController(
                     params,
                 )
             )
+        phases.append(
+            _LinkPhase(
+                "works",
+                self.mass.music.works,
+                DB_TABLE_WORKS,
+                _works_to_enrich_query(),
+                {},
+            )
+        )
         return phases
 
     def _refresh_musicbrainz_linked_domains(self) -> dict[str, int]:
@@ -913,14 +947,19 @@ class MetaDataController(
         return linked
 
     async def _pending_musicbrainz_link_counts(self) -> dict[str, int]:
-        """Return how many albums, artists and tracks still await their MusicBrainz lookup."""
-        counts: dict[str, int] = {}
-        stale = {"stale": int(time() - REFRESH_INTERVAL)}
-        for name, table, query in (
+        """Return how many albums, artists, tracks and works await their MusicBrainz lookup."""
+        return await self._count_link_selections(
             ("albums", DB_TABLE_ALBUMS, _albums_to_identify_query()),
             ("artists", DB_TABLE_ARTISTS, _artists_to_identify_query()),
             ("tracks", DB_TABLE_TRACKS, _tracks_to_identify_query()),
-        ):
+            ("works", DB_TABLE_WORKS, _works_to_enrich_query()),
+        )
+
+    async def _count_link_selections(self, *selections: tuple[str, str, str]) -> dict[str, int]:
+        """Return the number of rows each (name, table, query part) link selection matches."""
+        counts: dict[str, int] = {}
+        stale = {"stale": int(time() - REFRESH_INTERVAL)}
+        for name, table, query in selections:
             counts[name] = await self.mass.music.database.get_count_from_query(
                 f"SELECT 1 FROM {table} WHERE {_valid_metadata_guard(table)} AND {query}", stale
             )
@@ -1118,6 +1157,15 @@ def _tracks_to_identify_query() -> str:
         f"AND {album_identified})"
     )
     return f"({marker} ISNULL AND NOT {identified} AND {has_identified_album})"
+
+
+def _works_to_enrich_query() -> str:
+    """Return a query part selecting the works with a MusicBrainz id not looked up yet."""
+    marker = _musicbrainz_lookup_marker(DB_TABLE_WORKS)
+    identified = _has_musicbrainz_id(
+        f"{DB_TABLE_WORKS}.item_id", MediaType.WORK, ExternalID.MB_WORK
+    )
+    return f"({marker} ISNULL AND {identified})"
 
 
 def _relink_query(table: str, media_type: MediaType, id_type: ExternalID) -> str:

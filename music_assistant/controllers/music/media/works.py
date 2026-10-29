@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 from music_assistant_models.enums import (
     ArtistRole,
+    EventType,
     ExternalID,
     ListingType,
     MediaType,
@@ -14,7 +15,7 @@ from music_assistant_models.enums import (
     SortField,
     WorkType,
 )
-from music_assistant_models.helpers import create_safe_string
+from music_assistant_models.helpers import create_safe_string, create_sort_name
 from music_assistant_models.media_items import (
     Artist,
     ItemMapping,
@@ -37,7 +38,7 @@ from music_assistant.helpers.json import json_loads, serialize_to_json
 from .base import SUMMARY_ARTIST_FIELDS, MediaControllerBase
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
 
 # the first composer of a work, for sorting works by composer
 FIRST_COMPOSER_SORT_NAME = f"""(SELECT artists.search_sort_name FROM {DB_TABLE_WORK_ARTISTS}
@@ -152,11 +153,20 @@ class WorksController(MediaControllerBase[Work]):
         :param recursive: Unused for works, kept for base-class compatibility.
         """
         db_id = int(item_id)  # ensure integer
+        track_rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT item_id FROM {DB_TABLE_TRACKS} WHERE work_id = :db_id",
+            {"db_id": db_id},
+            limit=0,
+        )
         await super().remove_item_from_library(db_id)
         # the movement fields stay on the tracks as they describe the recording
         await self.mass.music.database.execute_write(
             f"UPDATE {DB_TABLE_TRACKS} SET work_id = NULL WHERE work_id = :db_id",
             {"db_id": db_id},
+        )
+        # the work's type may have been what made its tracks classical
+        await self.mass.music.classification.update(
+            track_ids=[int(row["item_id"]) for row in track_rows]
         )
         await self.mass.music.database.execute_write(
             f"UPDATE {DB_TABLE_WORKS} SET parent_work_id = NULL WHERE parent_work_id = :db_id",
@@ -237,6 +247,76 @@ class WorksController(MediaControllerBase[Work]):
         """No provider matching for works, they are library-only items."""
         return
 
+    async def rename_library_work(
+        self, item_id: int, name: str, catalog_numbers: Sequence[str]
+    ) -> None:
+        """
+        Give a library work a new name and the catalog numbers that go with it.
+
+        :param item_id: Library id of the work.
+        :param name: The new name, which the sort name is made from.
+        :param catalog_numbers: The catalog numbers of the work under its new name, replacing those
+            it had.
+        """
+        safe_name = create_safe_string(name, True, True)
+        sort_name = create_sort_name(name)
+        unique_numbers = _unique_catalog_numbers(list(catalog_numbers))
+        await self.mass.music.database.update(
+            self.db_table,
+            {"item_id": item_id},
+            {
+                "name": name,
+                "sort_name": sort_name,
+                "name_sort": _natural_sort_key(safe_name),
+                "search_name": safe_name,
+                "search_sort_name": create_safe_string(sort_name, True, True),
+                "catalog_numbers": serialize_to_json(unique_numbers),
+                "catalog_sort": _catalog_sort_key(unique_numbers),
+            },
+        )
+        library_item = await self.get_library_item(item_id)
+        self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+
+    async def mark_musicbrainz_lookup(self, item_id: int, timestamp: int) -> None:
+        """
+        Store when a library work was last looked up on MusicBrainz.
+
+        :param item_id: Library id of the work.
+        :param timestamp: The time of the lookup, in seconds since the epoch.
+        """
+        await self.mass.music.database.execute_write(
+            f"UPDATE {self.db_table} SET metadata = json_set(metadata, "
+            "'$.last_musicbrainz_lookup', :timestamp) "
+            "WHERE item_id = :item_id AND json_valid(metadata)",
+            {"item_id": item_id, "timestamp": timestamp},
+        )
+
+    async def update_from_musicbrainz(self, work: Work, replace: bool = False) -> None:
+        """
+        Store a library work filled in from MusicBrainz.
+
+        The work's version replaces the stored one, also when it has none. A work whose type
+        changes is classified again.
+
+        :param work: The library work, filled in from MusicBrainz.
+        :param replace: Replace the stored type, year, language and key by the work's as well.
+        """
+        db_id = int(work.item_id)
+        stored_type = (await self.get_library_item(db_id)).work_type if replace else None
+        # a library update keeps the values a work has, so these are written first
+        values: dict[str, Any] = {"version": work.version}
+        if replace:
+            values |= {
+                "work_type": work.work_type,
+                "composition_year": work.composition_year,
+                "language": work.language,
+                "musical_key": work.musical_key,
+            }
+        await self.mass.music.database.update(self.db_table, {"item_id": db_id}, values)
+        await self.update_item_in_library(db_id, work)
+        if replace and work.work_type != stored_type:
+            await self.mass.music.classification.update_item(self.media_type, db_id)
+
     async def get_library_work_id(self, work: Work | ItemMapping) -> int | None:
         """
         Return the library id of the given work, or None when the library does not hold it.
@@ -296,6 +376,7 @@ class WorksController(MediaControllerBase[Work]):
         new_parent_id = (
             await self.get_library_work_id(update.parent_work) if update.parent_work else None
         )
+        work_type = _merge_value(cur_item.work_type, update.work_type, overwrite)
         # like the composers, a source without a value keeps the stored one
         if overwrite:
             catalog_numbers = (
@@ -303,7 +384,9 @@ class WorksController(MediaControllerBase[Work]):
             )
             parent_work_id = new_parent_id or cur_parent_id
         else:
-            catalog_numbers = list(dict.fromkeys(cur_item.catalog_numbers + update.catalog_numbers))
+            catalog_numbers = _unique_catalog_numbers(
+                cur_item.catalog_numbers + update.catalog_numbers
+            )
             parent_work_id = cur_parent_id or new_parent_id
         await self.mass.music.database.update(
             self.db_table,
@@ -315,7 +398,7 @@ class WorksController(MediaControllerBase[Work]):
                 "catalog_numbers": serialize_to_json(catalog_numbers),
                 "catalog_sort": _catalog_sort_key(catalog_numbers),
                 "name_sort": _natural_sort_key(create_safe_string(name, True, True)),
-                "work_type": _merge_value(cur_item.work_type, update.work_type, overwrite),
+                "work_type": work_type,
                 "composition_year": _merge_value(
                     cur_item.composition_year, update.composition_year, overwrite
                 ),
@@ -336,6 +419,8 @@ class WorksController(MediaControllerBase[Work]):
         composers = update.composers if overwrite else cur_item.composers + update.composers
         await self._set_composers(db_id, composers, overwrite=overwrite)
         await self._set_arrangements(db_id, update.arrangement_of, overwrite=overwrite)
+        if work_type != cur_item.work_type:
+            await self.mass.music.classification.update_item(self.media_type, db_id)
         self.logger.debug("updated %s in database: (id %s)", update.name, db_id)
 
     async def _set_composers(

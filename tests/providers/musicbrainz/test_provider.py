@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import pathlib
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from music_assistant_models.enums import AlbumType, ExternalID, LinkType, MediaType, ProviderFeature
+from music_assistant_models.enums import (
+    AlbumType,
+    ExternalID,
+    LinkType,
+    MediaType,
+    ProviderFeature,
+    WorkType,
+)
 from music_assistant_models.errors import InvalidDataError, RateLimited
 from music_assistant_models.media_items import (
     Album,
@@ -32,6 +41,7 @@ from music_assistant.providers.musicbrainz.models import (
     MusicBrainzRecording,
     MusicBrainzRelation,
     MusicBrainzReleaseGroup,
+    MusicBrainzWork,
 )
 from music_assistant.providers.musicbrainz.provider import (
     MusicbrainzProvider,
@@ -2563,3 +2573,244 @@ async def test_api_client_caches_a_browse_for_a_week_and_a_lookup_for_a_month() 
         f"get_browse_data.release-group.artist{RADIOHEAD_MBID}.offset0": 86400 * 7,
         f"get_data.artist/{RADIOHEAD_MBID}": 86400 * 30,
     }
+
+
+# ---------------------------------------------------------------------------
+# get_work_details
+# ---------------------------------------------------------------------------
+
+WORK_FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures" / "works"
+SYMPHONY_5_MBID = "d03bff61-26fc-301b-98ac-4d8e85771cbc"
+BEETHOVEN_MBID = "1f9df192-a621-4f54-8850-2c5373b7eac9"
+MOZART_MBID = "b972f589-fb0e-474e-b64a-803b0364fa75"
+
+
+def _work_lookup(name: str) -> dict[str, Any]:
+    """Return a real MusicBrainz work lookup response, trimmed to a few relations."""
+    data: dict[str, Any] = json.loads((WORK_FIXTURES_DIR / f"{name}.json").read_text())
+    return data
+
+
+def _work(name: str) -> MusicBrainzWork:
+    """Return the parsed MusicBrainz work of a work lookup fixture."""
+    return MusicBrainzWork.from_raw(_work_lookup(name))
+
+
+async def test_work_details_requests_aliases_and_artist_work_and_series_relations() -> None:
+    """Request the names and relations a work is enriched from and parse the work off the lookup."""
+    provider, get_data = _provider(_work_lookup("symphony_5"))
+
+    work = await provider.get_work_details(SYMPHONY_5_MBID)
+
+    get_data.assert_awaited_once_with(
+        f"work/{SYMPHONY_5_MBID}?inc=aliases+artist-rels+work-rels+series-rels"
+    )
+    assert work is not None
+    assert (work.id, work.title, work.type) == (
+        SYMPHONY_5_MBID,
+        "Symphony no. 5 in C minor, op. 67",
+        "Symphony",
+    )
+
+
+async def test_work_details_is_none_when_not_found() -> None:
+    """A work MusicBrainz does not know yields None."""
+    provider, _ = _provider(None)
+
+    assert await provider.get_work_details(SYMPHONY_5_MBID) is None
+
+
+async def test_work_details_rejects_a_malformed_work() -> None:
+    """A lookup without the work's title is invalid data."""
+    provider, _ = _provider({"id": SYMPHONY_5_MBID})
+
+    with pytest.raises(InvalidDataError):
+        await provider.get_work_details(SYMPHONY_5_MBID)
+
+
+def test_work_parses_attributes_and_relation_targets() -> None:
+    """Parse the work attributes and the artist, work and series targets of its relations."""
+    work = _work("symphony_5")
+
+    assert work.languages == ["zxx"]
+    assert [(attribute.type, attribute.value) for attribute in work.attributes] == [
+        ("Key", "C minor")
+    ]
+    composer = work.relations[0]
+    assert (composer.type, composer.direction, composer.begin, composer.end) == (
+        "composer",
+        "backward",
+        "1804",
+        "1808",
+    )
+    assert composer.artist is not None
+    assert (composer.artist.id, composer.artist.sort_name, composer.artist.type) == (
+        BEETHOVEN_MBID,
+        "Beethoven, Ludwig van",
+        "Person",
+    )
+    part = next(relation for relation in work.relations if relation.type == "parts")
+    assert (part.direction, part.attributes, part.ordering_key) == ("forward", ["movement"], 1)
+    assert part.work is not None
+    assert part.work.title == "Symphony no. 5 in C minor, op. 67: I. Allegro con brio"
+    assert part.work.type is None
+    series = next(relation for relation in work.relations if relation.series)
+    assert series.attribute_values == {"number": "op. 67"}
+    assert series.url is None
+
+
+def test_work_parent_relation_is_the_backward_parts_relation() -> None:
+    """A movement points at its parent work and its position in it; a top-level work has none."""
+    parent = _work("symphony_5_movement_1").parent_relation
+
+    assert parent is not None
+    assert parent.work is not None
+    assert (parent.work.id, parent.work.type, parent.ordering_key) == (
+        SYMPHONY_5_MBID,
+        "Symphony",
+        1,
+    )
+    assert _work("symphony_5").parent_relation is None
+
+
+def test_work_composer_relations_carry_the_composer_and_years() -> None:
+    """Only composer relations count, each with its composer and its years."""
+    composers = _work("st_matthew_passion").composer_relations
+
+    assert len(composers) == 1
+    assert composers[0].artist is not None
+    assert composers[0].artist.name == "Johann Sebastian Bach"
+    assert (composers[0].begin_year, composers[0].end_year) == (None, 1727)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "year"),
+    [
+        ("symphony_5", 1808),
+        ("st_matthew_passion", 1727),
+        ("gute_nacht", 1827),
+    ],
+)
+def test_work_composition_year_prefers_the_year_composing_ended(fixture: str, year: int) -> None:
+    """Date a work by when composing it ended, else by when it began, at any date precision."""
+    assert _work(fixture).composition_year == year
+
+
+def _composed(begin: str | None, end: str | None) -> MusicBrainzWork:
+    """Return a work with a single composer relation of the given dates."""
+    composer = {"id": BEETHOVEN_MBID, "name": "Ludwig van Beethoven", "sort-name": "Beethoven"}
+    relation = {"type": "composer", "direction": "backward", "begin": begin, "end": end}
+    return MusicBrainzWork.from_raw(
+        {"id": "w", "title": "t", "relations": [{**relation, "artist": composer}]}
+    )
+
+
+def test_work_composer_relations_leave_out_additional_composers() -> None:
+    """A composer who completed the work does not count as its composer or date it."""
+    completer = {"id": "c", "name": "Franz Xaver Süßmayr", "sort-name": "Süßmayr, Franz Xaver"}
+    work = MusicBrainzWork.from_raw(
+        {
+            "id": "w",
+            "title": "t",
+            "relations": [
+                {
+                    "type": "composer",
+                    "direction": "backward",
+                    "end": None,
+                    "artist": {
+                        "id": MOZART_MBID,
+                        "name": "Wolfgang Amadeus Mozart",
+                        "sort-name": "Mozart, Wolfgang Amadeus",
+                    },
+                },
+                {
+                    "type": "composer",
+                    "direction": "backward",
+                    "end": "1792",
+                    "attributes": ["additional"],
+                    "artist": completer,
+                },
+            ],
+        }
+    )
+
+    assert [x.artist.name for x in work.composer_relations if x.artist] == [
+        "Wolfgang Amadeus Mozart"
+    ]
+    assert work.composition_year is None
+
+
+@pytest.mark.parametrize("name", ["[traditional]", "[anonymous]", "[unknown]"])
+def test_work_composer_relations_leave_out_placeholder_artists(name: str) -> None:
+    """A MusicBrainz placeholder credited as composer does not count as one or date the work."""
+    placeholder = {"id": "p", "name": name, "sort-name": name}
+    relation = {"type": "composer", "direction": "backward", "end": "1850"}
+    work = MusicBrainzWork.from_raw(
+        {"id": "w", "title": "t", "relations": [{**relation, "artist": placeholder}]}
+    )
+
+    assert work.composer_relations == []
+    assert work.composition_year is None
+
+
+@pytest.mark.parametrize(("begin", "year"), [("1790", 1790), (None, None)])
+def test_work_composition_year_falls_back_to_the_begin_year(
+    begin: str | None, year: int | None
+) -> None:
+    """A composer relation with only a begin date dates the work by it, one without dates not."""
+    assert _composed(begin, None).composition_year == year
+
+
+@pytest.mark.parametrize(
+    ("languages", "language"),
+    [
+        (["zxx"], None),
+        ([], None),
+        (["deu"], "deu"),
+        (["deu", "ita"], "deu"),
+    ],
+)
+def test_work_language_ignores_no_lyrics(languages: list[str], language: str | None) -> None:
+    """A work without lyrics has no language; with several languages the first one counts."""
+    assert MusicBrainzWork(id="w", title="t", languages=languages).language == language
+
+
+@pytest.mark.parametrize(
+    ("fixture", "numbers"),
+    [
+        ("st_matthew_passion", ["BWV 244"]),
+        ("symphony_5", ["op. 67"]),
+        ("goldberg_variations", ["BWV 988"]),
+        ("gute_nacht", []),
+    ],
+)
+def test_work_catalog_numbers_come_from_catalog_series(fixture: str, numbers: list[str]) -> None:
+    """Take the numbers of catalog series only, not of other series the work is part of."""
+    assert _work(fixture).catalog_numbers == numbers
+
+
+@pytest.mark.parametrize(
+    ("mb_type", "work_type"),
+    [
+        ("Symphony", WorkType.SYMPHONY),
+        ("Song-cycle", WorkType.SONG_CYCLE),
+        ("Symphonic poem", WorkType.SYMPHONIC_POEM),
+        ("Étude", WorkType.ETUDE),
+        ("Incidental music", WorkType.INCIDENTAL_MUSIC),
+        ("Song", WorkType.OTHER),
+        ("Musical", WorkType.OTHER),
+        (None, None),
+    ],
+)
+def test_work_type_maps_musicbrainz_types(mb_type: str | None, work_type: WorkType | None) -> None:
+    """Map MusicBrainz work types; an unknown type is other and a missing type stays unknown."""
+    assert MusicBrainzWork(id="w", title="t", type=mb_type).work_type == work_type
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("symphony_5", "C minor"), ("goldberg_variations", "G major"), ("gute_nacht", None)],
+)
+def test_work_musical_key_comes_from_its_key_attribute(name: str, expected: str | None) -> None:
+    """The key of a work is its Key attribute, None for a work without one."""
+    assert _work(name).musical_key == expected

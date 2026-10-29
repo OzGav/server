@@ -171,6 +171,7 @@ class ClassicalController:
             ("work", self.work),
             ("recordings", self.recordings),
             ("other_tracks", self.other_tracks),
+            ("link_progress", self.link_progress),
         ):
             self.mass.register_api_command(
                 f"music/classical/{command}", handler, required_scope=Scope.LIBRARY_READ
@@ -493,6 +494,16 @@ class ClassicalController:
             sort_key = _sort_sql(DB_TABLE_TRACKS, field, direction)
         ids = await self._ids(DB_TABLE_TRACKS, conditions, params, search, sort_key, limit, offset)
         return await self._items(self.mass.music.tracks, ids, summary=False)
+
+    async def link_progress(self) -> dict[str, int]:
+        """
+        Get how many classical items MusicBrainz linking still has to check.
+
+        While any count is above zero, tracks under Other tracks may still move into their works.
+        ``albums`` counts the albums still to identify, ``works`` the works still to look up.
+        All zero means linking is done, or is not running.
+        """
+        return await self.mass.metadata.get_classical_link_progress()
 
     def _classical_tracks(self, params: dict[str, Any]) -> str:
         """Return a subquery selecting the classical library tracks the calling user sees."""

@@ -297,6 +297,7 @@ async def _music_mass_context(
         mass_instance.music = MusicController(mass_instance)
         music_config = await mass_instance.config.get_core_config(mass_instance.music.domain)
         await mass_instance.music.setup(music_config)
+        mass_instance.music.artists.set_composer_periods = AsyncMock()  # type: ignore[method-assign]
         await mass_instance.music.post_setup()
         try:
             yield mass_instance

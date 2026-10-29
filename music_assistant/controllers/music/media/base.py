@@ -1131,6 +1131,16 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         return items[0] if items else None
 
     @final
+    async def get_library_item_by_match(self, item: ItemCls) -> ItemCls | None:
+        """
+        Return the library item that adding the given item to the library would join, if any.
+
+        :param item: The provider item to match.
+        """
+        library_id = await self._get_library_item_by_match(item)
+        return await self.get_library_item(library_id) if library_id else None
+
+    @final
     async def get_item_by_external_id(
         self,
         external_id: str,

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from music_assistant_models.enums import ImageType, MediaType
+import pytest
+from music_assistant_models.enums import ImageType, MediaType, Period
 from music_assistant_models.helpers import set_global_cache_values
 from music_assistant_models.media_items import (
     Artist,
@@ -18,6 +19,7 @@ from music_assistant_models.media_items.metadata import LifeSpan
 from music_assistant_models.unique_list import UniqueList
 
 from music_assistant.controllers.music.helpers import (
+    composer_period,
     merge_metadata,
     metadata_for_update,
     preferred_thumb,
@@ -241,3 +243,25 @@ def test_metadata_for_update_drops_unlinked_sources_images() -> None:
         update_mappings=[_source("subsonic_b")],
     )
     assert [image.path for image in result.images or ()] == ["b.jpg"]
+
+
+@pytest.mark.parametrize(
+    ("birth_year", "death_year", "expected"),
+    [
+        (1098, 1179, Period.MEDIEVAL),  # Hildegard von Bingen
+        (1525, 1594, Period.RENAISSANCE),  # Palestrina
+        (1685, 1759, Period.BAROQUE),  # Händel
+        (1685, 1750, Period.BAROQUE),  # Bach
+        (1756, 1791, Period.CLASSICAL),  # Mozart
+        (1732, 1809, Period.CLASSICAL),  # Haydn
+        (1770, 1827, Period.CLASSICAL),  # Beethoven
+        (1797, 1828, Period.ROMANTIC),  # Schubert
+        (1833, 1897, Period.ROMANTIC),  # Brahms
+        (1860, 1911, Period.ROMANTIC),  # Mahler
+        (1874, 1951, Period.MODERN),  # Schoenberg
+        (1935, None, Period.CONTEMPORARY),  # Pärt, alive
+    ],
+)
+def test_composer_period(birth_year: int, death_year: int | None, expected: Period) -> None:
+    """A composer's period follows from the middle of their working life."""
+    assert composer_period(birth_year, death_year) == expected
