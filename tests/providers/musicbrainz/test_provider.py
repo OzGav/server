@@ -27,6 +27,7 @@ from music_assistant_models.media_items import (
     ProviderMapping,
     Track,
     UniqueList,
+    WorkMovement,
 )
 
 from music_assistant.constants import VARIOUS_ARTISTS_MBID
@@ -2671,6 +2672,165 @@ def test_work_parent_relation_is_the_backward_parts_relation() -> None:
         1,
     )
     assert _work("symphony_5").parent_relation is None
+
+
+def test_work_movements_are_its_parts_without_its_title() -> None:
+    """The parts of a work are its movements in order, named without the work's title."""
+    assert _work("symphony_5").movements == [
+        WorkMovement(
+            number=1, name="I. Allegro con brio", mbid="b6f9ecc3-24d1-38ed-b8a0-091f7cd0c6b2"
+        ),
+        WorkMovement(
+            number=2, name="II. Andante con moto", mbid="3bc742da-f67b-36c9-b31e-6ed09fdbdadd"
+        ),
+    ]
+    assert _work("symphony_5_movement_1").movements == []
+
+
+def test_work_movements_follow_the_ordering_key_else_their_position() -> None:
+    """Parts come by ordering key, those without one numbered by their position."""
+    data = _work_lookup("symphony_5")
+    parts = [x for x in data["relations"] if x["type"] == "parts"]
+    parts[0]["ordering-key"], parts[1]["ordering-key"] = 2, 1
+    parts[0]["work"]["title"] = "Finale"
+    parts.append({"type": "parts", "direction": "forward", "work": {"id": "x", "title": "Coda"}})
+    data["relations"].append(parts[-1])
+
+    assert [(x.number, x.name) for x in MusicBrainzWork.from_raw(data).movements] == [
+        (1, "II. Andante con moto"),
+        (2, "Finale"),
+        (3, "Coda"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("keys", "expected"),
+    [
+        # a part without a key after keys with a gap, as in Lucia di Lammermoor's Atto III
+        ([1, 2, 4, None], [1, 2, 4, 5]),
+        # parts sharing a key, as in Aida's Atto II
+        ([5, 6, 6, 7], [5, 6, 7, 8]),
+        ([None, None, None], [1, 2, 3]),
+        ([2, 5, 9], [2, 5, 9]),
+    ],
+)
+def test_work_movements_each_have_their_own_number(
+    keys: list[int | None], expected: list[int]
+) -> None:
+    """Parts keep their ordering keys, unless missing or taken, then follow the part before."""
+    parent = MusicBrainzWork(
+        id="p",
+        title="Opera: Atto III",
+        relations=[
+            MusicBrainzRelation(
+                type="parts",
+                direction="forward",
+                work=MusicBrainzWork(id=f"part {index}", title=f"Opera: Atto III, no. {index}"),
+                ordering_key=key,
+            )
+            for index, key in enumerate(keys)
+        ],
+    )
+
+    assert [(x.number, x.mbid) for x in parent.movements] == [
+        (number, f"part {index}") for index, number in enumerate(expected)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("title", "parent_title", "expected"),
+    [
+        ("Tosca: Atto III. “E lucevan le stelle”", "Tosca: Atto III", "“E lucevan le stelle”"),
+        (
+            "La bohème: Atto I, no. 6. “Che gelida manina!” (Rodolfo)",
+            "La bohème: Atto I. In soffitta",
+            "no. 6. “Che gelida manina!” (Rodolfo)",
+        ),
+        (
+            "Spartacus: Adagio of Spartacus & Phrygia",
+            "Spartacus, op. 82",
+            "Adagio of Spartacus & Phrygia",
+        ),
+        (
+            "La bohème: Atto I. “Già dell'Apocalisse appariscono i segni”",
+            "La bohème: Atto I. In soffitta",
+            "“Già dell'Apocalisse appariscono i segni”",
+        ),
+        (
+            "Luisa Miller: Atto II. “Oh! fede negar potessi” (Rodolfo)",
+            "Luisa Miller: Atto II. “L'intrigo”",
+            "“Oh! fede negar potessi” (Rodolfo)",
+        ),
+        (
+            "Don Carlo: Atto I, scena 1. N°2 “Il duolo della terra”",
+            "Don Carlo: Atto I (II)",
+            "scena 1. N°2 “Il duolo della terra”",
+        ),
+        ("Turandot: Atto I, no. 2", "Turandot: Atto II", "Turandot: Atto I, no. 2"),
+        (
+            "Ein Sommernachtstraum, op. 21 (op. 61 no. 1): Ouvertüre",
+            "Ein Sommernachtstraum, op. 61",
+            "Ein Sommernachtstraum, op. 21 (op. 61 no. 1): Ouvertüre",
+        ),
+        ("Main Theme", "Schindler's List", "Main Theme"),
+    ],
+)
+def test_part_name_leaves_out_the_start_it_shares_with_its_work(
+    title: str, parent_title: str, expected: str
+) -> None:
+    """A part's name leaves out the start its title shares with its work up to where they part."""
+    part = MusicBrainzWork(id="w", title=title)
+    parent = MusicBrainzWork(
+        id="p",
+        title=parent_title,
+        relations=[MusicBrainzRelation(type="parts", direction="forward", work=part)],
+    )
+
+    movement = parent.part_movement("w")
+
+    assert movement is not None
+    assert movement.name == expected
+
+
+@pytest.mark.parametrize("work_type", [None, "Opera"])
+def test_part_movement_is_numbered_by_its_place_in_the_work_s_list(
+    work_type: str | None,
+) -> None:
+    """A part is numbered by its place in its work's list, not by the number in its title."""
+    keyed = MusicBrainzWork(id="keyed", title="Opera: Atto I, no. 6. Aria")
+    unkeyed = MusicBrainzWork(id="unkeyed", title="Opera: Atto I, no. 9. Duet")
+    parent = MusicBrainzWork(
+        id="p",
+        title="Opera: Atto I",
+        type=work_type,
+        relations=[
+            MusicBrainzRelation(type="parts", direction="forward", work=unkeyed),
+            MusicBrainzRelation(type="parts", direction="forward", work=keyed, ordering_key=1),
+        ],
+    )
+
+    movements = [parent.part_movement(x) for x in ("keyed", "unkeyed")]
+
+    assert [(x.number, x.name) if x else None for x in movements] == [
+        (1, "no. 6. Aria"),
+        (2, "no. 9. Duet"),
+    ]
+
+
+@pytest.mark.parametrize(("work_type", "part_type"), [("Opera", None), (None, "Operetta")])
+def test_staged_work_lists_its_parts_as_movements(
+    work_type: str | None, part_type: str | None
+) -> None:
+    """An opera lists its acts, and a work whose parts are operas lists those, as movements."""
+    part = MusicBrainzWork(id="p", title="Work: Atto I", type=part_type)
+    work = MusicBrainzWork(
+        id="w",
+        title="Work",
+        type=work_type,
+        relations=[MusicBrainzRelation(type="parts", direction="forward", work=part)],
+    )
+
+    assert [(x.number, x.name, x.mbid) for x in work.movements] == [(1, "Atto I", "p")]
 
 
 def test_work_arrangement_relations_point_at_its_arrangements() -> None:

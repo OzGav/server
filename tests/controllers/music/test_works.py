@@ -11,6 +11,7 @@ import pytest
 from music_assistant_models.auth import User, UserRole
 from music_assistant_models.enums import (
     ArtistRole,
+    EventType,
     ExternalID,
     MediaType,
     SortDirection,
@@ -1138,3 +1139,54 @@ async def test_parts_are_listed_through_their_work(mass: MusicAssistant) -> None
 
     assert sorted(_ids(listed)) == sorted([opera.item_id, lone.item_id])
     assert _ids(by_part) == [opera.item_id]
+
+
+async def test_track_moves_onto_a_work_as_a_movement_and_off_it(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A track placed on a work as a movement, or taken off it, is stored and signalled."""
+    composer = await _add_artist(mass, "Composer")
+    movement = await _add_work(mass, f"Movement {_token()}", [composer])
+    work = await _add_work(mass, f"Work {_token()}", [composer])
+    track = await _add_track(mass, movement)
+    mbid = str(uuid4())
+    signal = Mock()
+    monkeypatch.setattr(mass, "signal_event", signal)
+
+    await mass.music.tracks.set_work(int(track.item_id), int(work.item_id), 2, "Andante", mbid)
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert stored.work is not None
+    assert stored.work.item_id == work.item_id
+    assert (stored.movement_number, stored.movement_name) == (2, "Andante")
+    assert (ExternalID.MB_WORK, mbid) in stored.external_ids
+    assert signal.call_args.args[:2] == (EventType.MEDIA_ITEM_UPDATED, stored.uri)
+
+    await mass.music.tracks.set_movement_number(int(track.item_id), 3)
+    assert (await mass.music.tracks.get_library_item(track.item_id)).movement_number == 3
+
+    await mass.music.tracks.set_work(int(track.item_id), None)
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert (stored.work, stored.movement_number, stored.movement_name) == (None, None, None)
+    assert signal.call_count == 3
+
+
+async def test_work_movements_are_replaced_or_removed(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The movements stored for a work are replaced as a whole, or removed, and signalled."""
+    work = await _add_work(mass, f"Work {_token()}", [await _add_artist(mass, "Composer")])
+    signal = Mock()
+    monkeypatch.setattr(mass, "signal_event", signal)
+    movements = [WorkMovement(number=1, name="Allegro"), WorkMovement(number=2, name="Adagio")]
+
+    await mass.music.works.set_movements(int(work.item_id), movements)
+
+    stored = await mass.music.works.get_library_item(work.item_id)
+    assert stored.metadata.movements == movements
+    assert signal.call_args.args[:2] == (EventType.MEDIA_ITEM_UPDATED, stored.uri)
+
+    await mass.music.works.set_movements(int(work.item_id), None)
+
+    assert not (await mass.music.works.get_library_item(work.item_id)).metadata.movements

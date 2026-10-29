@@ -35,12 +35,15 @@ from music_assistant.constants import (
 from music_assistant.controllers.music.helpers import search_name_match_clause
 from music_assistant.controllers.music.sorting import get_listing_default_direction
 from music_assistant.helpers.database import UNSET
-from music_assistant.helpers.json import json_loads, serialize_to_json
+from music_assistant.helpers.json import json_dumps, json_loads, serialize_to_json
 
 from .base import SUMMARY_ARTIST_FIELDS, SUPPRESS_MEDIA_ITEM_UPDATES, MediaControllerBase
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
+
+    from music_assistant_models.media_items import WorkMovement
+
 
 # the first composer of a work, for sorting works by composer
 FIRST_COMPOSER_SORT_NAME = f"""(SELECT artists.search_sort_name FROM {DB_TABLE_WORK_ARTISTS}
@@ -48,6 +51,14 @@ FIRST_COMPOSER_SORT_NAME = f"""(SELECT artists.search_sort_name FROM {DB_TABLE_W
     WHERE {DB_TABLE_WORK_ARTISTS}.work_id = {DB_TABLE_WORKS}.item_id
     AND {DB_TABLE_WORK_ARTISTS}.role = '{ArtistRole.COMPOSER.value}'
     ORDER BY {DB_TABLE_WORK_ARTISTS}.position, {DB_TABLE_WORK_ARTISTS}.rowid LIMIT 1)"""
+
+# each work with the work it is listed as, the top work it is a part of or else itself, as a
+# subquery selecting item_id and root_id
+WORK_ROOTS: Final[str] = f"""WITH RECURSIVE roots(item_id, root_id) AS (
+        SELECT item_id, item_id FROM {DB_TABLE_WORKS} WHERE parent_work_id IS NULL
+        UNION ALL SELECT p.item_id, roots.root_id FROM {DB_TABLE_WORKS} p
+        JOIN roots ON p.parent_work_id = roots.item_id)
+    SELECT item_id, root_id FROM roots"""
 
 # The json_object arguments of a slim work mapping, selected from the works table aliased as w.
 SUMMARY_WORK_FIELDS = "'item_id', w.item_id, 'name', w.name, 'sort_name', w.sort_name"
@@ -103,8 +114,8 @@ def work_search_sql(search_term: str, query_params: dict[str, Any]) -> str:
     # the unaliased works table of the subquery is the one the match refers to
     match = search_name_match_clause(DB_TABLE_WORKS, search_term, "search", query_params)
     return (
-        f"{DB_TABLE_WORKS}.item_id IN (SELECT COALESCE(parent_work_id, item_id) "
-        f"FROM {DB_TABLE_WORKS} WHERE {match})"
+        f"{DB_TABLE_WORKS}.item_id IN (SELECT r.root_id FROM ({WORK_ROOTS}) r "
+        f"JOIN {DB_TABLE_WORKS} ON {DB_TABLE_WORKS}.item_id = r.item_id WHERE {match})"
     )
 
 
@@ -442,6 +453,28 @@ class WorksController(MediaControllerBase[Work]):
         library_item = await self.get_library_item(work_id)
         self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
 
+    async def set_movements(self, work_id: int, movements: list[WorkMovement] | None) -> None:
+        """
+        Replace the movements stored for a library work, a library update only adds to them.
+
+        :param work_id: Library id of the work.
+        :param movements: The movements, with any pieces of its groups, None to remove them.
+        """
+        if movements is None:
+            await self.mass.music.database.execute_write(
+                f"UPDATE {DB_TABLE_WORKS} SET metadata = json_remove(metadata, '$.movements') "
+                "WHERE item_id = :work_id AND json_valid(metadata)",
+                {"work_id": work_id},
+            )
+        else:
+            await self.mass.music.database.execute_write(
+                f"UPDATE {DB_TABLE_WORKS} SET metadata = json_set(metadata, '$.movements', "
+                "json(:movements)) WHERE item_id = :work_id AND json_valid(metadata)",
+                {"movements": json_dumps([x.to_dict() for x in movements]), "work_id": work_id},
+            )
+        library_item = await self.get_library_item(work_id)
+        self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+
     async def remove_if_empty(self, work_id: str) -> None:
         """
         Remove a library work that has no tracks, parts or arrangements, and so its parents.
@@ -705,11 +738,9 @@ class WorksController(MediaControllerBase[Work]):
         return f"""({DB_TABLE_WORKS}.parent_work_id IS NULL
             AND (NOT EXISTS (SELECT 1 FROM {DB_TABLE_WORKS} p
                 WHERE p.parent_work_id = {DB_TABLE_WORKS}.item_id)
-            OR EXISTS (SELECT 1 FROM {DB_TABLE_TRACKS}
-                WHERE {DB_TABLE_TRACKS}.work_id = {DB_TABLE_WORKS}.item_id AND {visible})
-            OR EXISTS (SELECT 1 FROM {DB_TABLE_WORKS} p
-                JOIN {DB_TABLE_TRACKS} ON {DB_TABLE_TRACKS}.work_id = p.item_id
-                WHERE p.parent_work_id = {DB_TABLE_WORKS}.item_id AND {visible})))"""
+            OR {DB_TABLE_WORKS}.item_id IN (SELECT r.root_id FROM ({WORK_ROOTS}) r
+                JOIN {DB_TABLE_TRACKS} ON {DB_TABLE_TRACKS}.work_id = r.item_id
+                WHERE {visible})))"""
 
     def _search_filter_clause(self, search: str, query_params: dict[str, Any]) -> str:
         """Return the search condition, which a work also meets through a matching part."""
