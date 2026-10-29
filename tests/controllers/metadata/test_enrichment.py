@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
@@ -15,6 +16,7 @@ from music_assistant_models.enums import (
     MediaType,
     Period,
     ProviderFeature,
+    RecordingSource,
 )
 from music_assistant_models.errors import (
     InvalidDataError,
@@ -41,11 +43,15 @@ from music_assistant.controllers.metadata.constants import (
     REFRESH_RETRY_INTERVAL,
 )
 from music_assistant.controllers.metadata.enrichment import MetadataEnrichmentMixin
-from music_assistant.controllers.music.helpers import fill_track_from_recording
+from music_assistant.controllers.music.helpers import (
+    fill_track_from_recording,
+    set_track_recording_id,
+)
 from music_assistant.controllers.music.listing_cache import Listing
 from music_assistant.providers.musicbrainz.models import (
     MusicBrainzAlias,
     MusicBrainzArtist,
+    MusicBrainzLifeSpan,
     MusicBrainzRecording,
     MusicBrainzRelation,
     MusicBrainzRelease,
@@ -90,6 +96,7 @@ def _enrichment(musicbrainz: MagicMock | None = None) -> MetadataEnrichmentMixin
     """
     enrichment = MetadataEnrichmentMixin()
     enrichment.logger = MagicMock()
+    enrichment._logged_hints = set()
     enrichment.mass = MagicMock()
     enrichment.config = MagicMock()
     enrichment.config.get_value = _online_metadata_only
@@ -109,6 +116,7 @@ def _enrichment(musicbrainz: MagicMock | None = None) -> MetadataEnrichmentMixin
         controller.link_musicbrainz_mappings = AsyncMock(return_value=[])
     music.get_controller.return_value.set_external_ids = AsyncMock()
     music.artists.merge_library_artists_by_mbid = AsyncMock(return_value=1)
+    music.tracks.merge_recording_duplicates = AsyncMock(return_value=set())
     music.albums.get_library_album_tracks = AsyncMock(return_value=[])
     music.albums.link_album_tracks = AsyncMock()
     return enrichment
@@ -671,6 +679,7 @@ def _enrichment_with_musicbrainz(
     """
     enrichment = MetadataEnrichmentMixin()
     enrichment.logger = MagicMock()
+    enrichment._logged_hints = set()
     enrichment.mass = MagicMock()
     enrichment.mass.music.artists.albums = AsyncMock(return_value=albums)
     enrichment.mass.music.artists.tracks = AsyncMock(return_value=tracks)
@@ -1060,7 +1069,9 @@ def _musicbrainz(
     """Return a MusicBrainz provider stub that answers the identity lookups as given."""
     musicbrainz = MagicMock()
     musicbrainz.resolve_release = AsyncMock(return_value=release)
-    musicbrainz.resolve_recording = AsyncMock(return_value=recording)
+    musicbrainz.resolve_recording = AsyncMock(
+        return_value=(recording, RecordingSource.ISRC) if recording else None
+    )
     musicbrainz.identify_artist = AsyncMock(return_value=None)
     musicbrainz.get_artist_details = AsyncMock(return_value=artist)
     return musicbrainz
@@ -1235,7 +1246,9 @@ async def test_album_identity_tells_musicbrainz_the_library_track_count() -> Non
 
     await enrichment._update_album_metadata(album, force_refresh=True)
 
-    musicbrainz.resolve_release.assert_awaited_once_with(album, library_track_count=3)
+    musicbrainz.resolve_release.assert_awaited_once_with(
+        album, library_track_count=3, on_barcode_mismatch=ANY
+    )
 
 
 @pytest.mark.asyncio
@@ -1264,6 +1277,166 @@ async def test_album_identity_marks_a_miss_without_linking() -> None:
     assert album.external_ids == set()
     _mass(enrichment).music.albums.link_musicbrainz_mappings.assert_not_awaited()
     _mass(enrichment).music.albums.link_album_tracks.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("album", "expected"),
+    [
+        (
+            _album(
+                {(ExternalID.BARCODE, "5051083087282")},
+                provider_mappings={_library_mapping()},
+            ),
+            'Album "In Rainbows" (barcode 5051083087282) is not on MusicBrainz, add it for '
+            "example with Harmony: https://harmony.pulsewidth.org.uk/release?gtin=5051083087282",
+        ),
+        # an album stored only for a track of it gets no hint
+        (
+            _album(
+                {(ExternalID.BARCODE, "5051083087282")},
+                provider_mappings={_library_mapping(in_library=False)},
+            ),
+            "Album In Rainbows was not found on MusicBrainz",
+        ),
+        (
+            Album(
+                item_id="1",
+                provider="library",
+                name="In Rainbows",
+                provider_mappings={
+                    ProviderMapping(
+                        item_id="7eyQXxuf2nGj9d2367Gi5f",
+                        provider_domain="spotify",
+                        provider_instance="spotify",
+                        in_library=True,
+                    )
+                },
+            ),
+            'Album "In Rainbows" is not on MusicBrainz, add it for example with Harmony: '
+            "https://harmony.pulsewidth.org.uk/release"
+            "?url=https%3A%2F%2Fopen.spotify.com%2Falbum%2F7eyQXxuf2nGj9d2367Gi5f",
+        ),
+        # nothing to add it by
+        (_album(), "Album In Rainbows was not found on MusicBrainz"),
+        # MusicBrainz has the album, only no single edition of it matched
+        (
+            _album(
+                {
+                    (ExternalID.BARCODE, "5051083087282"),
+                    (ExternalID.MB_RELEASEGROUP, RELEASE_GROUP_ID),
+                }
+            ),
+            "Album In Rainbows was not found on MusicBrainz",
+        ),
+    ],
+)
+async def test_album_identity_miss_tells_where_to_add_the_album(
+    album: Album, expected: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An album MusicBrainz lacks is logged with a Harmony link by its barcode or its URL."""
+    enrichment = _enrichment(_musicbrainz(release=None))
+    enrichment.logger = logging.getLogger("test_enrichment")
+    caplog.set_level(logging.DEBUG, logger="test_enrichment")
+
+    await enrichment._link_album_to_musicbrainz(album)
+
+    assert [record.getMessage() for record in caplog.records] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_album_identity_miss_is_logged_once(caplog: pytest.LogCaptureFixture) -> None:
+    """The hint on adding an album to MusicBrainz is logged once, however often it is missed."""
+    enrichment = _enrichment(_musicbrainz(release=None))
+    enrichment.logger = logging.getLogger("test_enrichment")
+    caplog.set_level(logging.DEBUG, logger="test_enrichment")
+    album = _album({(ExternalID.BARCODE, "5051083087282")}, provider_mappings={_library_mapping()})
+
+    await enrichment._link_album_to_musicbrainz(album)
+    await enrichment._link_album_to_musicbrainz(album)
+
+    assert len(caplog.records) == 1
+
+
+@pytest.mark.parametrize(
+    ("release_title", "in_library", "expected"),
+    [
+        (
+            "OK Computer",
+            True,
+            'Album "In Rainbows" (barcode 5051083087282) is on MusicBrainz as release '
+            '"OK Computer", but its title differs, so it is not used; correct the release or '
+            f"the album's tags: https://musicbrainz.org/release/{RELEASE_ID}",
+        ),
+        (
+            "In Rainbows",
+            True,
+            'Album "In Rainbows" (barcode 5051083087282) is on MusicBrainz as release '
+            '"In Rainbows", but its first artist differs, so it is not used; correct the release '
+            f"or the album's tags: https://musicbrainz.org/release/{RELEASE_ID}",
+        ),
+        # an album stored only for a track of it gets no hint
+        ("OK Computer", False, "Album In Rainbows was not found on MusicBrainz"),
+    ],
+)
+async def test_album_barcode_on_another_release_names_that_release(
+    release_title: str, in_library: bool, expected: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An album whose barcode MusicBrainz has on a release that is not it names that release."""
+    musicbrainz = _musicbrainz(release=None)
+
+    async def resolve_release(*_args: Any, on_barcode_mismatch: Any, **_kwargs: Any) -> None:
+        on_barcode_mismatch("5051083087282", _release(title=release_title))
+
+    musicbrainz.resolve_release = AsyncMock(side_effect=resolve_release)
+    enrichment = _enrichment(musicbrainz)
+    enrichment.logger = logging.getLogger("test_enrichment")
+    caplog.set_level(logging.DEBUG, logger="test_enrichment")
+    album = _album(
+        {(ExternalID.BARCODE, "5051083087282")},
+        provider_mappings={_library_mapping(in_library=in_library)},
+    )
+
+    await enrichment._link_album_to_musicbrainz(album)
+    await enrichment._link_album_to_musicbrainz(album)
+
+    assert [record.getMessage() for record in caplog.records] == [expected]
+    assert caplog.records[0].levelno == logging.DEBUG
+
+
+@pytest.mark.asyncio
+async def test_album_barcode_on_another_release_names_the_link_to_add(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An album with a streaming link is told to add that link to the release its barcode is on."""
+    musicbrainz = _musicbrainz(release=None)
+
+    async def resolve_release(*_args: Any, on_barcode_mismatch: Any, **_kwargs: Any) -> None:
+        on_barcode_mismatch("5051083087282", _release(title="OK Computer"))
+
+    musicbrainz.resolve_release = AsyncMock(side_effect=resolve_release)
+    enrichment = _enrichment(musicbrainz)
+    enrichment.logger = logging.getLogger("test_enrichment")
+    caplog.set_level(logging.DEBUG, logger="test_enrichment")
+    album = _album(
+        {(ExternalID.BARCODE, "5051083087282")},
+        provider_mappings={
+            ProviderMapping(
+                item_id="3106",
+                provider_domain="tidal",
+                provider_instance="tidal_1",
+                in_library=True,
+            )
+        },
+    )
+
+    await enrichment._link_album_to_musicbrainz(album)
+
+    assert [record.getMessage() for record in caplog.records] == [
+        'Album "In Rainbows" (barcode 5051083087282) is on MusicBrainz as release '
+        '"OK Computer", but its title differs, so it is not used; if it is this album, add '
+        "https://tidal.com/album/3106 to the release, else correct the release or the album's "
+        f"tags: https://musicbrainz.org/release/{RELEASE_ID}"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1366,6 +1539,7 @@ async def test_track_identity_fills_recording_id_and_isrcs_and_links() -> None:
     await enrichment._update_track_metadata(track, force_refresh=True)
 
     assert track.mbid == RECORDING_ID
+    assert track.metadata.recording_source == RecordingSource.ISRC
     assert {value for kind, value in track.external_ids if kind == ExternalID.ISRC} == {
         "GBSTK0700001",
         "GBSTK0700002",
@@ -1454,18 +1628,35 @@ def test_fill_track_from_recording_reports_whether_the_track_gained_an_id() -> N
     """The recording id and valid ISRCs count as a change; nothing new or invalid does not."""
     recording = MusicBrainzRecording(id=RECORDING_ID, title="15 Step", isrcs=["GBSTK0700001"])
 
-    assert fill_track_from_recording(_track(), recording) is True
+    assert fill_track_from_recording(_track(), recording, RecordingSource.ISRC) is True
 
     known = _track({(ExternalID.MB_RECORDING, OTHER_MBID)})
-    assert fill_track_from_recording(known, recording) is True
+    assert fill_track_from_recording(known, recording, RecordingSource.ISRC) is True
     assert known.mbid == OTHER_MBID
 
     complete = _track({(ExternalID.MB_RECORDING, RECORDING_ID), (ExternalID.ISRC, "GBSTK0700001")})
-    assert fill_track_from_recording(complete, recording) is False
+    assert fill_track_from_recording(complete, recording, None) is False
 
     placeholder = MusicBrainzRecording(id=RECORDING_ID, title="15 Step", isrcs=["unknown"])
-    assert fill_track_from_recording(complete, placeholder) is False
+    assert fill_track_from_recording(complete, placeholder, None) is False
     assert (ExternalID.ISRC, "unknown") not in complete.external_ids
+
+
+def test_recording_source_follows_the_stored_recording_id() -> None:
+    """A name search source gives way to a reliable source of the same id, never of another."""
+    track = _track()
+    assert set_track_recording_id(track, RECORDING_ID, RecordingSource.SEARCH) is True
+    assert (track.mbid, track.metadata.recording_source) == (RECORDING_ID, RecordingSource.SEARCH)
+
+    assert set_track_recording_id(track, OTHER_MBID, RecordingSource.RELEASE) is False
+    assert (track.mbid, track.metadata.recording_source) == (RECORDING_ID, RecordingSource.SEARCH)
+
+    assert set_track_recording_id(track, RECORDING_ID.upper(), RecordingSource.RELEASE) is True
+    assert (track.mbid, track.metadata.recording_source) == (RECORDING_ID, RecordingSource.RELEASE)
+
+    assert set_track_recording_id(track, RECORDING_ID, RecordingSource.ISRC) is False
+    assert set_track_recording_id(track, RECORDING_ID, None) is False
+    assert (track.mbid, track.metadata.recording_source) == (RECORDING_ID, RecordingSource.RELEASE)
 
 
 @pytest.mark.asyncio
@@ -1890,6 +2081,50 @@ async def test_artist_identity_leaves_a_composer_already_named_alone() -> None:
     musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
     _mass(enrichment).music.database.get_rows_from_query.assert_not_awaited()
     _mass(enrichment).music.artists.set_library_artist_name.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replace", [False, True])
+async def test_artist_identity_replaces_life_span_and_period_on_a_refresh_only(
+    replace: bool,
+) -> None:
+    """Update metadata fills an artist's life span; a refresh takes MusicBrainz's and its period."""
+    musicbrainz = _musicbrainz(
+        artist=MusicBrainzArtist(
+            id=OTHER_MBID,
+            name="Johann Sebastian Bach",
+            sort_name="Bach, Johann Sebastian",
+            type="Person",
+            life_span=MusicBrainzLifeSpan(begin="1685-03-21", end="1750-07-28", ended=True),
+        )
+    )
+    enrichment = _enrichment(musicbrainz)
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": 1}]
+    )
+    wrong = LifeSpan(begin="1835", end="1899", ended=True)
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Johann Sebastian Bach",
+        sort_name="Bach, Johann Sebastian",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        metadata=MediaItemMetadata(artist_entity_type=ArtistEntityType.PERSON, life_span=wrong),
+        period=Period.ROMANTIC,
+        is_classical=True,
+    )
+
+    await enrichment._link_artist_to_musicbrainz(artist, replace)
+
+    if replace:
+        assert artist.metadata.life_span == LifeSpan(
+            begin="1685-03-21", end="1750-07-28", ended=True
+        )
+        assert artist.period == Period.BAROQUE
+    else:
+        assert artist.metadata.life_span == wrong
+        assert artist.period == Period.ROMANTIC
 
 
 # --------------------------------------------------------------------------- #

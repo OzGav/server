@@ -1,0 +1,865 @@
+{
+  "date": "1995",
+  "status": "Official",
+  "relations": [],
+  "media": [
+    {
+      "track-count": 20,
+      "format": "CD",
+      "track-offset": 0,
+      "tracks": [
+        {
+          "number": "1",
+          "position": 1,
+          "id": "a205573d-fda1-4907-b75f-cc74f4ea0000",
+          "recording": {
+            "relations": [
+              {
+                "target-credit": "",
+                "target-type": "artist",
+                "begin": "1986-11-28",
+                "attributes": [],
+                "artist": {
+                  "sort-name": "Kennedy, Nigel",
+                  "type": "Person",
+                  "id": "2171e02c-e6c5-4109-85b7-ce4f13576a36",
+                  "name": "Nigel Kennedy"
+                },
+                "attribute-values": {},
+                "end": "1989-03-14",
+                "direction": "backward",
+                "type": "conductor"
+              },
+              {
+                "target-credit": "",
+                "target-type": "artist",
+                "begin": "1986-11-28",
+                "attribute-values": {},
+                "type": "instrument",
+                "end": "1989-03-14",
+                "direction": "backward",
+                "attributes": [
+                  "violin"
+                ],
+                "artist": {
+                  "sort-name": "Kennedy, Nigel",
+                  "type": "Person",
+                  "id": "2171e02c-e6c5-4109-85b7-ce4f13576a36",
+                  "name": "Nigel Kennedy"
+                }
+              },
+              {
+                "attribute-values": {},
+                "end": "1989-03-14",
+                "type": "performing orchestra",
+                "direction": "backward",
+                "attributes": [],
+                "artist": {
+                  "id": "8c936585-f1e5-4729-9402-98f319d265b0",
+                  "type": "Orchestra",
+                  "name": "English Chamber Orchestra",
+                  "sort-name": "English Chamber Orchestra"
+                },
+                "begin": "1986-11-28",
+                "target-type": "artist",
+                "target-credit": ""
+              },
+              {
+                "attributes": [],
+                "attribute-values": {},
+                "direction": "backward",
+                "end": "1989-03-14",
+                "type": "recorded at",
+                "begin": "1986-11-28",
+                "place": {
+                  "type": "Religious building",
+                  "id": "930f2f81-f53b-4caf-8265-4bec0af70ab5",
+                  "name": "Hackney Church"
+                },
+                "target-type": "place",
+                "target-credit": ""
+              },
+              {
+                "end": "1989-03-14",
+                "type": "performance",
+                "direction": "forward",
+                "attribute-values": {},
+                "attributes": [],
+                "begin": "1986-11-28",
+                "target-type": "work",
+                "target-credit": "",
+                "work": {
+                  "attributes": [],
+                  "title": "Concerto in E major, op. 8 no. 1, RV 269 “La primavera”: I. Allegro",
+                  "type": null,
+                  "id": "3f62d0d8-8ccd-31ab-bfca-768a1ae5708d"
+                }
+              }
+            ],
+            "id": "bf012c09-4cf0-425f-a445-b85b2ee498b8",
+            "length": 185693,
+            "title": "Concerto no. 1 in E, RV 269 “La primavera”: I. Allegro"
+          },
+          "title": "The Four Seasons",
+          "length": 190200
+        },
+        {
+          "length": 307266,
+          "title": "Schindler's List (Theme)",
+          "recording": {
+            "id": "82ecee83-711b-4716-befb-98c7439a6720",
+            "relations": [
+              {
+                "begin": "1994",
+                "attribute-values": {},
+                "end": "1994",
+                "direction": "backward",
+                "type": "conductor",
+                "artist": {
+                  "sort-name": "Sutherland, Iain",
+                  "name": "Iain Sutherland",
+                  "id": "d1fe3157-10c9-4bc9-ab4d-9c3039a14980",
+                  "type": "Person"
+                },
+                "attributes": [],
+                "target-credit": "",
+                "target-type": "artist"
+              },
+              {
+                "target-credit": "",
+                "target-type": "artist",
+                "begin": "1994",
+                "attributes": [
+                  "violin"
+                ],
+                "artist": {
+                  "sort-name": "Little, Tasmin",
+                  "name": "Tasmin Little",
+                  "id": "e24be060-b525-4502-bd5b-e3ae8ab39c63",
+                  "type": "Person"
+                },
+                "attribute-values": {},
+                "end": "1994",
+                "type": "instrument",
+                "direction": "backward"
+              },
+              {
+                "attributes": [],
+                "artist": {
+                  "id": "52fb0dd9-2424-4f46-b56a-189d2802f3c2",
+                  "type": "Orchestra",
+                  "name": "The New World Philharmonic",
+                  "sort-name": "New World Philharmonic, The"
+                },
+                "attribute-values": {},
+                "type": "performing orchestra",
+                "end": "1994",
+                "direction": "backward",
+                "begin": "1994",
+                "target-type": "artist",
+                "target-credit": "New World Philharmonic"
+              },
+              {
+                "begin": "1994",
+                "attributes": [],
+                "end": "1994",
+                "direction": "forward",
+                "type": "performance",
+                "attribute-values": {},
+                "target-credit": "",
+                "work": {
+                  "title": "Main Theme",
+                  "attributes": [],
+                  "id": "f83aa4ac-5606-381d-b649-04e3dbb8099e",
+                  "type": null
+                },
+                "target-type": "work"
+              }
+            ],
+            "title": "Schindler’s List Theme",
+            "length": 305000
+          },
+          "number": "2",
+          "position": 2,
+          "id": "881a6889-f5ec-46fe-be6f-2479b5a4e6f2"
+        },
+        {
+          "title": "Piano Concerto",
+          "length": 269533,
+          "number": "10",
+          "position": 10,
+          "id": "32a47383-03f1-43b6-b486-04150f38b464",
+          "recording": {
+            "title": "Piano Concerto in A minor, Op. 16: Allegro molto moderato (Opening)",
+            "length": 267773,
+            "id": "26066ee3-5166-44e3-97bf-d96432bde112",
+            "relations": [
+              {
+                "begin": null,
+                "artist": {
+                  "sort-name": "Marriner, Neville, Sir",
+                  "name": "Sir Neville Marriner",
+                  "type": "Person",
+                  "id": "afb8d624-52d7-4a72-8d0b-62fff3e29f79"
+                },
+                "attributes": [],
+                "end": null,
+                "direction": "backward",
+                "type": "conductor",
+                "attribute-values": {},
+                "target-credit": "",
+                "target-type": "artist"
+              },
+              {
+                "attributes": [
+                  "piano",
+                  "solo"
+                ],
+                "artist": {
+                  "sort-name": "Ousset, Cécile",
+                  "name": "Cécile Ousset",
+                  "type": "Person",
+                  "id": "bff3f58b-c632-4e0e-9752-a30d79c9c461"
+                },
+                "type": "instrument",
+                "end": null,
+                "direction": "backward",
+                "attribute-values": {},
+                "begin": null,
+                "target-type": "artist",
+                "target-credit": ""
+              },
+              {
+                "artist": {
+                  "sort-name": "London Symphony Orchestra",
+                  "name": "London Symphony Orchestra",
+                  "type": "Orchestra",
+                  "id": "38712b4c-0fd4-4c65-8c7a-45676fecc973"
+                },
+                "attributes": [],
+                "attribute-values": {},
+                "end": null,
+                "direction": "backward",
+                "type": "performing orchestra",
+                "begin": null,
+                "target-type": "artist",
+                "target-credit": ""
+              },
+              {
+                "begin": null,
+                "attributes": [
+                  "partial"
+                ],
+                "type": "performance",
+                "end": null,
+                "direction": "forward",
+                "attribute-values": {},
+                "target-credit": "",
+                "work": {
+                  "id": "d94d2e8b-78d3-3d2f-a71b-b60a7dfa2660",
+                  "type": null,
+                  "title": "Concerto in A minor for Piano and Orchestra, op. 16: I. Allegro molto moderato",
+                  "attributes": []
+                },
+                "target-type": "work"
+              }
+            ]
+          }
+        },
+        {
+          "number": "15",
+          "position": 15,
+          "id": "097dc46f-d330-4a15-aa5e-24ad22f6d9d0",
+          "recording": {
+            "length": 216560,
+            "title": "Concerto no. 4 in E-flat major for Horn, K. 495: III. Rondo. Allegro vivace",
+            "relations": [
+              {
+                "target-type": "artist",
+                "target-credit": "",
+                "direction": "backward",
+                "end": "1953-11-13",
+                "type": "conductor",
+                "attribute-values": {},
+                "artist": {
+                  "type": "Person",
+                  "id": "d2ced2f1-6b58-47cf-ae87-5943e2ab6d99",
+                  "name": "Herbert von Karajan",
+                  "sort-name": "Karajan, Herbert von"
+                },
+                "attributes": [],
+                "begin": "1953-11-12"
+              },
+              {
+                "begin": "1953-11-12",
+                "attribute-values": {},
+                "end": "1953-11-23",
+                "type": "conductor",
+                "direction": "backward",
+                "attributes": [],
+                "artist": {
+                  "name": "Herbert von Karajan",
+                  "id": "d2ced2f1-6b58-47cf-ae87-5943e2ab6d99",
+                  "type": "Person",
+                  "sort-name": "Karajan, Herbert von"
+                },
+                "target-credit": "",
+                "target-type": "artist"
+              },
+              {
+                "target-type": "artist",
+                "target-credit": "",
+                "end": "1953",
+                "type": "conductor",
+                "direction": "backward",
+                "attribute-values": {},
+                "artist": {
+                  "sort-name": "Karajan, Herbert von",
+                  "name": "Herbert von Karajan",
+                  "id": "d2ced2f1-6b58-47cf-ae87-5943e2ab6d99",
+                  "type": "Person"
+                },
+                "attributes": [],
+                "begin": "1953"
+              },
+              {
+                "target-type": "artist",
+                "target-credit": "",
+                "attribute-values": {},
+                "end": "1953-11-13",
+                "direction": "backward",
+                "type": "instrument",
+                "artist": {
+                  "type": "Person",
+                  "id": "f57f939d-6358-47c7-ba60-128a7ae9bec3",
+                  "name": "Dennis Brain",
+                  "sort-name": "Brain, Dennis"
+                },
+                "attributes": [
+                  "French horn"
+                ],
+                "begin": "1953-11-12"
+              },
+              {
+                "target-type": "artist",
+                "target-credit": "",
+                "end": "1953-11-23",
+                "direction": "backward",
+                "type": "instrument",
+                "attribute-values": {},
+                "attributes": [
+                  "French horn",
+                  "solo"
+                ],
+                "artist": {
+                  "sort-name": "Brain, Dennis",
+                  "name": "Dennis Brain",
+                  "id": "f57f939d-6358-47c7-ba60-128a7ae9bec3",
+                  "type": "Person"
+                },
+                "begin": "1953-11-12"
+              },
+              {
+                "begin": "1953-11-12",
+                "type": "performing orchestra",
+                "end": "1953-11-13",
+                "direction": "backward",
+                "attribute-values": {},
+                "artist": {
+                  "name": "Philharmonia Orchestra",
+                  "type": "Orchestra",
+                  "id": "5610302e-bfd9-421c-80e2-03d790a0f5e5",
+                  "sort-name": "Philharmonia Orchestra"
+                },
+                "attributes": [],
+                "target-credit": "",
+                "target-type": "artist"
+              },
+              {
+                "attributes": [],
+                "artist": {
+                  "name": "Philharmonia Orchestra",
+                  "type": "Orchestra",
+                  "id": "5610302e-bfd9-421c-80e2-03d790a0f5e5",
+                  "sort-name": "Philharmonia Orchestra"
+                },
+                "end": "1953-11-23",
+                "type": "performing orchestra",
+                "direction": "backward",
+                "attribute-values": {},
+                "begin": "1953-11-12",
+                "target-type": "artist",
+                "target-credit": ""
+              },
+              {
+                "target-credit": "",
+                "target-type": "place",
+                "place": {
+                  "type": "Venue",
+                  "id": "35e7ac99-e968-4c0e-b697-2a40aa8dc586",
+                  "name": "Kingsway Hall"
+                },
+                "begin": "1953-11-12",
+                "attributes": [],
+                "end": "1953-11-13",
+                "direction": "backward",
+                "type": "recorded at",
+                "attribute-values": {}
+              },
+              {
+                "target-type": "place",
+                "place": {
+                  "name": "Kingsway Hall",
+                  "id": "35e7ac99-e968-4c0e-b697-2a40aa8dc586",
+                  "type": "Venue"
+                },
+                "target-credit": "",
+                "direction": "backward",
+                "end": "1953-11-23",
+                "type": "recorded at",
+                "attribute-values": {},
+                "attributes": [],
+                "begin": "1953-11-12"
+              },
+              {
+                "begin": "1953-11-12",
+                "attributes": [],
+                "end": "1953-11-13",
+                "direction": "forward",
+                "type": "performance",
+                "attribute-values": {},
+                "target-credit": "",
+                "work": {
+                  "attributes": [],
+                  "title": "Concerto for Horn no. 4 in E-flat major, K. 495: III. Rondo. Allegro vivace",
+                  "type": null,
+                  "id": "a9e7d5bf-8de1-3f50-864c-6208ec53e71b"
+                },
+                "target-type": "work"
+              },
+              {
+                "target-type": "work",
+                "work": {
+                  "id": "a9e7d5bf-8de1-3f50-864c-6208ec53e71b",
+                  "type": null,
+                  "title": "Concerto for Horn no. 4 in E-flat major, K. 495: III. Rondo. Allegro vivace",
+                  "attributes": []
+                },
+                "target-credit": "",
+                "attribute-values": {},
+                "end": "1953-11-23",
+                "direction": "forward",
+                "type": "performance",
+                "attributes": [],
+                "begin": "1953-11-12"
+              }
+            ],
+            "id": "2ae39a01-ed53-47d9-b472-717c39b29e17"
+          },
+          "title": "Horn Concerto No. 4, K. 495: Rondo",
+          "length": 222933
+        },
+        {
+          "id": "3d97fe92-ae1c-4511-8a33-15118ae1be2b",
+          "number": "17",
+          "position": 17,
+          "recording": {
+            "length": 134373,
+            "title": "O mio babbino caro (Gianni Schicchi)",
+            "relations": [
+              {
+                "attribute-values": {},
+                "end": null,
+                "direction": "backward",
+                "type": "vocal",
+                "artist": {
+                  "id": "58b64b2d-eaf2-4fcb-abe9-ce0f25d4124d",
+                  "type": "Person",
+                  "name": "Amanda Roocroft",
+                  "sort-name": "Roocroft, Amanda"
+                },
+                "attributes": [
+                  "soprano vocals"
+                ],
+                "begin": null,
+                "target-type": "artist",
+                "target-credit": ""
+              },
+              {
+                "direction": "forward",
+                "end": null,
+                "type": "performance",
+                "attribute-values": {},
+                "attributes": [],
+                "begin": null,
+                "target-type": "work",
+                "target-credit": "",
+                "work": {
+                  "title": "Gianni Schicchi: “O mio babbino caro” (Lauretta)",
+                  "attributes": [],
+                  "id": "433001da-5c32-3d5b-9794-5b3dfabb0457",
+                  "type": "Aria"
+                }
+              }
+            ],
+            "id": "f9b1d5a1-9cbb-4aef-85d8-d0beea99b010"
+          },
+          "title": "O mio babbino caro (Gianni Schicchi)",
+          "length": 134373
+        },
+        {
+          "id": "15b57442-cb2e-43cb-a333-1e173bb4e7eb",
+          "position": 20,
+          "number": "20",
+          "recording": {
+            "title": "Carmina Burana: Fortuna Imperatrix Mundi: O Fortuna",
+            "length": 165400,
+            "id": "e575e301-814b-4fc0-8e4a-9802dbaa4b89",
+            "relations": [
+              {
+                "target-credit": "",
+                "target-type": "artist",
+                "begin": "1974-11-25",
+                "artist": {
+                  "sort-name": "Oldham, Arthur",
+                  "name": "Arthur Oldham",
+                  "type": "Person",
+                  "id": "f97bc1b1-22c6-4918-b231-9a765bd95ea5"
+                },
+                "attributes": [],
+                "attribute-values": {},
+                "end": "1974-11-27",
+                "direction": "backward",
+                "type": "chorus master"
+              },
+              {
+                "target-type": "artist",
+                "target-credit": "",
+                "attribute-values": {},
+                "direction": "backward",
+                "end": "1974-11-27",
+                "type": "conductor",
+                "attributes": [],
+                "artist": {
+                  "id": "06538137-47eb-4dd6-bb78-5c8afa1a1885",
+                  "type": "Person",
+                  "name": "André Previn",
+                  "sort-name": "Previn, André"
+                },
+                "begin": "1974-11-25"
+              },
+              {
+                "target-credit": "",
+                "target-type": "artist",
+                "begin": "1974-11-25",
+                "type": "performing orchestra",
+                "end": "1974-11-27",
+                "direction": "backward",
+                "attribute-values": {},
+                "artist": {
+                  "sort-name": "London Symphony Orchestra",
+                  "name": "London Symphony Orchestra",
+                  "id": "38712b4c-0fd4-4c65-8c7a-45676fecc973",
+                  "type": "Orchestra"
+                },
+                "attributes": []
+              },
+              {
+                "target-credit": "",
+                "target-type": "artist",
+                "begin": null,
+                "attribute-values": {},
+                "type": "producer",
+                "end": null,
+                "direction": "backward",
+                "attributes": [],
+                "artist": {
+                  "sort-name": "Bishop, Christopher",
+                  "type": "Person",
+                  "id": "0b2ae89d-6db5-4acf-b4f8-fbfb722672a7",
+                  "name": "Christopher Bishop"
+                }
+              },
+              {
+                "begin": "1974-11-25",
+                "end": "1974-11-27",
+                "type": "vocal",
+                "direction": "backward",
+                "attribute-values": {},
+                "artist": {
+                  "sort-name": "London Symphony Chorus",
+                  "name": "London Symphony Chorus",
+                  "id": "12133eec-2c6c-4689-a102-8a558b82dde9",
+                  "type": "Choir"
+                },
+                "attributes": [
+                  "choir vocals"
+                ],
+                "target-credit": "London Symphony Orchestra Chorus",
+                "target-type": "artist"
+              },
+              {
+                "target-type": "place",
+                "place": {
+                  "name": "Kingsway Hall",
+                  "id": "35e7ac99-e968-4c0e-b697-2a40aa8dc586",
+                  "type": "Venue"
+                },
+                "target-credit": "",
+                "attribute-values": {},
+                "type": "recorded at",
+                "end": "1974-11-27",
+                "direction": "backward",
+                "attributes": [],
+                "begin": "1974-11-25"
+              },
+              {
+                "target-type": "work",
+                "work": {
+                  "attributes": [],
+                  "title": "Carmina Burana: Fortuna imperatrix mundi: I. O Fortuna",
+                  "type": null,
+                  "id": "53833e21-6318-33b3-b3d8-7bf1fc0b7373"
+                },
+                "target-credit": "",
+                "attributes": [],
+                "attribute-values": {},
+                "end": "1974-11-27",
+                "direction": "forward",
+                "type": "performance",
+                "begin": "1974-11-25"
+              }
+            ]
+          },
+          "title": "O Fortuna (from Carmina Burana)",
+          "length": 165200
+        }
+      ],
+      "title": "",
+      "id": "4ef07481-00ff-3ab3-afe3-b569b44d1df7",
+      "position": 1
+    },
+    {
+      "position": 2,
+      "id": "de79100b-d7b2-3d72-b438-469146c480ff",
+      "title": "",
+      "track-offset": 0,
+      "tracks": [
+        {
+          "title": "Piano Concerto No. 1 in B-flat minor, Op. 23",
+          "length": 216533,
+          "id": "8c7eb25c-c94a-4eb9-9a15-f646dbfb2a1c",
+          "position": 1,
+          "number": "1",
+          "recording": {
+            "title": "Piano Concerto No. 1 in B-flat minor, Op. 23",
+            "length": 216533,
+            "id": "eea3d840-f921-4ac4-b067-df34576a2eb1",
+            "relations": [
+              {
+                "target-credit": "Rudolf Barshai",
+                "target-type": "artist",
+                "begin": null,
+                "attribute-values": {},
+                "end": null,
+                "direction": "backward",
+                "type": "conductor",
+                "artist": {
+                  "sort-name": "Barshai, Rudolf",
+                  "name": "Рудольф Баршай",
+                  "type": "Person",
+                  "id": "cd7ff109-3001-4ee1-936b-797ba8c14f3e"
+                },
+                "attributes": []
+              },
+              {
+                "begin": null,
+                "attribute-values": {},
+                "end": null,
+                "type": "instrument",
+                "direction": "backward",
+                "attributes": [
+                  "piano"
+                ],
+                "artist": {
+                  "sort-name": "Donohoe, Peter",
+                  "id": "0eda8662-c9f0-4b57-b7f3-f61b5c9fde9e",
+                  "type": "Person",
+                  "name": "Peter Donohoe"
+                },
+                "target-credit": "",
+                "target-type": "artist"
+              },
+              {
+                "begin": null,
+                "direction": "backward",
+                "end": null,
+                "type": "performing orchestra",
+                "attribute-values": {},
+                "attributes": [],
+                "artist": {
+                  "type": "Orchestra",
+                  "id": "4b507bc1-d715-4c52-94c1-9d6140bccbe2",
+                  "name": "Bournemouth Symphony Orchestra",
+                  "sort-name": "Bournemouth Symphony Orchestra"
+                },
+                "target-credit": "",
+                "target-type": "artist"
+              },
+              {
+                "end": null,
+                "direction": "forward",
+                "type": "performance",
+                "attribute-values": {},
+                "attributes": [
+                  "partial"
+                ],
+                "begin": null,
+                "target-type": "work",
+                "target-credit": "",
+                "work": {
+                  "title": "Concerto for Piano and Orchestra no. 1 in B-flat minor, op. 23: I. Allegro non troppo e molto maestoso",
+                  "attributes": [],
+                  "id": "08b27018-d462-38a4-a070-1f4af8167b3e",
+                  "type": null
+                }
+              }
+            ]
+          }
+        },
+        {
+          "title": "Flower Duet",
+          "length": 155573,
+          "id": "a2fd439a-84e7-4244-874c-a27ae0ed9390",
+          "position": 4,
+          "number": "4",
+          "recording": {
+            "title": "Flower Duet from Lakmé",
+            "length": 155573,
+            "id": "d81e5fed-d49a-4698-85ff-14bb68071b3d",
+            "relations": [
+              {
+                "target-type": "artist",
+                "target-credit": "",
+                "attributes": [],
+                "artist": {
+                  "type": "Person",
+                  "id": "157806df-21dd-4a36-993b-28ae10c6dc99",
+                  "name": "Alain Lombard",
+                  "sort-name": "Lombard, Alain"
+                },
+                "end": "1970-12-21",
+                "type": "conductor",
+                "direction": "backward",
+                "attribute-values": {},
+                "begin": "1970-09-17"
+              },
+              {
+                "target-type": "artist",
+                "target-credit": "",
+                "attributes": [],
+                "artist": {
+                  "sort-name": "Orchestre du Théâtre National de l’Opéra‐Comique",
+                  "name": "Orchestre du Théâtre National de l’Opéra‐Comique",
+                  "id": "53d3dd50-dca8-4caf-8411-16a6461f0fe5",
+                  "type": "Orchestra"
+                },
+                "attribute-values": {},
+                "direction": "backward",
+                "end": null,
+                "type": "performing orchestra",
+                "begin": null
+              },
+              {
+                "end": "1970-12-21",
+                "direction": "backward",
+                "type": "vocal",
+                "attribute-values": {},
+                "attributes": [
+                  "soprano vocals"
+                ],
+                "artist": {
+                  "sort-name": "Mesplé, Mady",
+                  "type": "Person",
+                  "id": "20a67ebf-d058-49d1-8de7-5b5abf4f0b14",
+                  "name": "Mady Mesplé"
+                },
+                "begin": "1970-09-17",
+                "target-type": "artist",
+                "target-credit": ""
+              },
+              {
+                "target-credit": "",
+                "target-type": "artist",
+                "begin": "1970-09-17",
+                "attributes": [
+                  "mezzo-soprano vocals"
+                ],
+                "artist": {
+                  "sort-name": "Millet, Danielle",
+                  "id": "54c19ae4-9bde-449c-99ca-dc2cbf8bcc63",
+                  "type": "Person",
+                  "name": "Danielle Millet"
+                },
+                "attribute-values": {},
+                "end": "1970-12-21",
+                "direction": "backward",
+                "type": "vocal"
+              },
+              {
+                "target-credit": "",
+                "place": {
+                  "name": "Salle Wagram",
+                  "type": "Venue",
+                  "id": "11219ecd-7156-4254-bf8f-83046b696ed8"
+                },
+                "target-type": "place",
+                "begin": "1970-09-17",
+                "type": "recorded at",
+                "end": "1970-12-21",
+                "direction": "backward",
+                "attribute-values": {},
+                "attributes": []
+              },
+              {
+                "begin": "1970-09-17",
+                "end": "1970-12-21",
+                "type": "performance",
+                "direction": "forward",
+                "attribute-values": {},
+                "attributes": [
+                  "partial"
+                ],
+                "target-credit": "",
+                "work": {
+                  "title": "Lakmé : Acte I. No. 2 Duetto « Viens, Mallika, les lianes en fleurs » … « Dôme épais le jasmin » (Lakmé, Mallika)",
+                  "attributes": [],
+                  "id": "49fa641b-503d-39c9-aaf0-9695f4268864",
+                  "type": null
+                },
+                "target-type": "work"
+              }
+            ]
+          }
+        }
+      ],
+      "track-count": 20,
+      "format": "CD"
+    }
+  ],
+  "barcode": "724356580824",
+  "artist-credit": [
+    {
+      "joinphrase": "",
+      "name": "Various Artists",
+      "artist": {
+        "sort-name": "Various Artists",
+        "name": "Various Artists",
+        "id": "89ad4ac3-39f7-470e-963a-56509c546377",
+        "type": "Other"
+      }
+    }
+  ],
+  "title": "The Best Classical Album in the World... Ever!",
+  "id": "b313db42-5099-478b-9eaa-48741aa6b570"
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from music_assistant.helpers.work_titles import (
+    parent_work_name,
     part_key,
     part_label,
     without_movement_number,
@@ -31,6 +32,12 @@ def test_same_part_written_differently(first: str, second: str) -> None:
     """The same act or part written differently has one key."""
     assert part_key(first) is not None
     assert part_key(first) == part_key(second)
+
+
+def test_slashed_act_is_part_of_the_same_work() -> None:
+    """An act after a slash is part of the work the same act after a comma is part of."""
+    assert parent_work_name("La bohème, SC 67 / Act 1") == "La bohème, SC 67"
+    assert parent_work_name("La bohème, SC 67, Act I") == "La bohème, SC 67"
 
 
 @pytest.mark.parametrize(
@@ -61,6 +68,11 @@ def test_different_parts_have_different_keys(first: str, second: str) -> None:
 def test_whole_work_has_no_part_key(work: str) -> None:
     """A work that is not an act or part, or a piece within one, has no part key."""
     assert part_key(work) is None
+
+
+def test_act_after_a_colon_is_part_of_the_work_before_it() -> None:
+    """An act a MusicBrainz title names after a colon is part of the work before the colon."""
+    assert parent_work_name("Turandot: Atto III") == "Turandot"
 
 
 @pytest.mark.parametrize(

@@ -2001,6 +2001,12 @@ class ArtistsController(MediaControllerBase[Artist]):
             )
             raise InvalidDataError(msg)
 
+    async def _merge_library_item_references(self, target_id: int, source_id: int) -> None:
+        """Have the link run read the performers of a merged artist's classical tracks again."""
+        # a track's performers were matched to its artists as they were when it was read, so
+        # an artist that lacked the MusicBrainz id the other one carries was missed
+        await self.mass.music.tracks.reread_artist_recordings(source_id)
+
     async def _remove_music_artist_from_library(self, db_id: int, recursive: bool) -> None:
         # recursively also remove artist albums
         for db_row in await self.mass.music.database.get_rows_from_query(

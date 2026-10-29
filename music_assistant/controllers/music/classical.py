@@ -209,7 +209,8 @@ _SECTION_LABEL: Final[re.Pattern[str]] = re.compile(r"\b[^\W\d_]+\s(?:[IVXLC]+|\
 # the work tracks with the albums they are on, one row per album
 WORK_TRACKS_QUERY: Final[str] = f"""
     SELECT t.item_id AS track_id, t.work_id, t.movement_number, t.movement_name,
-        t.search_name,
+        t.search_name, CASE WHEN json_valid(t.metadata)
+            THEN json_extract(t.metadata, '$.recording_year') END AS recording_year,
         (SELECT MIN(e.external_id) FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} e
             WHERE e.media_type = '{MediaType.TRACK.value}' AND e.item_id = t.item_id
             AND e.external_id_type = '{ExternalID.MB_RECORDING.value}') AS mb_recording,
@@ -691,8 +692,9 @@ class ClassicalController:
         Get how many classical items MusicBrainz linking still has to check.
 
         While any count is above zero, tracks under Other tracks may still move into their works.
-        ``albums`` counts the albums still to identify, ``works`` the works still to look up.
-        All zero means linking is done, or is not running.
+        ``albums`` counts the albums still to identify, ``recordings`` the tracks whose
+        recording is still to read, ``works`` the works still to look up. All zero means
+        linking is done, or is not running.
         """
         return await self.mass.metadata.get_classical_link_progress()
 
@@ -1265,6 +1267,7 @@ class ClassicalController:
                     or create_safe_string(row["movement_name"] or "", True, True)
                     or row["search_name"],
                     mb_recording=(row["mb_recording"] or "").casefold() or None,
+                    recording_year=row["recording_year"],
                 )
                 work_tracks[int(row["work_id"])].append(track)
             if row["album_id"] is not None:
@@ -1319,6 +1322,7 @@ class _WorkTrack:
     track_id: int
     movement: int | str
     mb_recording: str | None
+    recording_year: int | None = None
     performers: set[int] = field(default_factory=set)
     leaders: set[int] = field(default_factory=set)
     directors: set[int] = field(default_factory=set)
@@ -1326,8 +1330,10 @@ class _WorkTrack:
 
     @property
     def year(self) -> int | None:
-        """Return the earliest year of the albums the track is on."""
-        return min((x.year for x in self.appearances if x.year), default=None)
+        """Return the year the track was recorded, else the earliest year of its albums."""
+        return self.recording_year or min(
+            (x.year for x in self.appearances if x.year), default=None
+        )
 
     @property
     def performance_key(self) -> str:

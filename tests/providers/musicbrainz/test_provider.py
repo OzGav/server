@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import pathlib
 from datetime import UTC, datetime
 from typing import Any
@@ -16,6 +17,7 @@ from music_assistant_models.enums import (
     LinkType,
     MediaType,
     ProviderFeature,
+    RecordingSource,
     WorkType,
 )
 from music_assistant_models.errors import InvalidDataError, RateLimited
@@ -68,6 +70,7 @@ def _provider(
     """
     with patch.object(MusicbrainzProvider, "__init__", lambda *_a, **_kw: None):
         provider = MusicbrainzProvider.__new__(MusicbrainzProvider)
+    provider._logged_hints = set()
 
     async def _answer(endpoint: str, **_kwargs: Any) -> Any:
         return release_group_response if endpoint == "release-group" else response
@@ -952,6 +955,7 @@ def _routed_provider(routes: dict[str, Any]) -> tuple[MusicbrainzProvider, Async
     with patch.object(MusicbrainzProvider, "__init__", lambda *_a, **_kw: None):
         provider = MusicbrainzProvider.__new__(MusicbrainzProvider)
     provider.logger = MagicMock()
+    provider._logged_hints = set()
 
     async def _answer(endpoint: str, **kwargs: Any) -> Any:
         if endpoint == "url":
@@ -1543,6 +1547,39 @@ async def test_resolve_release_by_barcode_rejects_another_album_and_stops_after_
     assert _requested(get_data) == ["release?query", "release/rel-1", "release/rel-2"]
 
 
+async def test_resolve_release_reports_the_barcode_release_that_is_not_the_album() -> None:
+    """The best ranked release a barcode finds that is not the album is reported, the album not."""
+    candidates = {
+        "count": 2,
+        "releases": [_edition("rel-cd", media_format="CD"), _edition("rel-xw")],
+    }
+    lookups = {
+        "release/rel-cd": _release_lookup("rel-cd", title="OK Computer"),
+        "release/rel-xw": _release_lookup("rel-xw", title="OK Computer"),
+    }
+    provider, _ = _routed_provider({"release?query": candidates, **lookups})
+    album = _album_item(external_ids={(ExternalID.BARCODE, BARCODE)})
+    mismatches: list[tuple[str, str]] = []
+
+    release = await provider.resolve_release(
+        album, on_barcode_mismatch=lambda barcode, found: mismatches.append((barcode, found.id))
+    )
+
+    assert release is None
+    assert mismatches == [(BARCODE, "rel-xw")]
+
+    lookups["release/rel-xw"] = _release_lookup("rel-xw")
+    provider, _ = _routed_provider({"release?query": candidates, **lookups})
+    mismatches.clear()
+
+    release = await provider.resolve_release(
+        album, on_barcode_mismatch=lambda barcode, found: mismatches.append((barcode, found.id))
+    )
+
+    assert release is not None
+    assert mismatches == []
+
+
 async def test_resolve_release_tries_at_most_three_barcodes() -> None:
     """However many barcodes an album carries, three are searched at most."""
     provider, get_data = _routed_provider({})
@@ -1768,10 +1805,9 @@ async def test_resolve_recording_by_musicbrainz_id_or_link() -> None:
     )
 
     assert by_id is not None
-
-    assert by_id.id == "rec-1"
+    assert (by_id[0].id, by_id[1]) == ("rec-1", None)
     assert by_link is not None
-    assert by_link.id == "rec-1"
+    assert (by_link[0].id, by_link[1]) == ("rec-1", RecordingSource.URL)
     assert _requested(get_data) == ["recording/rec-1", SPOTIFY_TRACK_URL, "recording/rec-1"]
 
 
@@ -1795,7 +1831,7 @@ async def test_resolve_recording_by_isrc_picks_the_matching_recording() -> None:
     )
 
     assert recording is not None
-    assert recording.id == "rec-radiohead"
+    assert (recording[0].id, recording[1]) == ("rec-radiohead", RecordingSource.ISRC)
     assert _requested(get_data) == [f"isrc/{ISRC}", "recording/rec-radiohead"]
 
 
@@ -1827,7 +1863,7 @@ async def test_resolve_recording_by_isrc_needs_a_credit_for_a_named_artist() -> 
     recording = await provider.resolve_recording(_track_item(artist=None, external_ids=isrc_only))
 
     assert recording is not None
-    assert recording.id == "rec-cover"
+    assert recording[0].id == "rec-cover"
 
 
 @pytest.mark.parametrize("named_artist", [True, False])
@@ -1850,7 +1886,55 @@ async def test_resolve_recording_by_isrc_of_a_single_recording_needs_no_title(
 
     recording = await provider.resolve_recording(track)
 
-    assert (recording.id if recording else None) == ("rec-1" if named_artist else None)
+    assert (recording[0].id if recording else None) == ("rec-1" if named_artist else None)
+
+
+@pytest.mark.parametrize(
+    ("album_ids", "expected"),
+    [
+        (
+            {(ExternalID.MB_ALBUM, "rel-1")},
+            f'ISRC {ISRC} of "15 Step" (album "In Rainbows") is not on MusicBrainz, add it to '
+            "the track's recording: https://musicbrainz.org/release/rel-1",
+        ),
+        (
+            set(),
+            f'ISRC {ISRC} of "15 Step" (album "In Rainbows") is not on MusicBrainz, add it to '
+            "the track's recording",
+        ),
+    ],
+)
+async def test_resolve_recording_logs_an_isrc_musicbrainz_lacks(
+    album_ids: set[tuple[ExternalID, str]], expected: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An ISRC without any recording is logged, with the album's release when it is known."""
+    provider, _ = _routed_provider({})
+    provider.logger = logging.getLogger("test_musicbrainz")
+    caplog.set_level(logging.DEBUG, logger="test_musicbrainz")
+    provider.mass = MagicMock()
+    provider.mass.music.albums.get_library_item = AsyncMock(
+        return_value=_album_item(external_ids=album_ids)
+    )
+
+    await provider.resolve_recording(_track_item(external_ids={(ExternalID.ISRC, ISRC)}))
+
+    assert [record.getMessage() for record in caplog.records] == [expected]
+    provider.mass.music.albums.get_library_item.assert_awaited_once_with("b")
+
+
+async def test_resolve_recording_logs_nothing_for_an_isrc_of_other_recordings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An ISRC whose recordings are not the track is not reported as missing."""
+    isrc_lookup = {"isrc": ISRC, "recordings": [_recording_lookup("rec-1", length=300000)]}
+    provider, _ = _routed_provider({f"isrc/{ISRC}": isrc_lookup})
+    provider.logger = logging.getLogger("test_musicbrainz")
+    caplog.set_level(logging.DEBUG, logger="test_musicbrainz")
+
+    track = _track_item(album=None, external_ids={(ExternalID.ISRC, ISRC)})
+    assert await provider.resolve_recording(track) is None
+
+    assert caplog.records == []
 
 
 async def test_resolve_recording_falls_back_to_a_name_search() -> None:
@@ -1877,7 +1961,7 @@ async def test_resolve_recording_falls_back_to_a_name_search() -> None:
     recording = await provider.resolve_recording(_track_item())
 
     assert recording is not None
-    assert recording.id == "rec-1"
+    assert (recording[0].id, recording[1]) == ("rec-1", RecordingSource.SEARCH)
     assert _requested(get_data) == ["recording?query", "recording/rec-1"]
     assert await provider.resolve_recording(_track_item(album=None)) is None
 
@@ -2091,7 +2175,7 @@ def test_reverse_lookup_urls_take_one_canonical_url_per_provider_first() -> None
         }
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         SPOTIFY_ARTIST_URL,
         "https://www.deezer.com/artist/399",
         "https://open.spotify.com/artist/7eyQXxuf2nGj9d2367Gi5f",
@@ -2113,7 +2197,7 @@ def test_reverse_lookup_urls_include_the_mappings_own_public_links() -> None:
         }
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         "https://music.apple.com/gb/artist/657515",
         "https://radiohead.bandcamp.com/",
         "https://soundcloud.com/radiohead",
@@ -2129,18 +2213,18 @@ def test_reverse_lookup_urls_include_qobuz_artists_only() -> None:
         mappings={_mapping("qobuz", "ftrty0qq43i3b", "https://open.qobuz.com/album/ftrty0qq43i3b")}
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         "https://open.qobuz.com/artist/43840"
     ]
-    assert MusicbrainzProvider._reverse_lookup_urls(album) == []
+    assert MusicbrainzProvider.reverse_lookup_urls(album) == []
     assert (
-        MusicbrainzProvider._reverse_lookup_urls(
+        MusicbrainzProvider.reverse_lookup_urls(
             _artist_item(mappings={_mapping("qobuz", "Herbert von Karajan")})
         )
         == []
     )
     assert (
-        MusicbrainzProvider._reverse_lookup_urls(_artist_item(mappings={_mapping("qobuz", "311")}))
+        MusicbrainzProvider.reverse_lookup_urls(_artist_item(mappings={_mapping("qobuz", "311")}))
         == []
     )
 
@@ -2174,7 +2258,7 @@ def test_reverse_lookup_urls_are_capped_at_three() -> None:
         }
     )
 
-    assert MusicbrainzProvider._reverse_lookup_urls(artist) == [
+    assert MusicbrainzProvider.reverse_lookup_urls(artist) == [
         SPOTIFY_ARTIST_URL,
         "https://www.deezer.com/artist/399",
         "https://tidal.com/artist/64518",
@@ -2409,6 +2493,7 @@ def _browsing_provider(pages: dict[str, Any]) -> tuple[MusicbrainzProvider, Magi
     with patch.object(MusicbrainzProvider, "__init__", lambda *_a, **_kw: None):
         provider = MusicbrainzProvider.__new__(MusicbrainzProvider)
     provider.logger = MagicMock()
+    provider._logged_hints = set()
 
     async def _answer(_endpoint: str, **kwargs: Any) -> Any:
         return pages.get(kwargs["offset"])

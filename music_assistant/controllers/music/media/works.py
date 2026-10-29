@@ -479,9 +479,12 @@ class WorksController(MediaControllerBase[Work]):
         """
         Remove a library work that has no tracks, parts or arrangements, and so its parents.
 
-        :param work_id: Library id of the work.
+        :param work_id: Library id of the work, which may have left the library already.
         """
-        work = await self.get_library_item(work_id)
+        try:
+            work = await self.get_library_item(work_id)
+        except MediaNotFoundError:
+            return
         if (
             work.parts
             or work.arrangements

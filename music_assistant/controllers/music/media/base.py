@@ -50,6 +50,7 @@ from music_assistant_models.media_items import (
     MediaItemSummaryType,
     MediaItemType,
     ProviderMapping,
+    Track,
     UniqueList,
 )
 
@@ -220,6 +221,15 @@ class TrackSyncDetails(LibraryItemSyncDetails):
 
     has_album: bool
     has_artists: bool
+    external_ids: set[tuple[ExternalID, str]]
+
+    def lacks_external_ids(self, track: Track) -> bool:
+        """
+        Return True when the provider reports external ids the library track does not hold.
+
+        :param track: The track as the provider currently reports it.
+        """
+        return not normalize_external_ids(track.external_ids) <= self.external_ids
 
 
 @dataclass(slots=True)
@@ -1445,6 +1455,23 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             return await self._merge_library_items_batched(target_id, source_id)
 
     @final
+    async def merge_into_external_id_match(self, item_id: str | int, item: ItemCls) -> int:
+        """
+        Merge a library item into the library item that the given item's external ids identify.
+
+        A candidate must pass the same confirmation as when adding an item to the library.
+
+        :param item_id: Library ID of the item that is merged away when a match is found.
+        :param item: The (provider) item whose external ids are looked up.
+        :return: Library ID of the surviving item, which is item_id when nothing matched.
+        """
+        source_id = int(item_id)
+        if not (target_id := await self._get_library_item_by_external_ids(item, source_id)):
+            return source_id
+        await self.merge_library_items(target_id, source_id)
+        return target_id
+
+    @final
     async def add_provider_mappings(
         self, item_id: str | int, provider_mappings: Iterable[ProviderMapping]
     ) -> None:
@@ -1484,8 +1511,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         """
         Link a library item to the music providers MusicBrainz knows it on.
 
-        Only providers the item has no mapping for yet are linked, and a linked item that
-        another library item already holds is left alone rather than merged.
+        Only providers the item has no mapping for yet are linked. A linked item that another
+        library item already holds is left alone, unless MusicBrainz says that library item is
+        the same one, which is then merged into this one.
 
         :param db_item: The library item to link.
         :param urls: The item's URLs on MusicBrainz (its URL relations).
@@ -1500,7 +1528,12 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             for candidate in candidates
             if await self._verify_musicbrainz_mapping(db_item, candidate)
         ]
-        added = await self.add_unclaimed_provider_mappings(db_item.item_id, verified)
+        merged = [
+            candidate
+            for candidate in verified
+            if await self._merge_musicbrainz_duplicate(db_item, candidate)
+        ]
+        added = merged + await self.add_unclaimed_provider_mappings(db_item.item_id, verified)
         db_item.provider_mappings.update(added)
         self.logger.debug(
             "Linked %s %s via MusicBrainz to: %s (already mapped: %s, unavailable: %s)",
@@ -2234,19 +2267,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         if provider_mappings:
             if cur_item := await self.get_library_item_by_prov_mappings(provider_mappings):
                 return int(cur_item.item_id)
-        # fetch candidates per external id (best identifier first) and stop at the
-        # first verified match; external identifiers may be reused, so verify
-        # every candidate before accepting it
-        seen_item_ids: set[str] = set()
-        for external_id_type, external_id in sorted(item.external_ids, key=external_id_sort_key):
-            for cur_item in await self.get_library_items_by_external_id(
-                external_id, external_id_type, limit=None
-            ):
-                if cur_item.item_id in seen_item_ids:
-                    continue
-                seen_item_ids.add(cur_item.item_id)
-                if await self._confirm_library_candidate(cur_item, item):
-                    return int(cur_item.item_id)
+        if library_id := await self._get_library_item_by_external_ids(item):
+            return library_id
         # search by normalized exact name match
         query = (
             f"{self.db_table}.search_name IN :search_names "
@@ -2261,6 +2283,26 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         ):
             if await self._confirm_library_candidate(db_item, item):
                 return int(db_item.item_id)
+        return None
+
+    @final
+    async def _get_library_item_by_external_ids(
+        self, item: ItemCls | ItemMapping, skip_item_id: int | None = None
+    ) -> int | None:
+        """Return the first library item ID confirmed to match one of the item's external ids."""
+        # fetch candidates per external id (best identifier first) and stop at the
+        # first verified match; external identifiers may be reused, so verify
+        # every candidate before accepting it
+        seen_item_ids: set[str] = {str(skip_item_id)} if skip_item_id else set()
+        for external_id_type, external_id in sorted(item.external_ids, key=external_id_sort_key):
+            for cur_item in await self.get_library_items_by_external_id(
+                external_id, external_id_type, limit=None
+            ):
+                if cur_item.item_id in seen_item_ids:
+                    continue
+                seen_item_ids.add(cur_item.item_id)
+                if await self._confirm_library_candidate(cur_item, item):
+                    return int(cur_item.item_id)
         return None
 
     def _library_match_names(self, item: ItemCls | ItemMapping) -> list[str]:
@@ -2296,6 +2338,40 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         :param db_item: The library item the mapping would be added to.
         :param mapping: The candidate mapping, built from a MusicBrainz URL relation.
         """
+        return True
+
+    def _is_musicbrainz_duplicate(self, db_item: ItemCls, holder: ItemCls) -> bool:
+        """
+        Return True if another library item holding a linked provider item is the same item.
+
+        Override in a subclass whose MusicBrainz identity tells two library items apart.
+
+        :param db_item: The library item being linked.
+        :param holder: The other library item that holds the linked provider item.
+        """
+        return False
+
+    async def _merge_musicbrainz_duplicate(
+        self, db_item: ItemCls, mapping: ProviderMapping
+    ) -> bool:
+        """Merge the library item holding a linked mapping into the item if it is the same."""
+        holder = await self.get_library_item_by_prov_id(mapping.item_id, mapping.provider_instance)
+        if (
+            holder is None
+            or int(holder.item_id) == int(db_item.item_id)
+            or not self._is_musicbrainz_duplicate(db_item, holder)
+        ):
+            return False
+        self.logger.debug(
+            "Merging %s item id %s into item id %s: MusicBrainz links both to %s/%s",
+            self.media_type.value,
+            holder.item_id,
+            db_item.item_id,
+            mapping.provider_domain,
+            mapping.item_id,
+        )
+        merged_item = await self.merge_library_items(db_item.item_id, holder.item_id)
+        db_item.provider_mappings.update(merged_item.provider_mappings)
         return True
 
     def _musicbrainz_link_provider(self) -> MusicbrainzProvider | None:

@@ -44,10 +44,14 @@ from music_assistant.controllers.metadata.constants import (
 )
 from music_assistant.controllers.metadata.controller import (
     _albums_to_identify_query,
+    _albums_with_recordings_to_read_query,
     _artists_to_identify_query,
+    _classical_artists_to_reread_query,
     _relink_query,
     _tracks_to_identify_query,
+    _tracks_with_recording_to_read_query,
     _works_to_enrich_query,
+    _works_to_reread_query,
 )
 from music_assistant.controllers.tasks import TasksController
 from music_assistant.controllers.tasks.constants import TASK_UPDATE_TIMER_ID
@@ -187,10 +191,24 @@ def _queue(
     """
     queried: list[str] = []
     music = _mass(ctrl).music
+    performer_queries = (
+        _albums_with_recordings_to_read_query(),
+        _tracks_with_recording_to_read_query(),
+    )
+    reread_queries = (
+        _classical_artists_to_reread_query(),
+        _works_to_reread_query(),
+    )
 
     def _answer(name: str, items: Sequence[Mock], relink_items: Sequence[Mock]) -> AsyncMock:
         async def _query(**kwargs: Any) -> list[Mock]:
             params = kwargs.get("extra_query_params") or {}
+            if kwargs["extra_query_parts"][0] in performer_queries:
+                queried.append(f"{name} performers")
+                return []
+            if kwargs["extra_query_parts"][0] in reread_queries:
+                queried.append(f"{name} re-reads")
+                return []
             if "domain" in params:
                 queried.append(f"relink {name} {params['domain']}")
                 return list(relink_items)[: kwargs["limit"]]
@@ -253,14 +271,22 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
         "albums",
         "artists",
         "tracks",
+        "albums performers",
+        "tracks performers",
         "works",
+        "artists re-reads",
+        "works re-reads",
     ]
     music = _mass(ctrl).music
     for controller, query, params in (
         (music.albums, _albums_to_identify_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.artists, _artists_to_identify_query(), {}),
         (music.tracks, _tracks_to_identify_query(), {}),
+        (music.albums, _albums_with_recordings_to_read_query(), {"stale": NOW - REFRESH_INTERVAL}),
+        (music.tracks, _tracks_with_recording_to_read_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.works, _works_to_enrich_query(), {}),
+        (music.artists, _classical_artists_to_reread_query(), {"stale": NOW - REFRESH_INTERVAL}),
+        (music.works, _works_to_reread_query(), {"stale": NOW - REFRESH_INTERVAL}),
     ):
         controller.get_library_items_by_query.assert_any_await(
             limit=MUSICBRAINZ_LINK_BATCH_SIZE,
@@ -478,11 +504,6 @@ async def test_link_run_without_a_musicbrainz_provider_returns_early() -> None:
     _mass(ctrl).config.set_raw_core_config_value.assert_not_called()
 
 
-# --------------------------------------------------------------------------- #
-#  relinking for a provider loaded later                                       #
-# --------------------------------------------------------------------------- #
-
-
 async def test_link_run_relinks_for_a_provider_loaded_since_the_previous_run() -> None:
     """A new provider starts now, one no longer loaded is dropped, and each kept gets a relink phase."""
     ctrl = _controller(
@@ -505,7 +526,11 @@ async def test_link_run_relinks_for_a_provider_loaded_since_the_previous_run() -
         "relink artists spotify",
         "relink albums tidal",
         "relink artists tidal",
+        "albums performers",
+        "tracks performers",
         "works",
+        "artists re-reads",
+        "works re-reads",
     ]
     relink_calls = [
         call.kwargs
@@ -733,20 +758,22 @@ async def test_link_item_hands_a_work_to_the_work_step() -> None:
     _mass(ctrl).music.works.update_item_in_library.assert_not_awaited()
 
 
-# --------------------------------------------------------------------------- #
-#  diagnostics                                                                 #
-# --------------------------------------------------------------------------- #
-
-
 async def test_diagnostics_report_the_last_run_and_the_pending_counts() -> None:
     """Diagnostics carry the last run summary and how many items each phase still has."""
     ctrl = _controller()
-    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[4, 3, 2, 1])
+    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[6, 5, 4, 3, 2, 1])
 
     assert await ctrl.get_diagnostics() == {
         "musicbrainz_link": {
             "last_run": None,
-            "pending": {"albums": 4, "artists": 3, "tracks": 2, "works": 1},
+            "pending": {
+                "albums": 6,
+                "artists": 5,
+                "tracks": 4,
+                "album performers": 3,
+                "track performers": 2,
+                "works": 1,
+            },
         }
     }
 
@@ -762,6 +789,7 @@ async def test_classical_link_progress_is_zero_while_nothing_is_looked_up(
 
     assert await ctrl.get_classical_link_progress() == {
         "albums": 0,
+        "recordings": 0,
         "works": 0,
     }
     _mass(ctrl).music.database.get_count_from_query.assert_not_awaited()
@@ -872,7 +900,14 @@ async def test_link_run_selects_albums_by_their_lookup_marker(mass: MusicAssista
     assert diagnostics is not None
     assert diagnostics["musicbrainz_link"] == {
         "last_run": None,
-        "pending": {"albums": 2, "artists": 0, "tracks": 0, "works": 0},
+        "pending": {
+            "albums": 2,
+            "artists": 0,
+            "tracks": 0,
+            "works": 0,
+            "album performers": 0,
+            "track performers": 0,
+        },
     }
 
     assert await _linked_ids(mass) == {never.item_id, stale_unknown.item_id}

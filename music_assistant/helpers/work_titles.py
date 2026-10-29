@@ -110,6 +110,19 @@ def split_movement_title(title: str) -> TrackWork | None:
     return None
 
 
+def parent_work_name(work: str) -> str | None:
+    """
+    Return the name of the work an act or part is part of, or None for any other work.
+
+    The catalog numbers after the act or part belong to that work.
+
+    :param work: The name of a work, such as "Swan Lake, Act II, Op. 20, TH 12".
+    """
+    if not (match := _ACT_OR_PART.match(work)):
+        return None
+    return match["work"] + match["catalog"]
+
+
 def part_key(work: str) -> tuple[str, int | str] | None:
     """
     Return what tells an act or part apart from the other parts of its work, or None.

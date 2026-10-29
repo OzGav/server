@@ -1807,11 +1807,18 @@ class MusicProvider(MediaCatalogMixin, RecommendationsMixin, AudioStreamMixin, P
                         or (prov_item.album and not sync_details.has_album)
                         # or backfill missing track_artists link(s) for existing tracks
                         or (prov_item.artists and not sync_details.has_artists)
+                        # or store external ids (such as an ISRC) the library track lacks
+                        or sync_details.lacks_external_ids(prov_item)
                     ):
                         library_item = await self.mass.music.tracks.update_item_in_library(
                             sync_details.item_id, prov_item
                         )
                         db_id = int(library_item.item_id)
+                        if sync_details.lacks_external_ids(prov_item):
+                            # the new ids can identify a library twin the add could not match
+                            db_id = await self.mass.music.tracks.merge_into_external_id_match(
+                                db_id, prov_item
+                            )
                     else:
                         db_id = sync_details.item_id
                     cur_db_ids.add(db_id)

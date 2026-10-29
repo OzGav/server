@@ -1,0 +1,66 @@
+{
+  "length": 134373,
+  "video": false,
+  "title": "O mio babbino caro (Gianni Schicchi)",
+  "disambiguation": "",
+  "relations": [
+    {
+      "attribute-values": {},
+      "attribute-credits": {
+        "soprano vocals": "Lauretta"
+      },
+      "end": null,
+      "direction": "backward",
+      "type": "vocal",
+      "artist": {
+        "id": "58b64b2d-eaf2-4fcb-abe9-ce0f25d4124d",
+        "type": "Person",
+        "country": "GB",
+        "name": "Amanda Roocroft",
+        "sort-name": "Roocroft, Amanda",
+        "disambiguation": "soprano",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attributes": [
+        "soprano vocals"
+      ],
+      "begin": null,
+      "target-type": "artist",
+      "attribute-ids": {
+        "soprano vocals": "e88f0be8-a07e-4c0d-bd06-e938eea4d5f6"
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "ended": false,
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "direction": "forward",
+      "end": null,
+      "type": "performance",
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "target-type": "work",
+      "source-credit": "",
+      "attribute-ids": {},
+      "target-credit": "",
+      "ended": false,
+      "work": {
+        "type-id": "ae801f48-7a7f-3af6-91c7-456f82dae8a9",
+        "iswcs": [],
+        "languages": [
+          "ita"
+        ],
+        "disambiguation": "",
+        "title": "Gianni Schicchi: “O mio babbino caro” (Lauretta)",
+        "attributes": [],
+        "language": "ita",
+        "id": "433001da-5c32-3d5b-9794-5b3dfabb0457",
+        "type": "Aria"
+      },
+      "type-id": "a3005666-a872-32c3-ad06-98af558e99b0"
+    }
+  ],
+  "id": "f9b1d5a1-9cbb-4aef-85d8-d0beea99b010"
+}
