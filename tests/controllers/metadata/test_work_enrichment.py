@@ -28,6 +28,7 @@ from music_assistant.constants import DB_TABLE_TRACKS
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.constants import REFRESH_INTERVAL
 from music_assistant.controllers.metadata.controller import _works_to_enrich_query
+from music_assistant.controllers.metadata.work_enrichment import _fill_work_from_musicbrainz
 from music_assistant.helpers.compare import is_named_by
 from music_assistant.providers.musicbrainz.models import (
     MusicBrainzAlias,
@@ -529,6 +530,33 @@ async def test_work_lists_the_catalog_numbers_its_name_gives_first(
     stored = await _enrich(ctrl, work)
 
     assert (stored.name, stored.catalog_numbers) == (title, ["BWV 565", "BC J 37"])
+
+
+@pytest.mark.parametrize(
+    ("title", "parent", "catalogue", "expected"),
+    [
+        ("Pavane in F-sharp minor, op. 50", None, None, ["op. 50"]),
+        # a range numbers no single work
+        ("Ouvertures, HWV 348\u2013350", None, None, []),
+        ("Quartets, TWV 40:2-13", None, None, []),
+        # an act carries no number of the opera it belongs to
+        ("Tosca, op. 1: Act I", "Tosca, op. 1", None, []),
+        # MusicBrainz's numbers win over those of the name
+        ("Pavane in F-sharp minor, op. 50", None, "BWV 1", ["BWV 1"]),
+    ],
+)
+def test_work_without_musicbrainz_catalog_numbers_takes_those_of_its_name(
+    title: str, parent: str | None, catalogue: str | None, expected: list[str]
+) -> None:
+    """A work takes the catalog numbers of its name when MusicBrainz gives it none."""
+    levels = _work_levels((title, None), *([(parent, None)] if parent else []))
+    if catalogue:
+        levels[0].relations.append(_catalogue(catalogue))
+    work = Work(item_id="1", provider="library", name=title, provider_mappings=set())
+
+    _fill_work_from_musicbrainz(work, levels)
+
+    assert work.catalog_numbers == expected
 
 
 async def test_work_musicbrainz_does_not_know_is_marked_looked_up(mass: MusicAssistant) -> None:

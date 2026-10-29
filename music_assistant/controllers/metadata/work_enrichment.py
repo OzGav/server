@@ -17,6 +17,7 @@ merged into another takes the other's id.
 from __future__ import annotations
 
 import logging
+import re
 from time import time
 from typing import TYPE_CHECKING
 
@@ -239,7 +240,8 @@ def _fill_work_from_musicbrainz(
     """
     Fill the empty fields of a work in from its MusicBrainz work and the works above it.
 
-    The work's version is the note MusicBrainz tells same-named works apart by, if any.
+    The work's version is the note MusicBrainz tells same-named works apart by, if any. A work
+    MusicBrainz gives no catalog numbers takes those its name gives of the work itself.
 
     :param work: The library work.
     :param hierarchy: Its MusicBrainz work followed by the works above it.
@@ -263,7 +265,9 @@ def _fill_work_from_musicbrainz(
         work.language = work.language or mb_work.language
         work.musical_key = work.musical_key or mb_work.musical_key
     if not work.catalog_numbers:
-        work.catalog_numbers = _catalog_numbers(mb_work, work.name)
+        work.catalog_numbers = _catalog_numbers(mb_work, work.name) or _named_catalog_numbers(
+            work.name, hierarchy[1:]
+        )
 
 
 def _catalog_numbers(mb_work: MusicBrainzWork, name: str) -> list[str]:
@@ -272,6 +276,28 @@ def _catalog_numbers(mb_work: MusicBrainzWork, name: str) -> list[str]:
     return sorted(
         mb_work.catalog_numbers, key=lambda x: create_safe_string(x, True, True) not in named
     )
+
+
+def _named_catalog_numbers(name: str, above: Sequence[MusicBrainzWork]) -> list[str]:
+    """
+    Return the catalog numbers a work's name gives of the work itself.
+
+    :param name: The name of the work.
+    :param above: The MusicBrainz works above it, whose numbers its parts, such as acts, name
+        without carrying them.
+    """
+    named_above = {
+        create_safe_string(x, True, True)
+        for level in above
+        for x in parse_catalog_numbers(level.title)
+    }
+    return [
+        x
+        for x in parse_catalog_numbers(name)
+        if create_safe_string(x, True, True) not in named_above
+        # the start of a range, as in "HWV 348-350", numbers no single work
+        and not re.search(rf"{re.escape(x)}\s*[-\u2010\u2013]\s*\d", name)
+    ]
 
 
 def _composer_relations(hierarchy: Sequence[MusicBrainzWork]) -> list[MusicBrainzRelation]:
