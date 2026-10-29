@@ -151,6 +151,7 @@ async def test_composers(library: _Library) -> None:
         ("Ludwig van Beethoven", 3, 7),
         ("Antonio Vivaldi", 2, 2),
     ]
+    assert [x.artist.period for x in rows] == [Period.CLASSICAL, None]
 
 
 @pytest.mark.parametrize(
@@ -374,6 +375,7 @@ async def test_works(library: _Library) -> None:
     assert rows[0].work.catalog_numbers == ["Op. 55"]
     assert [x.name for x in rows[0].work.composers] == ["Ludwig van Beethoven"]
     assert all(x.part_names == [] for x in rows)
+    assert [x.period for x in rows] == [Period.CLASSICAL] * 3 + [None] * 2
     # works without a stored type, alone or listed, show the type their title names
     assert [x.work.work_type for x in rows] == [
         WorkType.SYMPHONY,
