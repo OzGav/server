@@ -1155,12 +1155,8 @@ class TestPartsOfWorks:
             parts_library.work_id("Lakme")
         )
 
-        assert [x.work.name for x in recordings] == [
-            "Lakme",
-            "Bell Song",
-            "Flower Duet",
-            "Flower Duet",
-        ]
+        # Callas's duet is one performance with her overture, so it joins the work's own
+        assert [x.work.name for x in recordings] == ["Lakme", "Bell Song", "Flower Duet"]
 
     @pytest.mark.parametrize(
         ("composer", "performer", "expected"),
@@ -1197,7 +1193,6 @@ class TestPartsOfWorks:
         ] == [
             ("Lakme", None),
             ("Bell Song", "Lakme"),
-            ("Flower Duet", "Lakme"),
             ("Flower Duet", "Lakme"),
         ]
         [habanera] = await parts_library.mass.music.classical.recordings(
@@ -1263,15 +1258,13 @@ class TestPartsOfWorks:
         ]
         assert not work.movements_from_musicbrainz
         assert [(x.work.name, x.movement_numbers, x.complete) for x in recordings] == [
-            ("Lakme", [], None),
+            ("Lakme", [2], None),
             ("Bell Song", [1], None),
-            ("Flower Duet", [2], None),
             ("Flower Duet", [2], None),
         ]
         assert [[x.movement_number for x in r.tracks] for r in recordings] == [
-            [None],
+            [2, None],
             [1],
-            [2],
             [2],
         ]
 
@@ -1303,7 +1296,7 @@ async def play_library_fixture(music_mass_class: MusicAssistant) -> _Library:
         ("Abbado Celeste", "Celeste Aida", "abbado", None),
         ("Karajan Ritorna", "Ritorna vincitor", "karajan", None),
         ("Solti Otello", "Otello", "solti", None),
-        ("Solti Ave Maria", "Ave Maria", "solti", None),
+        ("Karajan Ave Maria", "Ave Maria", "karajan", None),
     ):
         await _add_track(lib, key, work, conductor, movement=movement)
     return lib
@@ -1687,17 +1680,18 @@ class TestPartsAsMovements:
             staged_library.work_id("Tosca")
         )
 
-        # without MusicBrainz movements the arias of an act come in the order of their names
+        # without MusicBrainz movements the arias of an act come in the order of their names, and
+        # the act's track is one performance with the opera's own, so it joins that one
         assert {x.work.name: (x.movement_numbers, x.complete) for x in recordings} == {
-            "Tosca": ([1, 4], None),
+            "Tosca": ([1, 2, 4], None),
             "Tosca: Act I: Recondita armonia": ([1], None),
-            "Tosca, Act II": ([2], None),
             "Tosca: Act II: Ed io venivo a lei": ([3], None),
             "Tosca: Act II: Vissi d'arte": ([4], None),
         }
         opera = next(x for x in recordings if x.work.name == "Tosca")
         assert {(x.name, x.movement_number, x.movement_name) for x in opera.tracks} == {
             ("Tosca: Recondita armonia", 1, "Recondita armonia"),
+            ("Tosca, Act II: Scene", 2, "Act II"),
             ("Tosca: Vissi d'arte", 4, "Vissi d'arte"),
         }
 
@@ -2265,8 +2259,26 @@ class TestScenesOfAnAct:
         assert {
             x.credits[0].artist.name: [(t.name, t.movement_number) for t in x.tracks]
             for x in recordings
-            if x.work.item_id == scene_library.work_id("Scene")
-        } == {"Jacobs": [("jacobs_xxxvi", 2003)], "Richter": [("richter_xxxvi", 2001)]}
+        } == {
+            "Jacobs": [("jacobs_xxx", 1), ("jacobs_xxxvi", 2003), ("jacobs_xxxvii", 3)],
+            "Richter": [("richter_xxxvi", 2001)],
+        }
+
+    async def test_scene_track_joins_the_own_recording_of_the_act(
+        self, scene_library: _Library
+    ) -> None:
+        """On the act, a scene's track joins the act's own recording it is one performance with."""
+        recordings = await scene_library.mass.music.classical.recordings(
+            scene_library.work_id("Part II")
+        )
+
+        assert [
+            (x.credits[0].artist.name, x.work.item_id, x.movement_numbers) for x in recordings
+        ] == [
+            ("Jacobs", scene_library.work_id("Part II"), [1, 2, 3]),
+            # a performance of the scene alone stays a recording of the scene
+            ("Richter", scene_library.work_id("Scene"), [2]),
+        ]
 
     async def test_track_holding_the_whole_scene_shows_the_scene(
         self, scene_library: _Library

@@ -506,7 +506,9 @@ class ClassicalController:
         naming that movement. Its tracks carry the number of the movement they are matched to, or of
         the one piece of a group they hold in the movements of a part. For a work that lists the
         own movements of a part, such as the numbers of an act, a track of a recording of that part
-        carries the number of the one of those it holds, as the work lists it.
+        carries the number of the one of those it holds, as the work lists it. For a requested work,
+        the tracks of a part that are one performance with a recording of the work itself join that
+        recording.
 
         :param work_id: Library id of the work. Required unless performer_id is given.
         :param performer_id: Only include the recordings this performer (library artist id)
@@ -532,9 +534,14 @@ class ClassicalController:
             for work in work_items
             if work.parent_work
         }
-        performances = await self._performances(
-            work_ids, {x: y for ids in parts.values() for x, y in ids.items()}
-        )
+        joined = {x: y for ids in parts.values() for x, y in ids.items()}
+        if work_id:
+            # a part's tracks that are one performance with the work's own join its recording,
+            # after taking in those of their own parts
+            joined = {x: y for x, y in joined.items() if x != y} | {
+                x: int(work_id) for x, y in joined.items() if x == y
+            }
+        performances = await self._performances(work_ids, joined)
         movements = await self._movements(listed_ids)
         if work_id:
             await self._add_part_lists(movements, int(work_id))
@@ -1474,7 +1481,11 @@ def _build_recording(
             inner_part = part_list.parts.get(int(track.work.item_id))
             if inner := _shown_movement(track, part_list, inner_part)[1]:
                 in_part[int(track.item_id)] = inner
-        matched, shown = _shown_movement(track, movements, own_part)
+        # a track of a part joining the work's own recording holds the movement that part is
+        track_part = own_part or (
+            movements.parts.get(int(track.work.item_id)) if track.work else None
+        )
+        matched, shown = _shown_movement(track, movements, track_part)
         if shown:
             covered.update(x.number for x in matched)
             # the movement fields are only changed on the returned track, never stored
