@@ -20,6 +20,10 @@ CONF_CHAPTER_FOLDER_REPARSE_DONE = "chapter_folder_reparse_done"
 # Hidden conf: Do we still need to prune dead mappings/ images of albums and artists?
 CONF_STALE_REFS_PRUNE_DONE = "stale_refs_prune_done"
 
+# Hidden config marking that unchanged music files have been re-read for their classical
+# details, including works taken from track titles
+CONF_CLASSICAL_REPARSE_DONE = "classical_reread_done"
+
 # Use a prefix: Authors/ narrators cannot be distinguished by their file path, like music artists.
 AUTHOR_ID_PREFIX: Final[str] = "author:"
 NARRATOR_ID_PREFIX: Final[str] = "narrator:"

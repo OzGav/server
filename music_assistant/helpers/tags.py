@@ -39,6 +39,7 @@ from music_assistant.helpers.process import (
 )
 from music_assistant.helpers.security import has_control_chars
 from music_assistant.helpers.util import infer_album_type, try_parse_int
+from music_assistant.helpers.work_titles import ROMAN_NUMERALS
 
 LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.tags")
 
@@ -92,28 +93,6 @@ _CLASSICAL_SINGLE_TAGS = (
 # Roles Picard stores in the ID3 involved people frame next to the performers of ID3v2.3 files
 _ID3_INVOLVED_PEOPLE_ROLES = ("arranger", "engineer", "producer", "DJ-mix", "mix")
 
-_ROMAN_NUMERALS = (
-    "I",
-    "II",
-    "III",
-    "IV",
-    "V",
-    "VI",
-    "VII",
-    "VIII",
-    "IX",
-    "X",
-    "XI",
-    "XII",
-    "XIII",
-    "XIV",
-    "XV",
-    "XVI",
-    "XVII",
-    "XVIII",
-    "XIX",
-    "XX",
-)
 # a movement name such as "II. Andante" or "3 - Scherzo" starts with its number
 _MOVEMENT_NUMBER_PREFIX = re.compile(r"^([IVX]+|\d+)[.:\-\s]", re.IGNORECASE)
 # a performer credit such as "Martha Argerich (piano)" ends with the instrument or role,
@@ -2381,7 +2360,7 @@ def _movement_number_from_name(name: str) -> int | None:
     numeral = match.group(1).upper()
     if numeral.isdecimal():
         return int(numeral)
-    return _ROMAN_NUMERALS.index(numeral) + 1 if numeral in _ROMAN_NUMERALS else None
+    return ROMAN_NUMERALS.index(numeral) + 1 if numeral in ROMAN_NUMERALS else None
 
 
 def _parse_roon_credit(credit: str) -> tuple[str, str | None]:
