@@ -13,6 +13,7 @@ from music_assistant_models.media_items import (
     Artist,
     Credit,
     ItemMapping,
+    MediaItemMetadata,
     ProviderMapping,
     Track,
     UniqueList,
@@ -20,6 +21,7 @@ from music_assistant_models.media_items import (
 
 from music_assistant.constants import DB_TABLE_TRACK_CREDITS
 from music_assistant.mass import MusicAssistant
+from music_assistant.models.music_provider import MusicProvider
 
 PROVIDER_INSTANCE = "credits_instance"
 OTHER_PROVIDER_INSTANCE = "other_credits_instance"
@@ -236,13 +238,14 @@ async def test_artists_win_over_main_artist_credits(mass: MusicAssistant) -> Non
 
 
 @pytest.mark.parametrize(
-    ("stored", "update", "source", "overwrite", "expected"),
+    ("stored", "update", "source", "overwrite", "classical", "expected"),
     [
         # a merging update from a provider the track is not on adds its credits
         (
             [ArtistRole.COMPOSER],
             [ArtistRole.CONDUCTOR],
             "other",
+            False,
             False,
             {(STORED, ArtistRole.COMPOSER), (NEW, ArtistRole.CONDUCTOR)},
         ),
@@ -252,6 +255,7 @@ async def test_artists_win_over_main_artist_credits(mass: MusicAssistant) -> Non
             [ArtistRole.CONDUCTOR],
             "shared",
             False,
+            False,
             {(STORED, ArtistRole.COMPOSER), (NEW, ArtistRole.CONDUCTOR)},
         ),
         # one from the only provider of a track, like a renamed file, replaces them
@@ -260,7 +264,17 @@ async def test_artists_win_over_main_artist_credits(mass: MusicAssistant) -> Non
             [ArtistRole.COMPOSER],
             "same",
             False,
+            False,
             {(NEW, ArtistRole.COMPOSER)},
+        ),
+        # one from a streaming service, which names only some credits, adds them
+        (
+            [ArtistRole.CONDUCTOR],
+            [ArtistRole.COMPOSER],
+            "streaming",
+            False,
+            False,
+            {(NEW, ArtistRole.COMPOSER), (STORED, ArtistRole.CONDUCTOR)},
         ),
         # an overwriting update replaces them, unless it brings none
         (
@@ -268,32 +282,55 @@ async def test_artists_win_over_main_artist_credits(mass: MusicAssistant) -> Non
             [ArtistRole.LYRICIST],
             "same",
             True,
+            False,
             {(NEW, ArtistRole.LYRICIST)},
         ),
-        ([ArtistRole.COMPOSER], [], "same", True, {(STORED, ArtistRole.COMPOSER)}),
+        ([ArtistRole.COMPOSER], [], "same", True, False, {(STORED, ArtistRole.COMPOSER)}),
+        # a refreshed classical track read from its files gets the performers they name now,
+        # one from a streaming service keeps a performer it no longer names
+        (
+            [ArtistRole.CONDUCTOR],
+            [ArtistRole.SOLOIST],
+            "same",
+            True,
+            True,
+            {(NEW, ArtistRole.SOLOIST)},
+        ),
+        (
+            [ArtistRole.CONDUCTOR],
+            [ArtistRole.SOLOIST],
+            "streaming",
+            True,
+            True,
+            {(STORED, ArtistRole.CONDUCTOR), (NEW, ArtistRole.SOLOIST)},
+        ),
     ],
 )
 async def test_update_adds_or_replaces_credits(
     mass: MusicAssistant,
+    monkeypatch: pytest.MonkeyPatch,
     stored: list[ArtistRole],
     update: list[ArtistRole],
     source: str,
     overwrite: bool,
+    classical: bool,
     expected: set[tuple[str, ArtistRole]],
 ) -> None:
     """
     An update adds its credits to the stored ones, or replaces them when it names them all.
 
-    An update from the only provider of a track names them all. An overwriting update replaces
-    them unless it brings none. The main artists of a merging update are added, those of an
-    overwriting update replace the stored ones.
+    An update from the only provider of a track names them all, unless it is a streaming
+    service, which names only some. An overwriting update replaces them unless it brings
+    none, and a streaming service keeps the stored performers. The main artists of a merging
+    update are added, those of an overwriting update replace the stored ones.
 
     :param stored: The roles of the stored credits.
     :param update: The roles of the credits of the update.
-    :param source: Where the update comes from: the only provider of the track ("same"), a
-        provider the track is not on ("other"), or one of the two providers of the track
-        ("shared").
+    :param source: Where the update comes from: the only provider of the track ("same"), the
+        only one being a streaming service ("streaming"), a provider the track is not on
+        ("other"), or one of the two providers of the track ("shared").
     :param overwrite: Whether the update overwrites the track.
+    :param classical: Whether the track is classical.
     :param expected: The (stored or new, role) of the credits the track ends up with.
     """
     artists = {
@@ -311,12 +348,16 @@ async def test_update_adds_or_replaces_credits(
             provider_mappings={_mapping()},
             artists=UniqueList([main]),
             credits=[Credit(artist=artists[STORED, x], role=x) for x in stored],
+            metadata=MediaItemMetadata(classical_tag=classical),
         )
     )
+    assert track.is_classical == classical
     if source == "shared":
         await mass.music.tracks.add_provider_mapping(
             track.item_id, _mapping(OTHER_PROVIDER_INSTANCE)
         )
+    streaming = Mock(spec=MusicProvider, is_streaming_provider=source == "streaming")
+    monkeypatch.setattr(mass, "get_provider", Mock(return_value=streaming))
     item = await mass.music.tracks.get_library_item(track.item_id)
     item.provider_mappings = {
         _mapping(OTHER_PROVIDER_INSTANCE) if source == "other" else _mapping()

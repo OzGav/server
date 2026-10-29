@@ -28,6 +28,7 @@ from music_assistant_models.media_items import (
 from music_assistant_models.media_items.metadata import LifeSpan, MediaItemMetadata
 
 from music_assistant.constants import (
+    CLASSICAL_GENRE_NAME,
     DB_TABLE_ALBUMS,
     DB_TABLE_ARTISTS,
     DB_TABLE_GENRE_MEDIA_ITEM_MAPPING,
@@ -413,6 +414,40 @@ async def test_track_classical_tag_is_stored_only_in_its_column(mass: MusicAssis
     assert row is not None
     assert row["classical_tag"]
     assert "classical_tag" not in json_loads(row["metadata"])
+
+
+async def test_album_a_provider_files_as_classical_stays_excluded(mass: MusicAssistant) -> None:
+    """An album given the Classical genre is classical until the user excludes the genre."""
+    album = await _add_album(mass)
+    track = await _add_track(mass, album)
+    # Qobuz names its own genre in the account's language next to the Classical genre
+    prov_album = await mass.music.albums.get_library_item(album.item_id)
+    genres = {"Klassiek", CLASSICAL_GENRE_NAME}
+    prov_album.metadata.genres = genres
+
+    # a library sync updates the album, then links it to the genres the provider gives
+    await mass.music.albums.update_item_in_library(album.item_id, prov_album)
+    await mass.music.genres.sync_media_item_genres(MediaType.ALBUM, album.item_id, genres)
+    read = await _is_classical(mass, album), await _is_classical(mass, track)
+    classical_id = await _classical_genre_id(mass)
+    await mass.music.genres.exclude_genre_from_media_item(
+        classical_id, MediaType.ALBUM, album.item_id
+    )
+    excluded = await _is_classical(mass, album), await _is_classical(mass, track)
+    # the next sync of the album and its genres leaves the exclusion be
+    await mass.music.albums.update_item_in_library(album.item_id, prov_album)
+    await mass.music.genres.sync_media_item_genres(MediaType.ALBUM, album.item_id, genres)
+    read_again = await _is_classical(mass, album), await _is_classical(mass, track)
+    mapped = await mass.music.database.get_row(
+        DB_TABLE_GENRE_MEDIA_ITEM_MAPPING,
+        {"genre_id": classical_id, "media_id": int(album.item_id), "media_type": "album"},
+    )
+
+    assert read == (True, True)
+    assert excluded == (False, False)
+    assert read_again == (False, False)
+    # nor is the album listed under the Classical genre again
+    assert mapped is None
 
 
 async def test_flags_follow_genre_mapping_changes(mass: MusicAssistant) -> None:

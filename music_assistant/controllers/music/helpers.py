@@ -116,6 +116,18 @@ def has_musicbrainz_id(item_id: str, media_type: MediaType, id_type: ExternalID)
     )
 
 
+def track_composers_query(tracks: str) -> str:
+    """
+    Return a subquery selecting the ids of the artists credited as composer on some tracks.
+
+    :param tracks: Subquery selecting the ids of the tracks.
+    """
+    return (
+        f"SELECT artist_id FROM {DB_TABLE_TRACK_CREDITS} "
+        f"WHERE role = '{ArtistRole.COMPOSER.value}' AND track_id IN ({tracks})"
+    )
+
+
 def composer_period(birth_year: int, death_year: int | None) -> Period:
     """
     Return the classical period of a composer, judged by the middle of their working life.
