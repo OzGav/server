@@ -27,6 +27,9 @@ The tracks of a movement, such as an aria, move onto the work right above it as 
 when the library holds that work, such as the act. The movement's own work then leaves the
 library once empty. When the movement is a group of pieces, such as a scene of an act, the work
 above it keeps the group's pieces under the group in its movements.
+A classical track without a work joins the library work of its MusicBrainz work, which is added
+from MusicBrainz when the library lacks it. A track performing several parts of one work, such
+as the arias of an act, joins that work.
 A work refreshed by hand, or by the 90 day re-read, is looked up again as on its first lookup,
 taking MusicBrainz's current name, version, type, year, language, key, catalog numbers, parent,
 parts, movements and arrangements; a work MusicBrainz merged into another takes the other's id.
@@ -40,6 +43,7 @@ from collections import Counter
 from dataclasses import replace
 from time import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
 from music_assistant_models.enums import ArtistRole, ExternalID, MediaType
 from music_assistant_models.errors import InvalidDataError, MediaNotFoundError
@@ -257,6 +261,99 @@ class WorkEnrichmentMixin:
             work.parent_work = None
             return old_parent
         return None
+
+    async def _add_track_work(self, track_id: str, work_ids: Collection[str]) -> None:
+        """
+        Give a classical library track without a work the work its MusicBrainz work ids name.
+
+        A work the library lacks is added from MusicBrainz, named in the user's language, and
+        filled in right away. A track that stays on the work its one id names has no movement
+        number or name. A track performing several parts of one work, such as the arias of an
+        act, becomes a recording of that work without a movement number. A track performing
+        parts of different works is left without one.
+
+        :param track_id: Library id of the track.
+        :param work_ids: The MusicBrainz ids of the works the track performs, from a source
+            that identifies its recording reliably.
+        """
+        if not work_ids or not (musicbrainz := self._musicbrainz_provider()):
+            return
+        tracks, works = self.mass.music.tracks, self.mass.music.works
+        track = await tracks.get_library_item(track_id)
+        if track.work or not track.is_classical:
+            return
+        if not (work_id := await self._work_of_parts(musicbrainz, work_ids)):
+            return
+        if len(work_ids) > 1:
+            track.movement_number = None
+            await tracks.set_movement_number(int(track.item_id), None)
+        if work := await works.get_library_item_by_external_id(work_id, ExternalID.MB_WORK):
+            track.work = ItemMapping.from_item(work)
+            await tracks.update_item_in_library(track.item_id, track)
+            # a movement's tracks belong on the work above it; a work without a parent yet
+            # has them moved there once it gets one
+            if work.parent_work:
+                await self._move_movement_tracks(
+                    work, await self._musicbrainz_work_hierarchy(musicbrainz, work)
+                )
+        else:
+            try:
+                mb_work = await musicbrainz.get_work_details(work_id)
+            except InvalidDataError:
+                return
+            if not mb_work:
+                return
+            track.work = Work(
+                item_id=mb_work.id,
+                provider="musicbrainz",
+                name=musicbrainz_work_name(mb_work, self.preferred_language),
+                provider_mappings=set(),
+                external_ids={(ExternalID.MB_WORK, mb_work.id)},
+                composers=UniqueList(track.composers),
+            )
+            await tracks.update_item_in_library(track.item_id, track)
+            if (stored := await tracks.get_library_item(track.item_id)).work:
+                await self._link_work_to_musicbrainz(
+                    await works.get_library_item(stored.work.item_id)
+                )
+        if len(work_ids) == 1 and (stored := await tracks.get_library_item(track.item_id)).work:
+            named = await works.get_library_items_by_external_id(
+                work_id, ExternalID.MB_WORK, limit=None
+            )
+            # a track left on the work its id names performs that work, not a movement its
+            # title names
+            if stored.work.item_id in {x.item_id for x in named}:
+                await tracks.set_work(int(stored.item_id), int(stored.work.item_id))
+
+    async def _work_of_parts(
+        self, musicbrainz: MusicbrainzProvider, work_ids: Collection[str]
+    ) -> str | None:
+        """
+        Return the MusicBrainz id of the one work the given MusicBrainz works are, or are parts of.
+
+        That is the work itself for a single id. Several ids name the work right above each of
+        them, or one of them when the others are its parts; a work and one of its parts, as tags
+        name a movement together with its work, name that part. Ids under different works name
+        none.
+
+        :param musicbrainz: The MusicBrainz provider.
+        :param work_ids: The MusicBrainz ids of the works a track performs.
+        """
+        if len(work_ids) == 1:
+            return next(iter(work_ids))
+        above: dict[str, str | None] = {}
+        for work_id in work_ids:
+            try:
+                mb_work = await musicbrainz.get_work_details(work_id)
+            except InvalidDataError:
+                return None
+            relation = await self._parent_to_follow(mb_work) if mb_work else None
+            above[work_id] = relation.work.id if relation and relation.work else None
+        candidates = sorted({*above, *(x for x in above.values() if x)})
+        shared = next((x for x in candidates if all(y == x or above[y] == x for y in above)), None)
+        if shared in above and len(above) == 2:
+            return next(x for x in above if x != shared)
+        return shared
 
     async def _musicbrainz_work_hierarchy(
         self, musicbrainz: MusicbrainzProvider, work: Work
@@ -696,14 +793,17 @@ class WorkEnrichmentMixin:
             )
         )
 
-    async def _add_musicbrainz_artist(self, mb_artist: MusicBrainzArtist) -> Artist | None:
+    async def _add_musicbrainz_artist(
+        self, mb_artist: MusicBrainzArtist, album: Album | None = None
+    ) -> Artist | None:
         """
         Add a MusicBrainz artist to the library on the music providers it links to, if any.
 
-        The artist is added with its type and life dates, named in Latin script where its
-        MusicBrainz name is not.
+        The artist is added with its type, life dates and country, named in Latin script
+        where its MusicBrainz name is not.
 
         :param mb_artist: The MusicBrainz artist.
+        :param album: The album the artist performs on, named when the artist is not added.
         """
         if not (musicbrainz := self._musicbrainz_provider()):
             return None
@@ -730,12 +830,14 @@ class WorkEnrichmentMixin:
                     self._logged_hints,
                     ("artist", details.id),
                     logging.DEBUG,
-                    'Artist "%s" has no link to %s on MusicBrainz, so it is not added; '
-                    "add one at %s/artist/%s",
+                    'Artist "%s" has no link to %s on MusicBrainz, so it is not added%s; '
+                    "add one at %s/artist/%s%s",
                     details.name,
                     ", ".join(providers),
+                    f' to album "{album.name}"' if album else "",
                     MUSICBRAINZ_WEB_URL,
                     details.id,
+                    ", then use Update metadata on the album" if album else "",
                 )
             return None
         name, sort_name = details.name, details.sort_name
@@ -933,6 +1035,59 @@ class WorkEnrichmentMixin:
             mbid, ExternalID.MB_ARTIST, limit=None
         ):
             await self._name_after_musicbrainz(holder, details)
+            # tracks saved before the composer was confirmed may still credit it joined with others
+            await self.mass.music.tracks.split_joined_composer_credits(holder, alias_names)
+
+    async def _join_composer_by_name(
+        self, musicbrainz: MusicbrainzProvider, artist: Artist
+    ) -> None:
+        """
+        Join a composer its own links did not identify to the confirmed composer of its name.
+
+        Only the one MusicBrainz person carrying the exact name qualifies, when a library
+        composer holds that person's id, under the rules of the alias join. Without a join,
+        where to add the composer's streaming link on MusicBrainz is logged.
+
+        :param musicbrainz: The MusicBrainz provider.
+        :param artist: The library composer without a MusicBrainz id.
+        """
+        # a composer is a person, so a band of the same name is never them
+        persons = [
+            x
+            for x in await musicbrainz.get_artists_by_name(artist.name)
+            if x.type not in GROUP_ARTIST_TYPES
+        ]
+        person = persons[0] if len(persons) == 1 else None
+        artists = self.mass.music.artists
+        if person and await artists.get_library_items_by_external_id(
+            person.id, ExternalID.MB_ARTIST, limit=None
+        ):
+            await self._merge_composer_by_aliases(person.id)
+            try:
+                if (await artists.get_library_item(artist.item_id)).mbid:
+                    return
+            except MediaNotFoundError:
+                # merged into the composer holding the id
+                return
+            person = None
+        if not (urls := MusicbrainzProvider.reverse_lookup_urls(artist)):
+            return
+        link = (
+            f"{MUSICBRAINZ_WEB_URL}/artist/{person.id}"
+            if person
+            else f"{MUSICBRAINZ_WEB_URL}/search?{urlencode({'type': 'artist', 'query': artist.name})}"
+        )
+        log_once(
+            self.logger,
+            self._logged_hints,
+            ("artist", artist.uri),
+            logging.INFO,
+            'Composer "%s" is not on MusicBrainz through %s, add %s to their MusicBrainz page: %s',
+            artist.name,
+            ", ".join(urls),
+            urls[0],
+            link,
+        )
 
     async def _carries_only_composer_name(
         self, musicbrainz: MusicbrainzProvider, name: str, alias_names: set[str], mbid: str

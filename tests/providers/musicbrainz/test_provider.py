@@ -2610,6 +2610,39 @@ async def test_artist_metadata_includes_genres_and_current_typed_links() -> None
     }
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ({"country": "PL"}, "PL"),
+        ({"country": "XW"}, None),
+        ({"area": {"name": "England", "iso-3166-2-codes": ["GB-ENG"]}}, "GB"),
+        ({"area": {"name": "Warsaw"}}, None),
+        ({}, None),
+    ],
+)
+def test_artist_country_is_read_from_the_country_or_its_subdivision(
+    raw: dict[str, Any], expected: str | None
+) -> None:
+    """An artist's country is its ISO code, else that of the country subdivision it is from."""
+    artist = MusicBrainzArtist.from_raw({**_artist_lookup(), **raw})
+
+    assert artist.country_code == expected
+
+
+async def test_artist_metadata_includes_the_country() -> None:
+    """An artist gets the country MusicBrainz reports for them."""
+    provider, _ = _routed_provider(
+        {f"artist/{RADIOHEAD_MBID}": {**_artist_lookup(), "country": "GB"}}
+    )
+
+    metadata = await provider.get_artist_metadata(
+        _artist_item(external_ids={(ExternalID.MB_ARTIST, RADIOHEAD_MBID)})
+    )
+
+    assert metadata is not None
+    assert metadata.country == "GB"
+
+
 # ---------------------------------------------------------------------------
 # browse_release_groups_by_artist
 # ---------------------------------------------------------------------------

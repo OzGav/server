@@ -2086,6 +2086,48 @@ async def test_artist_identity_leaves_a_composer_already_named_alone() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("is_composer", "period"), [(True, Period.MODERN), (False, None)])
+async def test_artist_identity_gives_an_artist_their_life_span_and_a_composer_their_period(
+    is_composer: bool, period: Period | None
+) -> None:
+    """
+    An artist whose id came from the tags takes their life span and country from the link.
+
+    A classical composer also takes the period of their life span.
+    """
+    musicbrainz = _musicbrainz(
+        artist=MusicBrainzArtist(
+            id=OTHER_MBID,
+            name="Dmitri Shostakovich",
+            sort_name="Shostakovich, Dmitri",
+            type="Person",
+            country="RU",
+            life_span=MusicBrainzLifeSpan(begin="1906-09-25", end="1975-08-09", ended=True),
+        )
+    )
+    enrichment = _enrichment(musicbrainz)
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": int(is_composer)}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Dmitri Shostakovich",
+        sort_name="Shostakovich, Dmitri",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        is_classical=is_composer,
+    )
+
+    await enrichment._link_artist_to_musicbrainz(artist)
+
+    musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
+    assert artist.metadata.life_span == LifeSpan(begin="1906-09-25", end="1975-08-09", ended=True)
+    assert artist.metadata.country == "RU"
+    assert artist.period == period
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("replace", [False, True])
 async def test_artist_identity_replaces_life_span_and_period_on_a_refresh_only(
     replace: bool,

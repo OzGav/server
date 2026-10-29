@@ -152,6 +152,7 @@ async def test_composers(library: _Library) -> None:
         ("Antonio Vivaldi", 2, 2),
     ]
     assert [x.artist.period for x in rows] == [Period.CLASSICAL, None]
+    assert [x.country for x in rows] == ["DE", None]
 
 
 @pytest.mark.parametrize(

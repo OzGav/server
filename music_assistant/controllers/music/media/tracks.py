@@ -50,6 +50,7 @@ from music_assistant_models.media_items import (
 from music_assistant.constants import (
     DB_TABLE_ALBUM_TRACKS,
     DB_TABLE_ALBUMS,
+    DB_TABLE_ARTISTS,
     DB_TABLE_EXTERNAL_ID_LOOKUP,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACK_CREDITS,
@@ -72,6 +73,7 @@ from music_assistant.helpers.compare import (
     TrackMatchConfidence,
     compare_artists,
     compare_media_item,
+    compare_strings,
     compare_track,
     compare_track_evidence,
     compare_track_title,
@@ -762,17 +764,20 @@ class TracksController(MediaControllerBase[Track]):
             merged.add(other.item_id)
         return merged
 
-    async def mark_recording_read(self, track_id: int, recording_year: int | None) -> None:
+    async def mark_recording_read(
+        self, track_id: int, recording_year: int | None, keep_year: bool = False
+    ) -> None:
         """
         Store when a library track's MusicBrainz recording was read, with its recording year.
 
         :param track_id: Library id of the track.
         :param recording_year: The year its recording was made, None when not known.
+        :param keep_year: Keep the stored recording year instead, as no usable recording was found.
         """
+        year = "" if keep_year else ", '$.recording_year', :year"
         await self.mass.music.database.execute_write(
             f"UPDATE {DB_TABLE_TRACKS} SET metadata = json_set(COALESCE(metadata, '{{}}'), "
-            "'$.last_musicbrainz_recording_lookup', :now, '$.recording_year', :year) "
-            "WHERE item_id = :track_id",
+            f"'$.last_musicbrainz_recording_lookup', :now{year}) WHERE item_id = :track_id",
             {"now": int(time()), "year": recording_year, "track_id": track_id},
         )
 
@@ -879,6 +884,70 @@ class TracksController(MediaControllerBase[Track]):
         )
         if added:
             await self.mass.music.classification.update_item(MediaType.WORK, work_id)
+
+    async def split_joined_composer_credits(self, composer: Artist, names: set[str]) -> None:
+        """
+        Credit a confirmed composer on the library tracks crediting it joined with others.
+
+        A track crediting a joined composer name such as "Frédéric Chopin & Sarah Ainsworth" is
+        split when the name starts with one of the composer's names, its main artist included.
+        A name another confirmed composer also carries stays as it is.
+
+        :param composer: The library composer, with its MusicBrainz id.
+        :param names: The composer's MusicBrainz names, such as "Frédéric Chopin".
+        """
+
+        def names_composer(candidate: str) -> bool:
+            return is_named_by(candidate, composer) or any(
+                compare_strings(candidate, x) for x in names
+            )
+
+        rows = await self.mass.music.database.get_rows_from_query(
+            "SELECT DISTINCT ta.track_id, t.name AS track_name, a.name AS artist_name "
+            f"FROM {DB_TABLE_TRACK_CREDITS} ta "
+            f"JOIN {DB_TABLE_ARTISTS} a ON a.item_id = ta.artist_id "
+            f"JOIN {DB_TABLE_TRACKS} t ON t.item_id = ta.track_id "
+            "WHERE ta.role = :composer AND a.name LIKE '% & %'",
+            {"composer": ArtistRole.COMPOSER.value},
+            limit=0,
+        )
+        track_ids = {
+            row["track_id"]
+            for row in rows
+            if (name := joined_composer_name(row["artist_name"], row["track_name"]))
+            and names_composer(name)
+        }
+        if not track_ids:
+            return
+        others = [
+            x
+            for x in await self.mass.music.artists.get_library_composers(with_mbid=True)
+            if x.mbid != composer.mbid
+        ]
+        for track_id in track_ids:
+            stored = await self.get_library_item(track_id)
+            track = deepcopy(stored)
+            joined_names = self._replace_joined_composers(
+                track,
+                {
+                    name: composer
+                    for name, candidate in self._joined_composer_candidates(track).items()
+                    if names_composer(candidate)
+                    and not any(is_named_by(candidate, x) for x in others)
+                },
+            )
+            if not joined_names:
+                continue
+            # removed first, so the re-save gives the work the composer of its tracks
+            await self._remove_joined_artists(
+                stored,
+                int(stored.work.item_id) if stored.work else None,
+                joined_names,
+                main_artists=any(
+                    x.name not in joined_names for x in [*stored.artists, *track.artists]
+                ),
+            )
+            await self.update_item_in_library(track_id, track)
 
     async def get_preview_url(self, provider_instance_id_or_domain: str, item_id: str) -> str:
         """Return url to short preview sample."""
@@ -2208,14 +2277,7 @@ class TracksController(MediaControllerBase[Track]):
         The composer also takes the place of the joined name among the main artists.
         Return the joined names that were replaced.
         """
-        work = track.work if isinstance(track.work, Work) else None
-        composers = [x.artist for x in track.credits if x.role == ArtistRole.COMPOSER]
-        candidates = {
-            artist.name: candidate
-            for artist in [*composers, *(work.composers if work else [])]
-            if (candidate := joined_composer_name(artist.name, track.name))
-        }
-        if not candidates:
+        if not (candidates := self._joined_composer_candidates(track)):
             return set()
         replacements: dict[str, Artist] = {}
         for name, candidate in candidates.items():
@@ -2226,8 +2288,25 @@ class TracksController(MediaControllerBase[Track]):
             # a name several composers share, such as "Strauss", stays as it is
             if len(matches) == 1:
                 replacements[name] = matches[0]
+        return self._replace_joined_composers(track, replacements)
+
+    @staticmethod
+    def _joined_composer_candidates(track: Track) -> dict[str, str]:
+        """Return the joined composer names of a track with the composer each starts with."""
+        work = track.work if isinstance(track.work, Work) else None
+        composers = [x.artist for x in track.credits if x.role == ArtistRole.COMPOSER]
+        return {
+            artist.name: candidate
+            for artist in [*composers, *(work.composers if work else [])]
+            if (candidate := joined_composer_name(artist.name, track.name))
+        }
+
+    @staticmethod
+    def _replace_joined_composers(track: Track, replacements: dict[str, Artist]) -> set[str]:
+        """Credit each composer in place of its joined name on a track, return the names."""
         if not replacements:
             return set()
+        work = track.work if isinstance(track.work, Work) else None
         track.credits = [
             replace(x, artist=replacements[x.artist.name])
             if x.role == ArtistRole.COMPOSER and x.artist.name in replacements

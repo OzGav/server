@@ -15,19 +15,19 @@ from music_assistant_models.enums import ArtistEntityType
 from music_assistant_models.helpers import create_safe_string, create_sort_name
 from music_assistant_models.media_items.metadata import LifeSpan
 
-from music_assistant.providers.musicbrainz.models import MusicBrainzArtist, MusicBrainzWork
-
 from .constants import _IMAGEPROXY_CONTENT_TYPES
 
 if TYPE_CHECKING:
     from music_assistant_models.media_items import Artist
+
+    from music_assistant.providers.musicbrainz.models import MusicBrainzArtist, MusicBrainzWork
 
 
 def fill_artist_from_musicbrainz(
     artist: Artist, mb_artist: MusicBrainzArtist, replace: bool = False
 ) -> None:
     """
-    Fill an artist's empty entity type and life span in from its MusicBrainz artist.
+    Fill an artist's empty entity type, life span and country in from its MusicBrainz artist.
 
     :param artist: The artist to fill in.
     :param mb_artist: Its MusicBrainz artist.
@@ -42,6 +42,8 @@ def fill_artist_from_musicbrainz(
         metadata.life_span = LifeSpan(
             begin=life_span.begin, end=life_span.end, ended=life_span.ended
         )
+    if not metadata.country:
+        metadata.country = mb_artist.country_code
 
 
 def musicbrainz_work_name(mb_work: MusicBrainzWork, language: str = "en") -> str:

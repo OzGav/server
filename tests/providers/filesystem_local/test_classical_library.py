@@ -382,6 +382,38 @@ async def test_work_takes_the_catalog_numbers_of_its_title(
     assert work.catalog_numbers == ["op. 8 no. 1", "RV 269"]
 
 
+@pytest.mark.parametrize(
+    "works",
+    [
+        ["Madrigal, SV 120 {token}", "Madrigal, SV 143 {token}"],
+        ["Orchestersuite Nr. 3 D-Dur, BWV 1068 {token}: II. Air"],
+    ],
+)
+async def test_several_work_ids_give_no_work_and_stay_on_the_track(
+    provider: LocalFileSystemProvider, works: list[str]
+) -> None:
+    """
+    A file tagged with several work ids gets no work from its tags, the ids stay on it.
+
+    This holds whether or not the ids pair up with the work titles.
+    """
+    token = _token()
+    work_ids = {"51bb8773-8492-3773-ab88-73a89c922c3d", "b58b7e13-17df-4122-82de-8031081d9647"}
+    path = f"{token}/Album/01.flac"
+    tags = _tags(
+        path,
+        album=f"Album {token}",
+        composer=f"Composer {token}",
+        work=[work.format(token=token) for work in works],
+        musicbrainzworkid=sorted(work_ids),
+    )
+
+    track = await _add_track(provider, path, tags)
+
+    assert track.work is None
+    assert _work_ids(track) == work_ids
+
+
 async def test_movement_tags_win_over_a_split_movement_title(
     provider: LocalFileSystemProvider, mass: MusicAssistant
 ) -> None:

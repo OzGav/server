@@ -117,6 +117,13 @@ class MusicBrainzLifeSpan(DataClassDictMixin):
 
 
 @dataclass
+class MusicBrainzArea(DataClassDictMixin):
+    """Model for a (basic) Area object from MusicBrainz."""
+
+    iso_3166_2_codes: list[str] | None = None  # set when the area is a country subdivision
+
+
+@dataclass
 class MusicBrainzUrl(DataClassDictMixin):
     """Model for a Url object embedded in a MusicBrainz relation."""
 
@@ -215,6 +222,19 @@ class MusicBrainzArtist(DataClassDictMixin):
     genres: list[MusicBrainzTag] | None = None
     relations: list[MusicBrainzRelation] | None = None
     life_span: MusicBrainzLifeSpan | None = None
+    country: str | None = None  # ISO 3166-1 code, only set when the area is a whole country
+    area: MusicBrainzArea | None = None
+
+    @property
+    def country_code(self) -> str | None:
+        """Return the ISO 3166-1 code of the country the artist is from, if known."""
+        if self.country:
+            # Worldwide and Europe are MusicBrainz pseudo countries
+            return None if self.country in ("XW", "XE") else self.country
+        # a subdivision code such as GB-ENG starts with its country's code
+        if self.area and self.area.iso_3166_2_codes:
+            return self.area.iso_3166_2_codes[0].split("-")[0]
+        return None
 
     @classmethod
     def from_raw(cls, data: Any) -> MusicBrainzArtist:
@@ -302,6 +322,17 @@ class MusicBrainzRecording(DataClassDictMixin):
                 key = (relation.artist.id, relation.type, frozenset(relation.attributes))
                 unique.setdefault(key, relation)
         return list(unique.values())
+
+    @property
+    def performance_work_ids(self) -> list[str]:
+        """Return the ids of the works the recording is a performance of, each once."""
+        return list(
+            dict.fromkeys(
+                relation.work.id
+                for relation in self.relations or ()
+                if relation.type == "performance" and relation.work
+            )
+        )
 
     @property
     def recording_year(self) -> int | None:

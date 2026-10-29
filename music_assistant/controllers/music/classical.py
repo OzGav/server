@@ -302,12 +302,14 @@ class ClassicalController:
             {x for item_id in ids for x in works[item_id]}
         )
         fanarts = await self._artist_fanarts(ids)
+        countries = await self._artist_countries(ids)
         return [
             ClassicalComposer(
                 artist=cast("ArtistSummary", artist),
                 fanart=fanarts.get(int(artist.item_id)),
                 work_count=len(works[int(artist.item_id)]),
                 recording_count=sum(len(performances[x]) for x in works[int(artist.item_id)]),
+                country=countries.get(int(artist.item_id)),
             )
             for artist in await self._items(self.mass.music.artists, ids)
         ]
@@ -697,8 +699,8 @@ class ClassicalController:
 
         While any count is above zero, tracks under Other tracks may still move into their works.
         ``albums`` counts the albums still to identify, ``recordings`` the tracks whose
-        recording is still to read, ``works`` the works still to look up. All zero means
-        linking is done, or is not running.
+        recording is still to read, ``works`` and ``composers`` the works and composers still
+        to look up. All zero means linking is done, or is not running.
         """
         return await self.mass.metadata.get_classical_link_progress()
 
@@ -797,6 +799,19 @@ class ClassicalController:
         )
         by_id = {int(item.item_id): item for item in items}
         return [by_id[item_id] for item_id in ids if item_id in by_id]
+
+    async def _artist_countries(self, artist_ids: Sequence[int]) -> dict[int, str]:
+        """Return the country code of the given library artists that have one, by artist id."""
+        if not artist_ids:
+            return {}
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT item_id, json_extract(metadata, '$.country') AS country "
+            f"FROM {DB_TABLE_ARTISTS} WHERE item_id IN :artist_ids "
+            "AND json_extract(metadata, '$.country') IS NOT NULL",
+            {"artist_ids": list(artist_ids)},
+            limit=0,
+        )
+        return {int(row["item_id"]): row["country"] for row in rows}
 
     async def _artist_fanarts(self, artist_ids: Sequence[int]) -> dict[int, MediaItemImage]:
         """Return the fanart to show of the given library artists, by artist id."""
