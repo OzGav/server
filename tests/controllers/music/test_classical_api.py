@@ -1554,7 +1554,7 @@ class TestOperaActs:
 @pytest.fixture(scope="class", name="tagged_act_library")
 async def tagged_act_library_fixture(music_mass_class: MusicAssistant) -> _Library:
     """Return a class-scoped library of an opera whose one held act has no MusicBrainz numbers."""
-    lib = await _new_library(music_mass_class, ("puccini", "karajan", "levine"))
+    lib = await _new_library(music_mass_class, ("puccini", "karajan", "levine", "ozawa"))
     act_mbids = [str(uuid4()) for _ in range(2)]
     await _add_work(lib, "Opera", "puccini", name="La rondine", work_type=WorkType.OPERA)
     await _add_work(
@@ -1565,6 +1565,10 @@ async def tagged_act_library_fixture(music_mass_class: MusicAssistant) -> _Libra
         ("full_2", "karajan", 2, "Chi il bel sogno"),
         ("full_3", "karajan", 3, "Bevo al tuo fresco sorriso"),
         ("part_2", "levine", 2, "Chi il bel sogno"),
+        # a recording whose tracks are not in score order
+        ("out_3", "ozawa", 3, "Bevo al tuo fresco sorriso"),
+        ("out_1", "ozawa", 1, "Nel cielo"),
+        ("out_2", "ozawa", 2, "Chi il bel sogno"),
     ):
         await _add_track(
             lib, key, "Act II", conductor, movement=movement, movement_name=movement_name
@@ -1617,6 +1621,8 @@ class TestTaggedActNumbers:
         } == {
             "Karajan": ([2], [], [2001, 2002, 2003]),
             "Levine": ([2], [2], [2002]),
+            # the tracks follow the numbers of the act, not the order of the album
+            "Ozawa": ([2], [], [2001, 2002, 2003]),
         }
 
 

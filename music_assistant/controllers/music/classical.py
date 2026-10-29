@@ -1506,10 +1506,20 @@ def _build_recording(
     movement_tracks.sort(
         key=lambda x: (x.movement_number is None, _movement_order(x.movement_number or 0))
     )
-    if own_part:
+    if own_part and in_part:
+        act_numbers = {int(x.item_id): x.movement_number for x in movement_tracks}
         for track in movement_tracks:
             if inner := in_part.get(int(track.item_id)):
                 track.movement_number = _in_group(own_part.number, inner.number)
+        # within a part the tracks follow its own movements, those showing none after them
+        movement_tracks.sort(
+            key=lambda x: (
+                act_numbers[int(x.item_id)] is None,
+                _movement_order(act_numbers[int(x.item_id)] or 0),
+                int(x.item_id) not in in_part,
+                _movement_order(x.movement_number or 0),
+            )
+        )
     return Recording(
         key=performance.key,
         work=work,
