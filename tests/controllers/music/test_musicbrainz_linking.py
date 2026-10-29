@@ -621,6 +621,37 @@ async def test_release_tracks_skip_a_length_or_title_mismatch() -> None:
     assert harness.updated_tracks() == []
 
 
+async def test_release_tracks_match_a_movement_title_by_a_shared_isrc() -> None:
+    """A track titled by its movement alone is the recording at its position sharing its ISRC."""
+    db_tracks = [
+        _library_track("t1", 1, name="I. Allegro con brio", isrcs=["DEF058130201"]),
+        _library_track("t2", 2, name="II. Andante con moto", duration=200, isrcs=["DEF058130202"]),
+    ]
+    release = _release(
+        [
+            _recording(
+                RECORDING_ID,
+                "Symphony no. 5 in C minor, op. 67: I. Allegro con brio",
+                238000,
+                "DEF058130201",
+            ),
+            # the same ISRC but 20 seconds longer is not the track
+            _recording(
+                OTHER_RECORDING_ID,
+                "Symphony no. 5 in C minor, op. 67: II. Andante con moto",
+                220000,
+                "DEF058130202",
+            ),
+        ]
+    )
+    with _album_harness() as harness:
+        await harness.ctrl.link_album_tracks(_library_album(), db_tracks, release)
+
+    assert [(track.item_id, track.mbid) for track in harness.updated_tracks()] == [
+        ("t1", RECORDING_ID)
+    ]
+
+
 async def test_release_tracks_keep_an_existing_recording_id() -> None:
     """A recording id the library track already carries wins, its ISRCs are still filled in."""
     db_tracks = [_library_track("t1", 1, mbid=OTHER_RECORDING_ID)]
@@ -830,18 +861,12 @@ async def test_release_tracks_of_local_files_are_not_matched_in_order() -> None:
 
 
 TIDAL_TRACK = ProviderMapping(item_id="td", provider_domain="tidal", provider_instance="td_1")
-
-
 SPOTIFY_LINKED_ALBUM = ProviderMapping(
     item_id="7eyQXxuf2nGj9d2367Gi5f", provider_domain="spotify", provider_instance="spotify_1"
 )
-
-
 TIDAL_LINKED_ALBUM = ProviderMapping(
     item_id="79280548", provider_domain="tidal", provider_instance="tidal_1"
 )
-
-
 CREDO_RECORDING_ID = "7f6e5d4c-3b2a-4c1d-8e0f-a1b2c3d4e5f6"
 
 

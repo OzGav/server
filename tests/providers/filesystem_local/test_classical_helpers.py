@@ -92,80 +92,102 @@ def test_period_from_genres(genres: list[str], expected: Period | None) -> None:
     assert period_from_genres(genres) == expected
 
 
-def test_no_work_without_a_work_tag() -> None:
-    """A track without a work tag has no work, even with a MusicBrainz work id."""
-    assert parse_track_work(_tags(musicbrainzworkid=[WORK_ID])) is None
+@pytest.mark.parametrize(
+    ("tags", "expected"),
+    [
+        ({"musicbrainzworkid": [WORK_ID]}, None),
+        (
+            {"work": ["Symphony No. 5"], "musicbrainzworkid": [WORK_ID]},
+            TrackWork("Symphony No. 5", WORK_ID),
+        ),
+        (
+            {
+                "work": ["Symphony No. 5", "Symphony No. 5: I. Allegro con brio"],
+                "musicbrainzworkid": [WORK_ID, MOVEMENT_WORK_ID],
+                "movementname": "Allegro con brio",
+            },
+            TrackWork("Symphony No. 5", WORK_ID),
+        ),
+        (
+            {
+                "work": ["Symphony No. 5"],
+                "musicbrainzworkid": [WORK_ID, MOVEMENT_WORK_ID],
+                "movement": "1",
+            },
+            TrackWork("Symphony No. 5"),
+        ),
+        (
+            {
+                "work": ["Pictures at an Exhibition", "Pictures at an Exhibition (orch. Ravel)"],
+                "musicbrainzworkid": [WORK_ID, MOVEMENT_WORK_ID],
+            },
+            TrackWork("Pictures at an Exhibition (orch. Ravel)", MOVEMENT_WORK_ID),
+        ),
+        (
+            {"title": "Symphony No. 9: 4. Presto", "work": ["Symphony No. 5"]},
+            TrackWork("Symphony No. 5"),
+        ),
+    ],
+    ids=[
+        "no work tag",
+        "single work",
+        "movement tags pick the first work",
+        "id left off when the counts differ",
+        "no movement tags pick the last work",
+        "work tag wins over the title",
+    ],
+)
+def test_work_tag_gives_the_work(tags: dict[str, Any], expected: TrackWork | None) -> None:
+    """
+    The work tag gives the work, with its MusicBrainz id when the ids pair up with the works.
 
-
-def test_single_work_with_its_id() -> None:
-    """A single work tag is the work, with its MusicBrainz id."""
-    work = parse_track_work(_tags(work=["Symphony No. 5"], musicbrainzworkid=[WORK_ID]))
-    assert work == TrackWork("Symphony No. 5", WORK_ID)
-
-
-def test_movement_tags_pick_the_most_general_work() -> None:
-    """With movement tags the track belongs to the first (most general) work."""
-    work = parse_track_work(
-        _tags(
-            work=["Symphony No. 5", "Symphony No. 5: I. Allegro con brio"],
-            musicbrainzworkid=[WORK_ID, MOVEMENT_WORK_ID],
-            movementname="Allegro con brio",
-        )
-    )
-    assert work == TrackWork("Symphony No. 5", WORK_ID)
-
-
-def test_movement_tags_leave_the_id_off_when_the_counts_differ() -> None:
-    """Work ids only pair up with the work values when there are as many of each."""
-    work = parse_track_work(
-        _tags(
-            work=["Symphony No. 5"],
-            musicbrainzworkid=[WORK_ID, MOVEMENT_WORK_ID],
-            movement="1",
-        )
-    )
-    assert work == TrackWork("Symphony No. 5")
-
-
-def test_without_movement_tags_the_most_specific_work_is_picked() -> None:
-    """Without movement tags the track belongs to the last (most specific) work."""
-    work = parse_track_work(
-        _tags(
-            work=["Pictures at an Exhibition", "Pictures at an Exhibition (orch. Ravel)"],
-            musicbrainzworkid=[WORK_ID, MOVEMENT_WORK_ID],
-        )
-    )
-    assert work == TrackWork("Pictures at an Exhibition (orch. Ravel)", MOVEMENT_WORK_ID)
+    Without a work tag there is no work, even with a work id. With movement tags the track
+    belongs to the first (most general) work, without them to the last (most specific) one.
+    The track title never names the work when there is a work tag.
+    """
+    assert parse_track_work(_tags(**tags)) == expected
 
 
 @pytest.mark.parametrize(
-    ("title", "expected"),
+    ("tags", "expected"),
     [
         (
-            "Orchestersuite Nr. 3 D-Dur, BWV 1068: II. Air",
+            {"work": ["Orchestersuite Nr. 3 D-Dur, BWV 1068: II. Air"]},
             TrackWork("Orchestersuite Nr. 3 D-Dur, BWV 1068", None, "II. Air", 2),
         ),
         (
-            "Water Music, Suite no. 1 in F major, HWV 348: V. Air. Presto",
+            {"work": ["Water Music, Suite no. 1 in F major, HWV 348: V. Air. Presto"]},
             TrackWork("Water Music, Suite no. 1 in F major, HWV 348", None, "V. Air. Presto", 5),
         ),
         (
-            "Symphony No. 9: 4. Presto",
+            {"work": ["Symphony No. 9: 4. Presto"]},
             TrackWork("Symphony No. 9", None, "4. Presto", 4),
         ),
         (
-            "Five Mystical Songs: No. 4. The Call",
+            {"work": ["Five Mystical Songs: No. 4. The Call"]},
             TrackWork("Five Mystical Songs", None, "No. 4. The Call", 4),
         ),
         (
-            "Work: Mvt. 3 Andantino",
+            {"work": ["Work: Mvt. 3 Andantino"]},
             TrackWork("Work", None, "Mvt. 3 Andantino", 3),
         ),
+        (
+            {"title": "Symphony No. 5 in C minor, Op. 67: I. Allegro con brio"},
+            TrackWork("Symphony No. 5 in C minor, Op. 67", None, "I. Allegro con brio", 1),
+        ),
+        ({"title": "Adagio for Strings"}, None),
+        ({"title": "Messiah: Hallelujah"}, None),
     ],
 )
-def test_numbered_movement_title_links_the_parent_work(title: str, expected: TrackWork) -> None:
-    """A work titled as a numbered movement of a parent work links the parent instead."""
-    assert parse_track_work(_tags(work=[title], musicbrainzworkid=[WORK_ID])) == expected
+def test_numbered_movement_title_links_the_parent_work(
+    tags: dict[str, Any], expected: TrackWork | None
+) -> None:
+    """
+    A work tag, or without one the track title, naming a numbered movement links the parent work.
+
+    Without a work tag, a title that names no numbered movement gives no work.
+    """
+    assert parse_track_work(_tags(**tags, musicbrainzworkid=[WORK_ID])) == expected
 
 
 @pytest.mark.parametrize(

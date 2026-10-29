@@ -7,7 +7,9 @@ names as its performers get their MusicBrainz id, and the track gets the year it
 credited artist is recognised on the recording by its name, its MusicBrainz id, or the music
 provider artist MusicBrainz links it to. A track whose only performers are its track artists gets
 their exact performing roles. Credits are never renamed, changed or removed, and a performer the
-track does not credit is never added.
+track does not credit is only added to a track that credits no artist but its composers. Such a
+track gets the performers the recording names, taken from the library's own artists or added to the
+library when MusicBrainz links them to a loaded music provider.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
 
     from music_assistant import MusicAssistant
     from music_assistant.providers.musicbrainz.models import (
+        MusicBrainzArtist,
         MusicBrainzRecording,
         MusicBrainzRelation,
     )
@@ -51,7 +54,8 @@ class PerformerEnrichmentMixin:
     MusicBrainz performer enrichment for the MetaDataController.
 
     Expects to be mixed with a class providing ``mass``, ``logger``,
-    ``schedule_update_metadata`` and ``_musicbrainz_provider``.
+    ``schedule_update_metadata``, ``_musicbrainz_provider``, ``_match_library_artist`` and
+    ``_add_musicbrainz_artist``.
     """
 
     if TYPE_CHECKING:
@@ -63,6 +67,10 @@ class PerformerEnrichmentMixin:
         ) -> None: ...
 
         def _musicbrainz_provider(self) -> MusicbrainzProvider | None: ...
+
+        async def _match_library_artist(self, mb_artist: MusicBrainzArtist) -> Artist | None: ...
+
+        async def _add_musicbrainz_artist(self, mb_artist: MusicBrainzArtist) -> Artist | None: ...
 
     async def _link_album_performers(self, album: Album) -> bool:
         """Read the recordings of an album's classical tracks, return whether it could."""
@@ -134,6 +142,7 @@ class PerformerEnrichmentMixin:
                 if credit.role == ArtistRole.MAIN_ARTIST:
                     main_artists[credit.artist.item_id] = (artist, naming)
             await self._credit_performing_main_artists(track, main_artists)
+            await self._credit_recording_performers(track, relations)
         await self.mass.music.tracks.mark_recording_read(
             int(track.item_id), recording.recording_year if recording else None
         )
@@ -239,6 +248,36 @@ class PerformerEnrichmentMixin:
                     )
                 )
         await self.mass.music.tracks.add_credits(int(track.item_id), new_credits)
+
+    async def _credit_recording_performers(
+        self, track: Track, relations: Sequence[MusicBrainzRelation]
+    ) -> None:
+        """Credit a track naming no artist but its composers with its recording's performers."""
+        composers = {x.artist.item_id for x in track.credits if x.role == ArtistRole.COMPOSER}
+        track_credits = _credits_with_main_artists(track)
+        if any(
+            credit.role in PERFORMING_ROLES
+            or (credit.role == ArtistRole.MAIN_ARTIST and credit.artist.item_id not in composers)
+            for credit in track_credits
+        ):
+            return
+        new_credits: list[Credit] = []
+        for position, relation in enumerate(relations):
+            assert relation.artist is not None  # for type checking
+            assert relation.performing_role is not None  # for type checking
+            if not (artist := await self._match_library_artist(relation.artist)):
+                artist = await self._add_musicbrainz_artist(relation.artist)
+            if artist:
+                new_credits.append(
+                    Credit(
+                        artist=ItemMapping.from_item(artist),
+                        role=relation.performing_role,
+                        instrument=relation.performing_instrument,
+                        position=position,
+                    )
+                )
+        if new_credits:
+            await self.mass.music.tracks.add_credits(int(track.item_id), new_credits)
 
 
 async def _get_recording(

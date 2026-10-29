@@ -53,6 +53,7 @@ def _provider(responses: dict[str, Any]) -> tuple[MusicbrainzProvider, AsyncMock
     """Return a MusicbrainzProvider answering the endpoints starting with the given keys."""
     with patch.object(MusicbrainzProvider, "__init__", lambda *_a, **_kw: None):
         provider = MusicbrainzProvider.__new__(MusicbrainzProvider)
+    provider._logged_hints = set()
 
     async def _answer(endpoint: str, **_kwargs: Any) -> Any:
         return next((value for key, value in responses.items() if endpoint.startswith(key)), None)

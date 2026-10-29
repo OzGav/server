@@ -60,14 +60,14 @@ ROMAN_NUMERALS = (
 # catalog prefixes such as "BWV" or "op.", the single letter ones (Köchel, Deutsch, ...)
 # only after a comma so "Symphony no. 5 in D minor" or "Livre I" never count
 _CATALOG_PREFIXES = (
-    "BWV|BuxWV|CD|FP|GWV|Hob|HWV|Kk|KV|MWV|[Oo]pus|[Oo]p|RCT|RV|SV|Sz|TrV|TWV|WAB|WoO|WWV|ZT"
+    "BWV|BuxWV|CD|FP|GWV|Hob|HWV|Kk|KV|MWV|[Oo]pus|[Oo]p|RCT|RV|SV|Sz|TH|TrV|TWV|WAB|WD|WoO|WWV|ZT"
 )
 _SINGLE_LETTER_CATALOG_PREFIXES = "DHKLPSTZ"
 # a catalog number such as "op. 8 no. 1", "K. 297c/299", "Hob. XVI:52" or "TWV 51:D7"
 _CATALOG_NUMBER = re.compile(
     rf"(?:(?<=, )[{_SINGLE_LETTER_CATALOG_PREFIXES}]|\b(?:{_CATALOG_PREFIXES}))\.?\s?"
     r"(?:[IVXL]+:|\d+:[A-Z]?)?\d+[A-Za-z]*(?:/\d+[A-Za-z]*)?"
-    r"(?:\s(?:[Nn]o\.|[Nn]r\.|[Nn]°)\s?\d+)?"
+    r"(?:,?\s(?:[Nn]o\.|[Nn]r\.|[Nn]°)\s?\d+)?"
 )
 
 # a movement marked as such, as in "Mvt. III-Rondo" or "Mvt. 3 The Young Prince"
@@ -369,6 +369,15 @@ def parse_catalog_numbers(title: str) -> list[str]:
     :param title: The title of a work, such as "Symphony no. 5 in C minor, op. 67".
     """
     return list(dict.fromkeys(match.group() for match in _CATALOG_NUMBER.finditer(title)))
+
+
+def names_classical_work(title: str) -> bool:
+    """
+    Return whether a title names a classical form or a catalog number.
+
+    :param title: The title of a work, such as "Symphony No. 5" or "Suite, BWV 1068".
+    """
+    return _FORM_WORD.search(title) is not None or _CATALOG_NUMBER.search(title) is not None
 
 
 def set_track_work(track: Track, track_work: TrackWork) -> None:

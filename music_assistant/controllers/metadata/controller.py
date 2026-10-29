@@ -452,6 +452,8 @@ class MetaDataController(
         """
         if isinstance(item, Artist):
             merge_mbid: str | None = None
+            # an id the artist came with, such as a file's, is read here for the first time
+            own_mbid = item.mbid if item.metadata.last_musicbrainz_lookup is None else None
             reliable = bool(item.mbid)
             if not item.mbid and (found := await self._get_artist_mbid(item)):
                 item.mbid, by_name = found
@@ -465,9 +467,9 @@ class MetaDataController(
             await self.mass.music.artists.update_item_in_library(item.item_id, item)
             # an id a name search found may belong to a namesake, so only a reliable one merges
             if merge_mbid:
-                await self.mass.music.artists.merge_library_artists_by_mbid(
-                    int(item.item_id), merge_mbid
-                )
+                await self._merge_identified_artist(int(item.item_id), merge_mbid)
+            elif own_mbid:
+                await self._confirm_if_composer(int(item.item_id), own_mbid)
         elif isinstance(item, Album):
             await self._link_album_to_musicbrainz(item)
             await self.mass.music.albums.update_item_in_library(item.item_id, item)

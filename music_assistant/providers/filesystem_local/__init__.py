@@ -114,10 +114,15 @@ from music_assistant.helpers.util import (
     TaskManager,
     detect_charset,
     is_disc_dir,
+    is_placeholder_artist,
     parse_title_and_version,
     try_parse_int,
 )
-from music_assistant.helpers.work_titles import parse_catalog_numbers
+from music_assistant.helpers.work_titles import (
+    TrackWork,
+    names_classical_work,
+    parse_catalog_numbers,
+)
 from music_assistant.models.music_provider import MusicProvider
 
 from .constants import (
@@ -179,7 +184,6 @@ from .helpers import (
     get_valid_isrcs,
     is_image_file,
     is_metadata_file,
-    is_placeholder_artist,
     open_real_path,
     parse_track_work,
     performer_credit_role,
@@ -2604,7 +2608,6 @@ class LocalFileSystemProvider(MusicProvider):
                     return False
                 tags = await self._parse_tags(item)
                 track = await self._parse_track(item, tags)
-                await self._set_track_work(track, tags)
                 # TODO: implement favorite status based on rating ?
                 await self.mass.music.tracks.add_item_to_library(
                     track, overwrite_existing=prev_checksum is not None
@@ -3103,7 +3106,11 @@ class LocalFileSystemProvider(MusicProvider):
                 name, sort_name=sort_name, mbid=mbid, representative_track=file_item.relative_path
             )
             track.artists.append(artist)
-        track.credits = await self._parse_track_credits(track, tags)
+        track_work = parse_track_work(tags)
+        # Picard writes credit and work tags for any recording, so pop files carry them too
+        classical_file = await self._is_classical_file(tags, track_work)
+        if classical_file:
+            track.credits = await self._parse_track_credits(track, tags)
 
         # handle embedded cover image
         if tags.has_cover_image:
@@ -3141,13 +3148,17 @@ class LocalFileSystemProvider(MusicProvider):
         track.movement_name = tags.movement_name
         track.movement_number = tags.movement_number
         track.movement_total = tags.movement_total
-        track_work = parse_track_work(tags)
-        if track_work:
+        # only a classical file takes the work and movement its titles name, as a pop title can
+        # read as a numbered movement
+        if track_work and classical_file:
             track.movement_name = track.movement_name or track_work.movement_name
             track.movement_number = track.movement_number or track_work.movement_number
+            # a recording of several works gets its work from their ids, on MusicBrainz
+            if len(tags.musicbrainz_workids) < 2:
+                self._set_track_work(track, track_work)
         # the MusicBrainz work ids the linked work does not carry stay on the track for
         # enrichment, which may hold several as a recording can be linked to several works
-        linked_work_id = track_work.mbid if track_work else None
+        linked_work_id = track.work.mbid if isinstance(track.work, Work) else None
         track.external_ids.update(
             (ExternalID.MB_WORK, work_id)
             for work_id in tags.musicbrainz_workids
@@ -3375,11 +3386,30 @@ class LocalFileSystemProvider(MusicProvider):
             artist.mbid = mbid
         return artist
 
-    async def _set_track_work(self, track: Track, tags: AudioTags) -> None:
-        """Link a track to its work, adding the work to the library when needed."""
-        if not (track_work := parse_track_work(tags)):
-            return
-        work = Work(
+    async def _is_classical_file(self, tags: AudioTags, track_work: TrackWork | None) -> bool:
+        """
+        Return whether a file is classical by its classical tag, work title or genre tags.
+
+        :param tags: The tags of the track.
+        :param track_work: The work the tags name, if any.
+        """
+        return (
+            tags.is_classical
+            or (track_work is not None and names_classical_work(track_work.name))
+            or (
+                bool(tags.genres)
+                and await self.mass.music.genres.names_classical_genre(tags.genres)
+            )
+        )
+
+    def _set_track_work(self, track: Track, track_work: TrackWork) -> None:
+        """
+        Set the work a track's tags name, added with the track when the tags give its id.
+
+        :param track: The track parsed from the file.
+        :param track_work: The work the tags name.
+        """
+        track.work = Work(
             item_id=track_work.name,
             provider=self.instance_id,
             name=track_work.name,
@@ -3388,9 +3418,7 @@ class LocalFileSystemProvider(MusicProvider):
             catalog_numbers=parse_catalog_numbers(track_work.name),
         )
         if track_work.mbid:
-            work.mbid = track_work.mbid
-        library_work = await self.mass.music.works.add_item_to_library(work)
-        track.work = ItemMapping.from_item(library_work)
+            track.work.mbid = track_work.mbid
 
     def _parse_audiobook_artist(self, name: str, artist_type: ArtistType) -> Artist:
         """

@@ -1822,11 +1822,15 @@ async def _linked_albums(release: MusicBrainzRelease) -> set[tuple[str, str]]:
 
 
 def _recording_matches_track(release_track: MusicBrainzTrack, track: Track) -> bool:
-    """Return whether a release track's recording is the given library track, by title."""
+    """Return whether a release track's recording is the given library track, by title or ISRC."""
     recording = release_track.recording
     if recording is None or _lengths_agree(release_track, track) is False:
         return False
-    return compare_strings(recording.title, track.name, strict=False)
+    # a streaming title may name only the movement ("I. Allegro con brio") where MusicBrainz
+    # names the work as well, so a shared ISRC identifies the recording too
+    return compare_strings(recording.title, track.name, strict=False) or bool(
+        _recording_isrcs(recording) & _isrcs(track)
+    )
 
 
 def _lengths_agree(release_track: MusicBrainzTrack, track: Track) -> bool | None:

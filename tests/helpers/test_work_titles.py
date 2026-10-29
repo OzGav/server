@@ -9,6 +9,7 @@ from music_assistant.helpers.work_titles import (
     is_work_title,
     joined_composer_name,
     parent_work_name,
+    parse_catalog_numbers,
     parse_work_title,
     part_key,
     part_label,
@@ -77,61 +78,90 @@ def test_work_and_movement(title: str, composer: str, expected: TrackWork) -> No
         (
             "La bohème, Act II: Viva Parpignol!",
             PUCCINI,
-            TrackWork("La bohème, Act II", None, "Viva Parpignol!", None),
+            TrackWork("La bohème, Act II", None, "Viva Parpignol!"),
         ),
         (
             "The Nutcracker, Op. 71, Act II: No. 13, Waltz of the Flowers",
             "Pyotr Ilyich Tchaikovsky",
-            TrackWork(
-                "The Nutcracker, Op. 71, Act II",
-                None,
-                "No. 13, Waltz of the Flowers",
-                None,
-            ),
+            TrackWork("The Nutcracker, Op. 71, Act II", None, "No. 13, Waltz of the Flowers"),
         ),
         (
             'Messiah, HWV 56, Pt. 2: "Hallelujah" (Chorus)',
             "Georg Friedrich Händel",
-            TrackWork("Messiah, HWV 56, Pt. 2", None, '"Hallelujah" (Chorus)', None),
+            TrackWork("Messiah, HWV 56, Pt. 2", None, '"Hallelujah" (Chorus)'),
         ),
         (
-            'La Fanciulla del West, Act I: "Quello che tacete"',
+            "Swan Lake, Act II, Op. 20, TH 12: No. 10, Scene",
+            "Pyotr Ilyich Tchaikovsky",
+            TrackWork("Swan Lake, Act II, Op. 20, TH 12", None, "No. 10, Scene"),
+        ),
+        (
+            "La bohème, SC 67 / Act 1: Che gelida manina",
             PUCCINI,
-            TrackWork(
-                "La Fanciulla del West, Act I",
-                None,
-                '"Quello che tacete"',
-                None,
-            ),
+            TrackWork("La bohème, SC 67 / Act 1", None, "Che gelida manina"),
         ),
         (
-            "The Valkyrie, WWV 86b, Act III: Ride of the Valkyries",
-            "Richard Wagner",
-            TrackWork(
-                "The Valkyrie, WWV 86b, Act III",
-                None,
-                "Ride of the Valkyries",
-                None,
-            ),
+            "Messiah, HWV 56 / Part 2: Hallelujah",
+            "Georg Friedrich Händel",
+            TrackWork("Messiah, HWV 56 / Part 2", None, "Hallelujah"),
+        ),
+        (
+            "St. Matthew Passion, BWV 244, Anhang: Aria",
+            "Johann Sebastian Bach",
+            TrackWork("St. Matthew Passion, BWV 244, Anhang", None, "Aria"),
         ),
         (
             "Symphony No. 3 Part 2: I. Lento",
             None,
             TrackWork("Symphony No. 3 Part 2", None, "I. Lento", 1),
         ),
+        (
+            "La bohème, Act II, Scene 1: Viva Parpignol!",
+            PUCCINI,
+            TrackWork("La bohème, Act II, Scene 1", None, "Viva Parpignol!"),
+        ),
+        (
+            "The Nutcracker, Act II, Scene 3, Op. 71, TH 14: No. 15, Pas de deux",
+            "Pyotr Ilyich Tchaikovsky",
+            TrackWork(
+                "The Nutcracker, Act II, Scene 3, Op. 71, TH 14", None, "No. 15, Pas de deux"
+            ),
+        ),
     ],
 )
 def test_act_or_part_comes_with_its_work(
     title: str, composer: str | None, expected: TrackWork
 ) -> None:
-    """A work that is an act or part, after a comma, comes with the work it is part of."""
+    """A work that is an act or part, after a comma or slash, comes with the work it is part of."""
     assert parse_work_title(title, composer) == expected
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        (
+            "Tchaikovsky: Swan Lake Ballet, Op. 20: Act 1, No. 2 Waltz: Tempo di valse",
+            TrackWork("Swan Lake Ballet, Op. 20, Act 1", None, "No. 2 Waltz: Tempo di valse"),
+        ),
+        (
+            "Swan Lake, Op. 20: Act 2: No. 10 Scene",
+            TrackWork("Swan Lake, Op. 20, Act 2", None, "No. 10 Scene"),
+        ),
+        (
+            "Symphony No. 5 in C minor, Op. 67: I. Allegro con brio: Coda",
+            TrackWork("Symphony No. 5 in C minor, Op. 67", None, "I. Allegro con brio: Coda", 1),
+        ),
+    ],
+)
+def test_work_ends_at_its_catalog_number(title: str, expected: TrackWork) -> None:
+    """A work ends at a catalog number followed by a colon, taking in an act opening the rest."""
+    assert parse_work_title(title, "Pyotr Ilyich Tchaikovsky") == expected
 
 
 def test_aria_quoted_straight_after_the_colon() -> None:
     """A quoted aria straight after the colon is the movement, as with a space in between."""
     assert parse_work_title('La Bohème, Act I:"Che gelida manina"', PUCCINI) == TrackWork(
-        "La Bohème, Act I", None, '"Che gelida manina"', None
+        "La Bohème, Act I", None, '"Che gelida manina"'
     )
 
 
@@ -172,6 +202,33 @@ def test_aria_quoted_straight_after_the_colon() -> None:
             'Vaughan-Williams: Fantasia on "Greensleeves"',
             "Ralph Vaughan Williams",
             TrackWork('Fantasia on "Greensleeves"'),
+        ),
+        (
+            'Beethoven: Piano Concerto No. 5 in E-flat major, Op. 73 "Emperor": Mvt. III-Rondo: '
+            "Allegro",
+            BEETHOVEN,
+            TrackWork(
+                'Piano Concerto No. 5 in E-flat major, Op. 73 "Emperor"',
+                None,
+                "Mvt. III-Rondo: Allegro",
+                3,
+            ),
+        ),
+        (
+            "Rimsky-Korsakov: Scheherazade Symphonic Suite, Op. 35, Mvt. 3 The Young Prince And "
+            "The Princess (Andantino quasi allegretto)",
+            "Nikolai Rimsky-Korsakov",
+            TrackWork(
+                "Scheherazade Symphonic Suite, Op. 35",
+                None,
+                "Mvt. 3 The Young Prince And The Princess (Andantino quasi allegretto)",
+                3,
+            ),
+        ),
+        (
+            "Beethoven: Symphony No. 5 in C minor, Op. 67: Mvt. I Allegro con brio",
+            BEETHOVEN,
+            TrackWork("Symphony No. 5 in C minor, Op. 67", None, "Mvt. I Allegro con brio", 1),
         ),
         (
             'Mozart: Symphony No. 41 in C major, K. 551 "Jupiter" Allegro vivace (excerpt)',
@@ -398,12 +455,62 @@ def test_colon_within_a_numbered_piece_names_no_work() -> None:
 
 
 @pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Symphony No. 5 in C minor, Op. 67", ["Op. 67"]),
+        ("Nocturne Op. 9 No. 2", ["Op. 9 No. 2"]),
+        ("Nocturne In F Sharp Major, Op 15, No. 2", ["Op 15, No. 2"]),
+        ('Concerto in E major, op. 8 no. 1, RV 269 "La primavera"', ["op. 8 no. 1", "RV 269"]),
+        ("Concerto in C major for Flute, Harp & Orchestra, K. 297c/299", ["K. 297c/299"]),
+        ("Concerto for Violin & Oboe in C minor, BWV 1060R", ["BWV 1060R"]),
+        ("Excerpt from Die Walküre, WWV 86B: Akt III, Scene I, Walkürenritt", ["WWV 86B"]),
+        ("Romeo and Juliet: Suite no. 2, op. 64ter", ["op. 64ter"]),
+        ("Symphonie pour orgue n° 5 en fa mineur, op. 42 n° 1", ["op. 42 n° 1"]),
+        ('Bagatelle for Piano in A minor, WoO 59 "Für Elise": Poco moto', ["WoO 59"]),
+        ("Préludes, Livre I, L. 117, CD 125", ["L. 117", "CD 125"]),
+        ("Canon and Gigue in D major, P. 37, T. 337", ["P. 37", "T. 337"]),
+        ("Round O, ZT. 684", ["ZT. 684"]),
+        ("Te Deum, H. 146: Prélude", ["H. 146"]),  # codespell:ignore
+        (
+            "Concerto, settimo libro de madrigali, con altri generi di canti: "
+            "O come sei gentile, SV 120",
+            ["SV 120"],
+        ),
+        ("Dardanus, RCT 35 : Acte III, Scène 3.", ["RCT 35"]),
+        ('Kantate, BWV 147 "Herz und Mund und Tat und Leben": Teil II', ["BWV 147"]),
+        ('Symfonie č. 9 e moll, op. 95 "Z Nového světa"', ["op. 95"]),
+        ('Symphony no. 1 in D major "Titan"', []),
+        ("Five Mystical Songs", []),
+        ("Messe solennelle en la majeur, op. 12 ", ["op. 12"]),
+        ("Winterreise, op. 89, D. 911", ["op. 89", "D. 911"]),
+        ("Piano Sonata in E-flat major, Hob. XVI:52", ["Hob. XVI:52"]),
+        ("Serenade no. 13 in G major, KV 525", ["KV 525"]),
+        ("Overture in D major, TWV 55:D18", ["TWV 55:D18"]),
+        ("Membra Jesu nostri, BuxWV 75", ["BuxWV 75"]),
+        ("Années de pèlerinage, S. 160", ["S. 160"]),
+        ("Dido and Aeneas, Z. 626", ["Z. 626"]),
+        ("Swan Lake, Op. 20, TH 12", ["Op. 20", "TH 12"]),
+        ("Carmen, WD 31", ["WD 31"]),
+    ],
+)
+def test_parse_catalog_numbers(title: str, expected: list[str]) -> None:
+    """
+    Catalog numbers are read off a work title as written, with the number within an opus.
+
+    Single letter catalogs count only after a comma.
+    """
+    assert parse_catalog_numbers(title) == expected
+
+
+@pytest.mark.parametrize(
     ("first", "second"),
     [
         ("Matthäus-Passion, BWV 244, Part 1", "St. Matthew Passion, BWV 244, Part I"),
         ("Messiah, HWV 56, Pt. 2", "Messiah, HWV 56, Part II"),
         ("La bohème, Act II", "La Bohème, Act 2"),
         ("La bohème, SC 67 / Act 1", "La bohème, SC 67, Act I"),
+        ("Swan Lake, Act II, Op. 20, TH 12", "Swan Lake, Act 2"),
+        ("The Nutcracker, Act II, Scene 3, Op. 71, TH 14", "The Nutcracker, Op. 71, Act II"),
         ("Matthäus-Passion, BWV 244, Anhang", "St. Matthew Passion, BWV 244, Anhang"),
         ("Matthäus-Passion, BWV 244: Teil I", "St. Matthew Passion, BWV 244, Part I"),
         ("Turandot: Atto III, scena 1", "Turandot, Act III"),

@@ -211,6 +211,38 @@ async def test_credit_of_a_provider_artist_adds_the_artist(
     assert await mass.music.artists.get_library_item(stored_lyricist.item_id)
 
 
+async def test_credit_of_an_artist_named_by_name_joins_the_library_artist(
+    mass: MusicAssistant,
+) -> None:
+    """A credit naming an artist by name only, as Qobuz does, joins the library artist of that name."""
+    main = await _add_artist(mass, "Main")
+    singer = await _add_artist(mass, "Ferruccio Mazzoli")
+    named = Artist(
+        item_id=singer.name,
+        provider=OTHER_PROVIDER_INSTANCE,
+        name=singer.name,
+        provider_mappings={
+            ProviderMapping(
+                item_id=singer.name,
+                provider_domain="credits",
+                provider_instance=OTHER_PROVIDER_INSTANCE,
+            )
+        },
+    )
+
+    track = await _add_track(
+        mass, [main], [Credit(artist=named, role=ArtistRole.SOLOIST, instrument="bass vocals")]
+    )
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert _credit_rows(stored)[0] == (singer.item_id, ArtistRole.SOLOIST, "bass vocals", 0)
+    library_singer = await mass.music.artists.get_library_item(singer.item_id)
+    # the name mapping keeps the artist through the database cleanup of unmapped artists
+    assert (OTHER_PROVIDER_INSTANCE, singer.name) in {
+        (x.provider_instance, x.item_id) for x in library_singer.provider_mappings
+    }
+
+
 async def test_credit_without_instrument_is_stored_once(mass: MusicAssistant) -> None:
     """The same credit without an instrument, given twice, is stored once at its first position."""
     main = await _add_artist(mass, "Main")

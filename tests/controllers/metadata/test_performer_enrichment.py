@@ -95,8 +95,10 @@ def _controller(mass: MusicAssistant, lookups: dict[str, dict[str, Any]]) -> Met
     ctrl = MetaDataController.__new__(MetaDataController)
     ctrl.mass = mass
     ctrl.logger = Mock()
+    ctrl._logged_hints = set()
     with patch.object(MusicbrainzProvider, "__init__", lambda *_a, **_kw: None):
         musicbrainz = MusicbrainzProvider.__new__(MusicbrainzProvider)
+    musicbrainz._logged_hints = set()
 
     async def _answer(endpoint: str, **_kwargs: Any) -> Any:
         return next((value for key, value in lookups.items() if endpoint.startswith(key)), None)
@@ -377,6 +379,52 @@ async def test_identified_artist_merges_into_the_oldest_with_its_id(
     survivor = await music_mass.music.artists.get_library_item(older.item_id)
     assert survivor.mbid == KENNEDY_MBID
     assert ("N. Kennedy", True) in _refreshed(ctrl)
+
+
+async def test_track_naming_only_its_composer_gets_the_recordings_performers(
+    music_mass: MusicAssistant,
+) -> None:
+    """A track naming no artist but its composer is credited with the recording's performers."""
+    ctrl = _controller(
+        music_mass,
+        {"release/": _lookup(BEST_CLASSICAL), f"artist/{ECO_MBID}": _eco_with_spotify_link()},
+    )
+    await music_mass.music.artists.add_item_to_library(_artist("Nigel Kennedy"))
+    track = await _kennedy_album(
+        music_mass, ["Antonio Vivaldi"], [("Antonio Vivaldi", ArtistRole.COMPOSER, None)]
+    )
+
+    with patch.object(music_mass.music, "get_provider_instances", _spotify_instances()):
+        await _read_album(ctrl, track)
+
+    # the library's own artist is taken by its name, the orchestra is added on its Spotify link
+    assert await _credits(music_mass, track) == {
+        ("Antonio Vivaldi", ArtistRole.MAIN_ARTIST, None),
+        ("Antonio Vivaldi", ArtistRole.COMPOSER, None),
+        ("Nigel Kennedy", ArtistRole.CONDUCTOR, None),
+        ("Nigel Kennedy", ArtistRole.SOLOIST, "violin"),
+        ("English Chamber Orchestra", ArtistRole.ORCHESTRA, None),
+    }
+    assert await _mbid(music_mass, "English Chamber Orchestra") == ECO_MBID
+
+
+async def test_performer_linked_to_no_music_provider_is_not_added(
+    music_mass: MusicAssistant,
+) -> None:
+    """A performer neither in the library nor linked to a loaded music provider is left out."""
+    ctrl = _controller(music_mass, {"release/": _lookup(BEST_CLASSICAL)})
+    track = await _kennedy_album(
+        music_mass, ["Antonio Vivaldi"], [("Antonio Vivaldi", ArtistRole.COMPOSER, None)]
+    )
+    before = await _credits(music_mass, track)
+
+    await _read_album(ctrl, track)
+
+    assert await _credits(music_mass, track) == before
+    assert not await music_mass.music.artists.get_library_items_by_query(
+        extra_query_parts=["artists.name = :name"],
+        extra_query_params={"name": "English Chamber Orchestra"},
+    )
 
 
 async def test_track_with_performing_credits_keeps_them(music_mass: MusicAssistant) -> None:

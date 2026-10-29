@@ -364,6 +364,29 @@ class MusicbrainzProvider(MetadataProvider):
         msg = "Invalid MusicBrainz Artist ID provided"
         raise InvalidDataError(msg)
 
+    async def get_artists_by_name(self, name: str) -> list[MusicBrainzArtist]:
+        """
+        Return the MusicBrainz artists that carry a name as their name or one of their aliases.
+
+        :param name: The name, compared ignoring case, accents, punctuation and spacing.
+        """
+        searchname = re.sub(LUCENE_SPECIAL, r"\\\1", name)
+        result = await self._api_client.get_data(
+            "artist", query=f'artist:"{searchname}" OR alias:"{searchname}"', limit="25"
+        )
+        if not result or "artists" not in result:
+            return []
+        found: list[MusicBrainzArtist] = []
+        for raw_artist in result["artists"]:
+            with suppress(MissingField):
+                found.append(MusicBrainzArtist.from_raw(raw_artist))
+        return [
+            x
+            for x in found
+            if compare_strings(x.name, name)
+            or any(compare_strings(alias.name, name) for alias in x.aliases or [])
+        ]
+
     async def resolve_artists_from_mbids(
         self, mbids: tuple[str, ...]
     ) -> list[tuple[str, str, str] | None]:
@@ -1234,9 +1257,9 @@ class MusicbrainzProvider(MetadataProvider):
         if not recordings:
             await self._log_unknown_isrc(isrc, track)
             return None
-        # an ISRC is occasionally reused, so the recording must also match the track's
-        # length and title; the title may differ when the ISRC names a single recording,
-        # as the credited artist is still checked below
+        # an ISRC is occasionally reused, so the recording must also match the track's length
+        # and title; an ISRC naming one recording only is enough without the title, which a
+        # streaming service may give as the movement alone, when the checks below run
         sole_recording = len(recordings) == 1 and bool(track.artists)
         candidates = [
             recording
@@ -1264,10 +1287,46 @@ class MusicbrainzProvider(MetadataProvider):
             )
         )
         if chosen is None:
+            # a compilation may name the composer where MusicBrainz credits the performers,
+            # so a recording on the release the track's album is identified as counts too
+            chosen = await self._recording_on_album_release(isrc, candidates, track)
+        if chosen is None:
             return None
         with suppress(InvalidDataError):
             return await self.get_recording_details(chosen.id)
         return None
+
+    async def _recording_on_album_release(
+        self, isrc: str, recordings: list[MusicBrainzRecording], track: Track
+    ) -> MusicBrainzRecording | None:
+        """Return the first recording on the MusicBrainz release of the track's album, if any."""
+        album = await self._full_album(track)
+        if not album:
+            return None
+        if not (release_id := album.get_external_id(ExternalID.MB_ALBUM)):
+            log_once(
+                self.logger,
+                self._logged_hints,
+                ("isrc", isrc),
+                logging.DEBUG,
+                'ISRC %s of "%s" is on MusicBrainz recording %s, which credits other artists, '
+                'so it needs album "%s" identified, add its streaming link or barcode to the '
+                "release of that recording",
+                isrc,
+                track.name,
+                f"{MUSICBRAINZ_WEB_URL}/recording/{recordings[0].id}",
+                album.name,
+            )
+            return None
+        try:
+            release = await self.get_release_details(release_id)
+        except InvalidDataError:
+            return None
+        on_release = release.recordings_by_id()
+        return next(
+            (recording for recording in recordings if recording.id.casefold() in on_release),
+            None,
+        )
 
     async def _full_album(self, track: Track) -> Album | ItemMapping | None:
         """Return the track's album, with its ids for a library track."""

@@ -39,6 +39,12 @@ from music_assistant.controllers.webserver.helpers.auth_middleware import curren
 from music_assistant.mass import MusicAssistant
 from music_assistant.models.music_provider import MusicProvider
 
+
+async def _add_part(mass: MusicAssistant, name: str, parent: Work, composer: Artist) -> Work:
+    """Add a work that is a part of a library work."""
+    return await _add_work(mass, name, [composer], parent_work=ItemMapping.from_item(parent))
+
+
 PROVIDER_INSTANCE = "works_instance"
 # works are added the way a tag parser hands them over, from their source without mappings
 WORK_SOURCE = "works_source"
@@ -584,6 +590,24 @@ async def test_track_work_resolved_by_musicbrainz_id(mass: MusicAssistant) -> No
     assert unknown.work is None
 
 
+async def test_track_work_with_its_musicbrainz_id_is_added(mass: MusicAssistant) -> None:
+    """A provider work carrying its MusicBrainz id is added with the track, shared by others."""
+    composer = await _add_artist(mass, "Composer")
+    name = f"Symphony No. 5 {_token()}, Op. 67"
+    mbid = _mbid()
+
+    first = await _add_track(mass, _work(name, [composer], mbid), movement_number=1)
+    second = await _add_track(mass, _work(name, [composer], mbid), movement_number=2)
+
+    assert first.work is not None
+    assert second.work is not None
+    assert first.work.item_id == second.work.item_id
+    work = await mass.music.works.get_library_item(first.work.item_id)
+    assert work.name == name
+    assert _ids(work.composers) == [composer.item_id]
+    assert _composer_ids(first) == [composer.item_id]
+
+
 async def test_track_work_named_without_an_id_is_not_added(mass: MusicAssistant) -> None:
     """A work read from a pop track's title is not added and does not make the track classical."""
     before = await _library_work_ids(mass)
@@ -593,6 +617,48 @@ async def test_track_work_named_without_an_id_is_not_added(mass: MusicAssistant)
     assert track.work is None
     assert await _library_work_ids(mass) == before
     assert (track.metadata.classical_tag, track.is_classical) == (False, False)
+
+
+async def test_track_work_named_without_an_id_is_the_work_of_the_track_s_own_id(
+    mass: MusicAssistant,
+) -> None:
+    """A track carrying one MusicBrainz work id gets that work, whatever work its source names."""
+    mbid = _mbid()
+    name = f"Moonlight Sonata {_token()}"
+
+    track = await _add_track(mass, _work(name), movement_name="First Movement", work_ids=[mbid])
+
+    assert track.work is not None
+    work = await mass.music.works.get_library_item(track.work.item_id)
+    assert (work.mbid, work.name) == (mbid, name)
+    assert not track.metadata.classical_tag
+
+
+async def test_provider_work_matches_a_composer_the_provider_names_differently(
+    mass: MusicAssistant,
+) -> None:
+    """Tracks share a provider work whose composer the provider spells unlike the library."""
+    mapping = _mapping()
+    composer = await mass.music.artists.add_item_to_library(
+        Artist(item_id="0", provider="library", name="Schubert", provider_mappings={mapping})
+    )
+    provider_composer = Artist(
+        item_id=mapping.item_id,
+        provider=mapping.provider_instance,
+        name="Franz Schubert",
+        provider_mappings={mapping},
+    )
+    name = f"Trout Quintet {_token()}"
+    mbid = _mbid()
+
+    first = await _add_track(mass, _work(name, [provider_composer], mbid))
+    second = await _add_track(mass, _work(name, [provider_composer], mbid))
+
+    assert first.work is not None
+    assert second.work is not None
+    assert first.work.item_id == second.work.item_id
+    work = await mass.music.works.get_library_item(first.work.item_id)
+    assert _ids(work.composers) == [composer.item_id]
 
 
 async def test_work_takes_a_new_name(mass: MusicAssistant) -> None:
@@ -736,6 +802,23 @@ async def test_track_overwrite_naming_its_stored_work_id_keeps_its_place(
     assert stored.movement_number == 2
     assert await _library_work_ids(mass) == before
     assert _track_work_ids(stored) == {held}
+
+
+@pytest.mark.parametrize("sibling", [True, False])
+async def test_track_overwrite_naming_another_work_moves_it(
+    mass: MusicAssistant, sibling: bool
+) -> None:
+    """An overwrite naming another movement of the work, or an unknown work, moves the track."""
+    act, first, _second = await _add_act(mass)
+    track = await _add_track(mass, act, movement_number=2, movement_name="No. 2")
+    mbid = first if sibling else _mbid()
+
+    stored = await _overwrite_with_tag_work(mass, track, mbid)
+
+    assert stored.work is not None
+    assert stored.work.item_id != act.item_id
+    assert (await mass.music.works.get_library_item(stored.work.item_id)).mbid == mbid
+    assert (stored.movement_number, stored.movement_name) == (5, "Tag name")
 
 
 @pytest.mark.parametrize("streaming", [True, False])
