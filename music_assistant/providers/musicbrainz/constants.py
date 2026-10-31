@@ -5,6 +5,7 @@ from __future__ import annotations
 from music_assistant_models.enums import AlbumType, LinkType, MediaType, ProviderFeature
 
 MUSICBRAINZ_WEB_URL = "https://musicbrainz.org"
+MAGICISRC_URL = "https://magicisrc.kepstin.ca/"
 
 LUCENE_SPECIAL = r'([+\-&|!(){}\[\]\^"~*?:\\\/])'
 
