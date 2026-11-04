@@ -220,7 +220,7 @@ async def test_resolve_image_allows_bundled_provider_assets() -> None:
     """Bundled provider assets under our own package dir resolve."""
     provider = _make_provider()
     bundled = os.path.join(
-        os.path.dirname(music_assistant.__file__), "providers", "ai_radio", "air.png"
+        os.path.dirname(music_assistant.__file__), "providers", "ai_radio", "air.jpg"
     )
     assert await provider.resolve_image(bundled) == bundled
 

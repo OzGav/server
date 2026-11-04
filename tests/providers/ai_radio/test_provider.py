@@ -42,6 +42,7 @@ def provider(tmp_path: Path) -> AIRadioProvider:
     instance._hosts = {}
     instance._dj_queues = {}
     instance._hosts_file = tmp_path / "hosts.json"
+    instance.mass = MagicMock()
     instance._sections = {item["id"]: item for item in instance._default_sections_template()}
     instance.signal_provider_event = MagicMock()  # type: ignore[method-assign, misc]
     return instance
@@ -106,6 +107,23 @@ async def test_host_crud_roundtrip(provider: Any) -> None:
     assert fetched["name"] == saved["name"]
     await provider.delete_host("default_host")
     assert await provider.list_hosts() == []
+
+
+async def test_listed_hosts_carry_the_picture_of_their_announcer(provider: Any) -> None:
+    """A listed or fetched host carries its announcer's picture, which a save does not store."""
+    provider.mass.metadata.compute_image_id = lambda prov, path: f"{prov}:{Path(path).name}"
+    saved = await provider.save_host({**await provider.host_template(), "announcer": "male"})
+
+    [listed] = await provider.list_hosts()
+    fetched = await provider.get_host(saved["id"])
+    assert Path(listed["image"].path).name == "air_male.jpg"
+    assert listed["image"].proxy_id == "builtin:air_male.jpg"
+    assert fetched["image"] == listed["image"]
+
+    resaved = await provider.save_host({**fetched, "announcer": "female"})
+    assert "image" not in resaved
+    assert "image" not in provider._hosts[saved["id"]]
+    assert Path((await provider.get_host(saved["id"]))["image"].path).name == "air_female.jpg"
 
 
 @pytest.mark.asyncio
@@ -175,6 +193,19 @@ async def test_station_changes_reconcile_the_library_under_the_station_lock(
     await provider.delete_station("station_a")
 
     assert locked_during_sync == [True, True]
+
+
+async def test_saving_a_host_refreshes_the_shows_it_hosts(provider: Any, tmp_path: Path) -> None:
+    """Saving a host that hosts a show reconciles the library, so the show's picture follows."""
+    provider._stations_file = tmp_path / "stations.json"
+    provider._sync_show_library_items = AsyncMock()
+    host = await provider.save_host(await provider.host_template())
+    provider._sync_show_library_items.assert_not_awaited()
+
+    provider._stations["station_a"] = {"id": "station_a", "host_id": host["id"]}
+    await provider.save_host({**host, "announcer": "female"})
+
+    provider._sync_show_library_items.assert_awaited_once()
 
 
 async def test_delete_host_refuses_when_station_references_it(provider: Any) -> None:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -317,17 +318,17 @@ class AIRadioProvider(
         return deepcopy(defaults[0])
 
     async def list_hosts(self) -> list[dict[str, Any]]:
-        """Return all configured AI Radio hosts."""
+        """Return all configured AI Radio hosts, each with the picture of its announcer."""
         return sorted(
-            (deepcopy(host) for host in self._hosts.values()),
+            (self._host_with_image(host) for host in self._hosts.values()),
             key=lambda host: host["name"],
         )
 
     async def get_host(self, host_id: str) -> dict[str, Any]:
-        """Return one host by id."""
+        """Return one host by id, with the picture of its announcer."""
         if host_id not in self._hosts:
             raise KeyError(f"Unknown host id: {host_id}")
-        return deepcopy(self._hosts[host_id])
+        return self._host_with_image(self._hosts[host_id])
 
     async def save_host(self, host: dict[str, Any]) -> dict[str, Any]:
         """Create or update a host."""
@@ -336,6 +337,9 @@ class AIRadioProvider(
             self._resolve_preset_tag(normalized)
             self._hosts[normalized["id"]] = normalized
             await self._write_hosts()
+            # a show without a playlist picture shows its host's announcer picture
+            if any(x.get("host_id") == normalized["id"] for x in self._stations.values()):
+                await self._sync_show_library_items()
         self.logger.info("AI Radio host saved: %s (%s)", normalized["id"], normalized["name"])
         return deepcopy(normalized)
 
@@ -463,3 +467,10 @@ class AIRadioProvider(
                 allow_retry=True,
                 task_id=f"load_provider_{self.instance_id}",
             )
+
+    def _host_with_image(self, host: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy of a host with the picture of its announcer."""
+        image = self._host_image(host["id"])
+        # a plain dict in a command result serializes its images without the proxy id
+        proxy_id = self.mass.metadata.compute_image_id(image.provider, image.path)
+        return {**deepcopy(host), "image": replace(image, proxy_id=proxy_id)}

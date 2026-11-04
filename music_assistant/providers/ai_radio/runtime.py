@@ -36,6 +36,7 @@ from music_assistant.helpers.uri import create_uri
 
 from .constants import (
     AI_QUERY_TIMEOUT_SECONDS,
+    ANNOUNCER_IMAGES,
     ATTR_ALLOW_POST,
     ATTR_HOST_ID,
     ATTR_MAX_CHARS,
@@ -51,6 +52,7 @@ from .constants import (
     CONF_WEATHER_COUNTRY,
     CONF_WEATHER_PROVIDER,
     CONF_WEATHER_TIMEOUT,
+    DEFAULT_ANNOUNCER,
     DEFAULT_LLM_INSTRUCTIONS,
     DEFAULT_WEATHER_PROVIDER,
     DEFAULT_WEATHER_TIMEOUT_SECONDS,
@@ -100,6 +102,7 @@ class AIRadioRuntimeMixin:
         mass: MusicAssistant
         config: ProviderConfig
         logger: logging.Logger
+        _hosts: dict[str, dict[str, Any]]
 
         def get_setup_value(self, key: str, default: ConfigValueType = None) -> ConfigValueType:
             """Return a value collected by this provider's setup flow."""
@@ -495,16 +498,7 @@ class AIRadioRuntimeMixin:
                 )
             },
         )
-        clip.metadata.images = UniqueList(
-            [
-                MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=self._ai_radio_cover_image_path(),
-                    provider="builtin",
-                    remotely_accessible=False,
-                )
-            ]
-        )
+        clip.metadata.images = UniqueList([self._host_image(str(program.get("host_id") or ""))])
         queue_item = build_queue_item(queue_id, clip)
         # the section name already travels as the item's own name, so it is not duplicated here
         queue_item.extra_attributes.update(
@@ -521,10 +515,19 @@ class AIRadioRuntimeMixin:
         )
         return queue_item
 
-    @staticmethod
-    def _ai_radio_cover_image_path() -> str:
-        """Return the explicit AI Radio playlist cover image path."""
-        return str(Path(__file__).with_name("air.png"))
+    def _host_image(self, host_id: str) -> MediaItemImage:
+        """Return the picture for a host's clips and shows, by its announcer."""
+        return MediaItemImage(
+            type=ImageType.THUMB,
+            path=self._ai_radio_cover_image_path(host_id),
+            provider="builtin",
+            remotely_accessible=False,
+        )
+
+    def _ai_radio_cover_image_path(self, host_id: str) -> str:
+        """Return the path of the picture for a host's clips and shows, by its announcer."""
+        announcer = (self._hosts.get(host_id) or {}).get("announcer", DEFAULT_ANNOUNCER)
+        return str(Path(__file__).with_name(ANNOUNCER_IMAGES[announcer]))
 
     async def _prepare_runtime_tokens(self, program: dict[str, Any]) -> dict[str, str]:
         """Prepare runtime tokens (including weather placeholders) for one run."""

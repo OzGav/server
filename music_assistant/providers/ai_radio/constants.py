@@ -143,6 +143,10 @@ EMPTY_SECTION_ID = "EMPTY_SECTION"
 VALID_WEB_SEARCH_MODES = {"disabled", "allow", "force"}
 WEB_SEARCH_MODE_RANK = {"disabled": 0, "allow": 1, "force": 2}
 
+# the picture shown for a host's clips and shows, by the host's announcer
+ANNOUNCER_IMAGES = {"neutral": "air.jpg", "male": "air_male.jpg", "female": "air_female.jpg"}
+DEFAULT_ANNOUNCER = "neutral"
+
 # QueueItem.extra_attributes keys carrying a clip's pending render state. Scalars only —
 # extra_attributes is serialized to clients and persisted with the queue.
 ATTR_SESSION_ID = "ai_radio_session_id"

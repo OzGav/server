@@ -17,6 +17,8 @@ from music_assistant_models.errors import InvalidDataError
 from music_assistant.helpers.json import async_json_loads, json_dumps
 
 from .constants import (
+    ANNOUNCER_IMAGES,
+    DEFAULT_ANNOUNCER,
     DEFAULT_LLM_INSTRUCTIONS,
     EVENT_HOSTS_UPDATED,
     MERGE_SECTION_PROMPT,
@@ -252,7 +254,7 @@ PRESET_HOSTS: tuple[_PresetHost, ...] = (
 )
 _PRESETS_BY_ID = {preset.host_id: preset for preset in PRESET_HOSTS}
 
-# host keys that make up a preset copy's content; name, voice and id stay the user's
+# host keys that make up a preset copy's content; name, voice, announcer and id stay the user's
 _PRESET_CONTENT_KEYS = ("instructions", "section_ids", "section_order", "merge_section_id")
 
 
@@ -382,6 +384,7 @@ class AIRadioHostsMixin:
         instructions = str(host.get("instructions") or "").strip() or DEFAULT_LLM_INSTRUCTIONS
         tts_engine = str(host.get("tts_engine") or "").strip()
         language = str(host.get("language") or "").strip()
+        announcer = str(host.get("announcer") or "").strip().lower()
         options_raw = host.get("options")
         options = (
             {str(key): value for key, value in options_raw.items()}
@@ -426,6 +429,7 @@ class AIRadioHostsMixin:
             "instructions": instructions,
             "tts_engine": tts_engine,
             "language": language,
+            "announcer": announcer if announcer in ANNOUNCER_IMAGES else DEFAULT_ANNOUNCER,
             "options": options,
             "section_ids": section_ids,
             "section_order": deepcopy(raw_section_order),
@@ -464,6 +468,7 @@ class AIRadioHostsMixin:
             "instructions": DEFAULT_LLM_INSTRUCTIONS,
             "tts_engine": "",
             "language": "",
+            "announcer": DEFAULT_ANNOUNCER,
             "options": {},
             "section_ids": default_section_ids,
             "section_order": [
@@ -637,6 +642,7 @@ def _compile_preset_host(
         "instructions": preset.instructions,
         "tts_engine": "",
         "language": "",
+        "announcer": DEFAULT_ANNOUNCER,
         "options": {},
         "section_ids": [section["id"] for section in sections],
         "section_order": section_order,

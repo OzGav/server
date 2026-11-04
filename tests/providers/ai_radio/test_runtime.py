@@ -7,6 +7,7 @@ import datetime
 import logging
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -52,6 +53,7 @@ class DummyRuntime(ProviderEventRecorder, AIRadioRuntimeMixin):
         """Initialize minimal state for runtime tests."""
         self.logger = logging.getLogger("tests.ai_radio.runtime")
         self._sections: dict[str, dict[str, Any]] = {}
+        self._hosts: dict[str, dict[str, Any]] = {}
         self.config = cast("Any", StubConfig())
         self.instance_id = "ai_radio_test"
         self.domain = "ai_radio"
@@ -1192,6 +1194,58 @@ def test_clip_item_carries_weather_required_flag() -> None:
     item = runtime._section_to_clip_item("queue-1", "sess", program, section)
 
     assert item.extra_attributes[ATTR_WEATHER_REQUIRED] is True
+
+
+@pytest.mark.parametrize(
+    ("announcer", "image"),
+    [("female", "air_female.jpg"), ("male", "air_male.jpg"), ("neutral", "air.jpg")],
+)
+def test_clip_item_shows_the_picture_of_its_hosts_announcer(announcer: str, image: str) -> None:
+    """A clip shows the bundled picture of its host's announcer."""
+    runtime = DummyRuntime()
+    runtime._hosts = {"rick": {"id": "rick", "announcer": announcer}}
+    section = PlannedSection(
+        order=0,
+        clip_id="sess_000",
+        section_id="Song_Transition",
+        section_name="Song Transition",
+        when="between_songs",
+        insert_at_index=1,
+        prompt="p",
+        max_chars=0,
+        web_search_mode="disabled",
+    )
+    program = {"id": "station_a", "host_id": "rick"}
+
+    item = runtime._section_to_clip_item("queue-1", "sess", program, section)
+
+    assert item.media_item is not None
+    assert item.media_item.image is not None
+    path = Path(item.media_item.image.path)
+    assert path.name == image
+    assert path.is_file()
+
+
+def test_clip_item_of_an_unknown_host_shows_the_neutral_picture() -> None:
+    """A clip whose host is gone shows the neutral picture."""
+    runtime = DummyRuntime()
+    section = PlannedSection(
+        order=0,
+        clip_id="sess_000",
+        section_id="Song_Transition",
+        section_name="Song Transition",
+        when="between_songs",
+        insert_at_index=1,
+        prompt="p",
+        max_chars=0,
+        web_search_mode="disabled",
+    )
+
+    item = runtime._section_to_clip_item("queue-1", "sess", {"id": "a", "host_id": "gone"}, section)
+
+    assert item.media_item is not None
+    assert item.media_item.image is not None
+    assert Path(item.media_item.image.path).name == "air.jpg"
 
 
 async def test_get_ai_engine_requires_a_configured_selection() -> None:

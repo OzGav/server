@@ -45,7 +45,7 @@ class _Media(AIRadioMediaMixin):
         self.mass.music.playlists.get_library_item_by_prov_id = AsyncMock(return_value=None)
         self.logger = MagicMock()
 
-    def _ai_radio_cover_image_path(self) -> str:
+    def _ai_radio_cover_image_path(self, host_id: str) -> str:
         """Return a fake cover image path."""
         return "/tmp/air.png"  # noqa: S108
 

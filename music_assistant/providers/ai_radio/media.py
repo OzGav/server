@@ -195,7 +195,7 @@ class AIRadioMediaMixin:
             return thumb
         return MediaItemImage(
             type=ImageType.THUMB,
-            path=self._ai_radio_cover_image_path(),
+            path=self._ai_radio_cover_image_path(str(station.get("host_id") or "")),
             provider="builtin",
             remotely_accessible=False,
         )

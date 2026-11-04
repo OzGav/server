@@ -63,6 +63,7 @@ def test_normalize_host_returns_known_schema() -> None:
     assert normalized["name"] == "Rick"
     assert normalized["instructions"] == "Laid-back evening host."
     assert normalized["tts_engine"] == ""
+    assert normalized["announcer"] == "neutral"
     assert normalized["section_ids"] == ["Song_Transition"]
     assert normalized["merge_section_id"] == ""
 
@@ -75,6 +76,18 @@ def test_normalize_host_defaults_empty_instructions() -> None:
     payload["instructions"] = "   "
     normalized = dummy._normalize_host(payload)
     assert normalized["instructions"] == DEFAULT_LLM_INSTRUCTIONS
+
+
+@pytest.mark.parametrize(
+    ("given", "stored"), [("Female", "female"), ("male", "male"), ("x", "neutral")]
+)
+def test_normalize_host_keeps_a_known_announcer(given: str, stored: str) -> None:
+    """A known announcer is kept, any other value is stored as neutral."""
+    dummy = DummyHosts()
+    dummy._sections = {"Song_Transition": _section("Song_Transition")}
+    payload = _host(["Song_Transition"])
+    payload["announcer"] = given
+    assert dummy._normalize_host(payload)["announcer"] == stored
 
 
 def test_normalize_host_requires_name() -> None:
