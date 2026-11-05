@@ -506,6 +506,23 @@ async def test_track_work_resolved_by_musicbrainz_id(mass: MusicAssistant) -> No
     assert unknown.work is None
 
 
+async def test_track_work_with_its_musicbrainz_id_is_added(mass: MusicAssistant) -> None:
+    """A provider work carrying its MusicBrainz id is added with the track, shared by others."""
+    composer = await _add_artist(mass, "Composer")
+    name = f"Symphony No. 5 {_token()}, Op. 67"
+    mbid = _mbid()
+
+    first = await _add_track(mass, _work(name, [composer], mbid), movement_number=1)
+    second = await _add_track(mass, _work(name, [composer], mbid), movement_number=2)
+
+    assert first.work is not None
+    assert second.work is not None
+    assert first.work.item_id == second.work.item_id
+    work = await mass.music.works.get_library_item(first.work.item_id)
+    assert work.name == name
+    assert _ids(work.composers) == [composer.item_id]
+
+
 async def test_track_overwrite_without_work_keeps_work(mass: MusicAssistant) -> None:
     """An overwrite without a work or movement keeps the stored ones."""
     work = await _add_work(mass, f"Work {_token()}")
