@@ -27,6 +27,7 @@ from music_assistant_models.media_items.metadata import LifeSpan, MediaItemMetad
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.metadata.constants import REFRESH_INTERVAL
 from music_assistant.controllers.metadata.controller import _works_to_enrich_query
+from music_assistant.controllers.metadata.helpers import musicbrainz_name
 from music_assistant.controllers.metadata.work_enrichment import _fill_work_from_musicbrainz
 from music_assistant.controllers.music.helpers import composer_period
 from music_assistant.helpers.compare import is_named_by
@@ -605,6 +606,179 @@ def test_is_named_by_needs_every_word_of_the_name(
     mb_artist = MusicBrainzArtist(id=str(uuid4()), name=mb_name, sort_name=mb_sort_name)
 
     assert is_named_by(name, mb_artist) is expected
+
+
+def _tchaikovsky(*aliases: MusicBrainzAlias) -> MusicBrainzArtist:
+    """Return a MusicBrainz composer named in Cyrillic, with the given aliases."""
+    return MusicBrainzArtist(
+        id=str(uuid4()),
+        name="Пётр Ильич Чайковский",
+        sort_name="Чайковский, Пётр Ильич",
+        aliases=list(aliases),
+    )
+
+
+def _tchaikovsky_alias() -> MusicBrainzAlias:
+    """Return the English artist name alias of Tchaikovsky."""
+    return MusicBrainzAlias(
+        name="Pyotr Ilyich Tchaikovsky", sort_name="Tchaikovsky, Pyotr Ilyich", type="Artist name"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mb_artist", "expected"),
+    [
+        (
+            MusicBrainzArtist(id="ravel", name="Maurice Ravel", sort_name="Ravel, Maurice"),
+            ("Maurice Ravel", "Ravel, Maurice"),
+        ),
+        (
+            MusicBrainzArtist(
+                id="saint-saens",
+                name="Camille Saint\u2010Saëns",
+                sort_name="Saint\u2010Saëns, Camille",
+            ),
+            ("Camille Saint-Saëns", "Saint-Saëns, Camille"),
+        ),
+        (
+            MusicBrainzArtist(
+                id="prokofiev",
+                name="Сергей Сергеевич Прокофьев",
+                sort_name="Prokofiev, Sergei Sergeyevich",
+                aliases=[
+                    MusicBrainzAlias("Sergej Prokofjew", "Prokofjew, Sergej", locale="de"),
+                    MusicBrainzAlias(
+                        "Sergei Prokofiev", "Prokofiev, Sergei", locale="en", primary=True
+                    ),
+                ],
+            ),
+            ("Sergei Prokofiev", "Prokofiev, Sergei"),
+        ),
+        (
+            MusicBrainzArtist(
+                id="tchaikovsky",
+                name="Пётр Ильич Чайковский",
+                sort_name="Чайковский, Пётр Ильич",
+                aliases=[
+                    MusicBrainzAlias(
+                        "Pyotr Ilyich Tchaikovsky", "", locale="en", type="Artist name"
+                    ),
+                ],
+            ),
+            ("Pyotr Ilyich Tchaikovsky", "pyotr ilyich tchaikovsky"),
+        ),
+        (
+            MusicBrainzArtist(
+                id="prokofiev",
+                name="Сергей Сергеевич Прокофьев",
+                sort_name="Prokofiev, Sergei Sergeyevich",
+                aliases=[MusicBrainzAlias("Sergei Prokofiev", "", locale="en", primary=True)],
+            ),
+            ("Sergei Prokofiev", "Prokofiev, Sergei Sergeyevich"),
+        ),
+        (_tchaikovsky(_tchaikovsky_alias()), None),
+        (
+            MusicBrainzArtist(
+                id="strauss-ii",
+                name="Johann Strauss",
+                sort_name="Strauss, Johann",
+                aliases=[
+                    MusicBrainzAlias(
+                        "Johann Strauss II", "Strauss, Johann, II", locale="en", primary=True
+                    )
+                ],
+            ),
+            ("Johann Strauss II", "Strauss, Johann, II"),
+        ),
+        (
+            MusicBrainzArtist(
+                id="strauss-i",
+                name="Johann Strauss",
+                sort_name="Strauss, Johann",
+                aliases=[MusicBrainzAlias("Johann Strauss I", "", locale="en", primary=True)],
+            ),
+            ("Johann Strauss I", "Strauss, Johann"),
+        ),
+        (
+            MusicBrainzArtist(
+                id="chopin",
+                name="Fryderyk Chopin",
+                sort_name="Chopin, Fryderyk",
+                aliases=[
+                    MusicBrainzAlias(
+                        "Frédéric Chopin", "Chopin, Frédéric", locale="en", primary=True
+                    )
+                ],
+            ),
+            ("Frédéric Chopin", "Chopin, Frédéric"),
+        ),
+        (
+            MusicBrainzArtist(
+                id="gorecki",
+                name="Henryk Mikołaj Górecki",
+                sort_name="Górecki, Henryk Mikołaj",
+                aliases=[
+                    MusicBrainzAlias(
+                        "Henryk Mikolaj Gorecki",
+                        "Gorecki, Henryk Mikolaj",
+                        locale="en",
+                        primary=True,
+                    )
+                ],
+            ),
+            ("Henryk Mikołaj Górecki", "Górecki, Henryk Mikołaj"),
+        ),
+    ],
+    ids=[
+        "latin",
+        "plain hyphen",
+        "primary english alias",
+        "english artist name alias",
+        "latin main sort name",
+        "no english alias",
+        "english alias extending the main name",
+        "extending alias without sort name",
+        "english alias over the latin main name",
+        "latin main name over its english alias without accents",
+    ],
+)
+def test_musicbrainz_name_is_in_latin_script(
+    mb_artist: MusicBrainzArtist, expected: tuple[str, str] | None
+) -> None:
+    """An artist's MusicBrainz name is its primary alias, else its main name, in Latin script."""
+    assert musicbrainz_name(mb_artist, "en") == expected
+
+
+def _tchaikovsky_in(*locales: tuple[str, str, str]) -> MusicBrainzArtist:
+    """Return Tchaikovsky with a primary alias of the given name and sort name in each locale."""
+    return _tchaikovsky(
+        *(
+            MusicBrainzAlias(name, sort_name, locale=x, primary=True)
+            for x, name, sort_name in locales
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        ("de", ("Peter Tschaikowsky", "Tschaikowsky, Peter")),
+        ("fr", ("Pyotr Ilyich Tchaikovsky", "Tchaikovsky, Pyotr Ilyich")),
+        ("ja", ("Pyotr Ilyich Tchaikovsky", "Tchaikovsky, Pyotr Ilyich")),
+    ],
+    ids=["alias in the language", "no alias in the language", "alias in another script"],
+)
+def test_musicbrainz_name_is_in_the_language_given_first(
+    language: str, expected: tuple[str, str]
+) -> None:
+    """A composer's name is its primary alias in the given language, else in English."""
+    mb_artist = _tchaikovsky_in(
+        ("ja", "ピョートル・チャイコフスキー", "チャイコフスキー"),
+        ("de", "Peter Tschaikowsky", "Tschaikowsky, Peter"),
+        ("en", "Pyotr Ilyich Tchaikovsky", "Tchaikovsky, Pyotr Ilyich"),
+    )
+
+    assert musicbrainz_name(mb_artist, language) == expected
 
 
 async def test_library_composers_are_added_to_a_work_without_them_and_its_tracks(
