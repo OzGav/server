@@ -715,7 +715,8 @@ class MetadataEnrichmentMixin:
         """
         Fill an artist in from MusicBrainz and link it to the music providers MusicBrainz knows.
 
-        The artist takes its Discogs id, type and life dates, and a classical composer its period.
+        The artist takes its Discogs id, type, life dates and country, and a classical composer
+        its period.
         A classical composer, or a classical artist named in another script, takes the name and
         sort name MusicBrainz gives it in Latin script. Otherwise a classical artist takes the
         sort name MusicBrainz gives it.

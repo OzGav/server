@@ -20,6 +20,7 @@ from music_assistant_models.background_task import TaskSchedule
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import (
     AlbumType,
+    ArtistRole,
     ConfigEntryType,
     EventType,
     ExternalID,
@@ -57,17 +58,19 @@ from music_assistant.helpers.compare import (
     ALBUM_RETAIL_SUFFIX_KEYS,
     album_retail_suffix_sql_match,
 )
-from music_assistant.helpers.credit_roles import SQL_PERFORMING_ROLES
+from music_assistant.helpers.credit_roles import PERFORMING_ROLES, SQL_PERFORMING_ROLES
 from music_assistant.helpers.images import cleanup_thumb_cache
 from music_assistant.helpers.lyrics import extract_lrc_lyrics, normalize_lrc_lyrics
 from music_assistant.helpers.throttle_retry import Throttler
-from music_assistant.helpers.util import try_parse_int
+from music_assistant.helpers.util import is_placeholder_artist, try_parse_int
 from music_assistant.models.core_controller import CoreController
 from music_assistant.models.music_provider import MusicProvider
 from music_assistant.providers.musicbrainz.api_client import fresh_reads
+from music_assistant.providers.musicbrainz.constants import REVERSE_URL_DOMAINS
 
 from .constants import (
     ALBUM_RECONCILIATION_TASK_ID,
+    ARTIST_LOOKUP_RETRY_INTERVAL,
     CONF_ENABLE_ONLINE_METADATA,
     CONF_ENABLE_RADIO_METADATA_LOOKUP,
     CONF_LINK_PROVIDERS_VIA_MUSICBRAINZ,
@@ -91,12 +94,12 @@ from .constants import (
 )
 from .enrichment import MetadataEnrichmentMixin
 from .images import ImageProxyMixin
-from .performer_enrichment import PerformerEnrichmentMixin
+from .performer_enrichment import PerformerEnrichmentMixin, Reread
 from .radio import RadioArtworkMixin
 from .work_enrichment import WorkEnrichmentMixin
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Hashable
+    from collections.abc import Awaitable, Callable, Hashable, Iterable
 
     from music_assistant_models.config_entries import CoreConfig
     from music_assistant_models.event import MassEvent
@@ -106,6 +109,8 @@ if TYPE_CHECKING:
     from music_assistant.controllers.music.media.base import MediaControllerBase
     from music_assistant.helpers.json import SerializableType
     from music_assistant.models.metadata_provider import MetadataProvider
+    from music_assistant.providers.musicbrainz.models import MusicBrainzArtist
+    from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider
 
 # the errors one item of a maintenance scan may fail with without ending the scan
 _SCAN_ITEM_ERRORS = (MusicAssistantError, aiohttp.ClientError, TimeoutError)
@@ -339,10 +344,14 @@ class MetaDataController(
         """
         Get/update extra/enhanced metadata for/on given MediaItem.
 
+        A forced update links an album or track to MusicBrainz right away: its recordings,
+        works and performers, adding what MusicBrainz lists now.
+
         :param item: The library item, or its uri.
         :param force_refresh: Refresh the metadata even if it was refreshed recently.
         :param rebuild: Rebuild the item's MusicBrainz data, read past the cache, as a refresh of
-            the item from its source does: an artist takes MusicBrainz's life dates and period.
+            the item from its source does: an artist takes MusicBrainz's life dates and period,
+            a classical track the work ids of its recording now.
         :return: The item, or None when the item given by its uri is no longer in the library.
         """
         async with self._throttler, fresh_reads() if rebuild else nullcontext():
@@ -367,6 +376,7 @@ class MetaDataController(
                 raise RuntimeError("Metadata can only be updated for library items")
 
             try:
+                reread = Reread.REBUILD if rebuild else Reread.UPDATE
                 if item.media_type == MediaType.ARTIST:
                     await self._update_artist_metadata(
                         cast("Artist", item), force_refresh=force_refresh, rebuild=rebuild
@@ -378,10 +388,14 @@ class MetaDataController(
                     await self._update_album_metadata(
                         cast("Album", item), force_refresh=force_refresh
                     )
+                    if force_refresh:
+                        await self._reread_album_performers(cast("Album", item), reread)
                 if item.media_type == MediaType.TRACK:
                     await self._update_track_metadata(
                         cast("Track", item), force_refresh=force_refresh, rebuild=rebuild
                     )
+                    if force_refresh:
+                        await self._reread_track_performers(cast("Track", item), reread)
                 if item.media_type == MediaType.PLAYLIST:
                     await self._update_playlist_metadata(
                         cast("Playlist", item), force_refresh=force_refresh
@@ -509,9 +523,9 @@ class MetaDataController(
         Return how many classical items the MusicBrainz link task still has to look up.
 
         Counts the classical albums still to identify (``albums``), the classical tracks whose
-        recording is still to read (``recordings``) and the works still to look up (``works``).
-        All are zero while the MusicBrainz provider is not loaded or linking through MusicBrainz
-        is disabled, as nothing is looked up then.
+        recording is still to read (``recordings``) and the works and classical composers still
+        to look up (``works``, ``composers``). All are zero while the MusicBrainz provider is not
+        loaded or linking through MusicBrainz is disabled, as nothing is looked up then.
         """
         selections = (
             (
@@ -522,6 +536,7 @@ class MetaDataController(
             # the album and track performer steps together read every track due a read
             ("recordings", DB_TABLE_TRACKS, _recording_to_read(DB_TABLE_TRACKS)),
             ("works", DB_TABLE_WORKS, _works_to_enrich_query()),
+            ("composers", DB_TABLE_ARTISTS, _composers_to_identify_query()),
         )
         if self._musicbrainz_provider() is None or not self.link_providers_via_musicbrainz:
             return {name: 0 for name, _, _ in selections}
@@ -904,6 +919,86 @@ class MetaDataController(
         # the identity step leaves the marker unset when it gave up
         return item.metadata.last_musicbrainz_lookup is not None
 
+    async def _reread_album_performers(self, album: Album, reread: Reread) -> None:
+        """Read the recordings of an album's classical tracks again, crediting performers missing."""
+        try:
+            if album.mbid:
+                await self._link_album_performers(album, reread)
+                return
+            # without its release, each track is read on its own
+            musicbrainz = self._musicbrainz_provider()
+            for track in await self.mass.music.albums.get_library_album_tracks(album.item_id):
+                if track.is_classical and track.mbid:
+                    if musicbrainz and musicbrainz.rate_limited:
+                        # the tracks left wait for the album's next refresh
+                        return
+                    await self._link_track_performers(track, reread)
+        except _SCAN_ITEM_ERRORS as err:
+            self.logger.warning(
+                "Error while reading the performers of album %s on MusicBrainz: %s",
+                album.name,
+                str(err),
+                exc_info=err if self.logger.isEnabledFor(10) else None,
+            )
+
+    async def _reread_track_performers(self, track: Track, reread: Reread) -> None:
+        """Read the recording of a classical track again, crediting performers missing."""
+        if not track.is_classical:
+            return
+        try:
+            await self._link_track_performers(track, reread)
+        except _SCAN_ITEM_ERRORS as err:
+            self.logger.warning(
+                "Error while reading the performers of track %s on MusicBrainz: %s",
+                track.name,
+                str(err),
+                exc_info=err if self.logger.isEnabledFor(10) else None,
+            )
+
+    async def _identify_composer(self, artist: Artist) -> bool:
+        """Identify and complete a composer by its id or service links, return whether it could."""
+        if not (musicbrainz := self._musicbrainz_provider()):
+            return False
+        if not (mb_artist := await self._identify_by_own_links(musicbrainz, artist)):
+            # a placeholder such as "D.R." names no composer to join
+            if not is_placeholder_artist(artist.name):
+                await self._join_composer_by_name(musicbrainz, artist)
+            return True
+        await self._confirm_composer(mb_artist.id, mb_artist)
+        return True
+
+    async def _identify_classical_performer(self, artist: Artist) -> bool:
+        """Identify a classical performer by its own service links, return whether it could."""
+        if not (musicbrainz := self._musicbrainz_provider()):
+            return False
+        if mb_artist := await self._identify_by_own_links(musicbrainz, artist):
+            # the artists holding the id are the same artist and the oldest of them survives
+            await self.mass.music.artists.merge_library_artists_by_mbid(
+                int(artist.item_id), mb_artist.id
+            )
+        return True
+
+    async def _identify_by_own_links(
+        self, musicbrainz: MusicbrainzProvider, artist: Artist
+    ) -> MusicBrainzArtist | None:
+        """
+        Identify a library artist by its own streaming service links and mark it looked up.
+
+        :param musicbrainz: The MusicBrainz provider.
+        :param artist: The library artist, stored with what MusicBrainz knows of it.
+        :return: The MusicBrainz artist, None when not identified or a placeholder such as "D.R.".
+        """
+        mb_artist = None
+        # without reference items only the artist's own streaming service links are looked up
+        if not is_placeholder_artist(artist.name) and (
+            mb_artist := await musicbrainz.resolve_artist(artist, [], [])
+        ):
+            artist.mbid = mb_artist.id
+            await self._link_artist_to_musicbrainz(artist)
+        artist.metadata.last_musicbrainz_lookup = int(time())
+        await self.mass.music.artists.update_item_in_library(artist.item_id, artist)
+        return mb_artist
+
     def _musicbrainz_link_phases(self, linked_domains: dict[str, int]) -> list[_LinkPhase]:
         """
         Return the selections a MusicBrainz link run works through, in order.
@@ -956,6 +1051,16 @@ class MetaDataController(
                     identify,
                 )
             )
+        phases.append(
+            _LinkPhase(
+                "performers",
+                artists,
+                DB_TABLE_ARTISTS,
+                _performers_to_identify_query(),
+                {"stale": int(time() - ARTIST_LOOKUP_RETRY_INTERVAL)},
+                self._identify_classical_performer,
+            )
+        )
         # an album's release names the performers of all its tracks in one lookup
         phases.append(
             _LinkPhase(
@@ -988,6 +1093,17 @@ class MetaDataController(
                 _works_to_enrich_query(),
                 {},
                 identify,
+            )
+        )
+        # a composer is rarely an album's main artist, so it is identified on its own
+        phases.append(
+            _LinkPhase(
+                "composers",
+                artists,
+                DB_TABLE_ARTISTS,
+                _composers_to_identify_query(),
+                {"stale": int(time() - ARTIST_LOOKUP_RETRY_INTERVAL)},
+                self._identify_composer,
             )
         )
         return phases
@@ -1038,18 +1154,24 @@ class MetaDataController(
             ("albums", DB_TABLE_ALBUMS, _albums_to_identify_query()),
             ("artists", DB_TABLE_ARTISTS, _artists_to_identify_query()),
             ("tracks", DB_TABLE_TRACKS, _tracks_to_identify_query()),
+            ("performers", DB_TABLE_ARTISTS, _performers_to_identify_query()),
             ("album performers", DB_TABLE_ALBUMS, _albums_with_recordings_to_read_query()),
             ("track performers", DB_TABLE_TRACKS, _tracks_with_recording_to_read_query()),
             ("works", DB_TABLE_WORKS, _works_to_enrich_query()),
+            ("composers", DB_TABLE_ARTISTS, _composers_to_identify_query()),
         )
 
     async def _count_link_selections(self, *selections: tuple[str, str, str]) -> dict[str, int]:
         """Return the number of rows each (name, table, query part) link selection matches."""
         counts: dict[str, int] = {}
+        # the link phases look artists up again after the artist retry interval, the rest
+        # after the refresh interval
         stale = {"stale": int(time() - REFRESH_INTERVAL)}
+        artist_stale = {"stale": int(time() - ARTIST_LOOKUP_RETRY_INTERVAL)}
         for name, table, query in selections:
             counts[name] = await self.mass.music.database.get_count_from_query(
-                f"SELECT 1 FROM {table} WHERE {_valid_metadata_guard(table)} AND {query}", stale
+                f"SELECT 1 FROM {table} WHERE {_valid_metadata_guard(table)} AND {query}",
+                artist_stale if table == DB_TABLE_ARTISTS else stale,
             )
         return counts
 
@@ -1211,6 +1333,53 @@ def _artists_to_identify_query() -> str:
         f"AND {album_identified})"
     )
     return f"({marker} ISNULL AND NOT {identified} AND {has_identified_album})"
+
+
+def _composers_to_identify_query() -> str:
+    """Return a query part selecting classical composers due for a lookup (param ``stale``)."""
+    marker = _musicbrainz_lookup_marker(DB_TABLE_ARTISTS)
+    identified = has_musicbrainz_id(
+        f"{DB_TABLE_ARTISTS}.item_id", MediaType.ARTIST, ExternalID.MB_ARTIST
+    )
+    # a composer MusicBrainz did not identify is looked up again once its lookup is stale; one
+    # its tags identified is read once, for its life dates and its other spellings
+    return (
+        f"(({marker} ISNULL OR ({marker} < :stale AND NOT {identified})) "
+        f"AND {_credited_on_classical_tracks((ArtistRole.COMPOSER,))})"
+    )
+
+
+def _performers_to_identify_query() -> str:
+    """Return a query part selecting classical performers due for a lookup (param ``stale``)."""
+    marker = _musicbrainz_lookup_marker(DB_TABLE_ARTISTS)
+    identified = has_musicbrainz_id(
+        f"{DB_TABLE_ARTISTS}.item_id", MediaType.ARTIST, ExternalID.MB_ARTIST
+    )
+    reverse_domains = ", ".join(f"'{x}'" for x in REVERSE_URL_DOMAINS)
+    # only a streaming service link of its own can identify the performer
+    has_link = (
+        f"EXISTS (SELECT 1 FROM {DB_TABLE_PROVIDER_MAPPINGS} pm "
+        f"WHERE pm.media_type = '{MediaType.ARTIST.value}' "
+        f"AND pm.item_id = {DB_TABLE_ARTISTS}.item_id "
+        f"AND pm.provider_domain IN ({reverse_domains}))"
+    )
+    # a composer is looked up by the composers phase
+    return (
+        f"(({marker} ISNULL OR {marker} < :stale) AND NOT {identified} "
+        f"AND {_credited_on_classical_tracks(PERFORMING_ROLES)} "
+        f"AND NOT {_credited_on_classical_tracks((ArtistRole.COMPOSER,))} AND {has_link})"
+    )
+
+
+def _credited_on_classical_tracks(roles: Iterable[ArtistRole]) -> str:
+    """Return a query part true for an artist credited in one of the roles on a classical track."""
+    role_values = ", ".join(f"'{x.value}'" for x in roles)
+    return (
+        f"EXISTS (SELECT 1 FROM {DB_TABLE_TRACK_CREDITS} ta "
+        f"JOIN {DB_TABLE_TRACKS} t ON t.item_id = ta.track_id "
+        f"WHERE ta.artist_id = {DB_TABLE_ARTISTS}.item_id "
+        f"AND ta.role IN ({role_values}) AND t.is_classical = 1)"
+    )
 
 
 def _tracks_to_identify_query() -> str:

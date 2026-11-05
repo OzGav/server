@@ -25,7 +25,7 @@ def fill_artist_from_musicbrainz(
     artist: Artist, mb_artist: MusicBrainzArtist, replace: bool = False
 ) -> None:
     """
-    Fill an artist's empty entity type and life span in from its MusicBrainz artist.
+    Fill an artist's empty entity type, life span and country in from its MusicBrainz artist.
 
     :param artist: The artist to fill in.
     :param mb_artist: Its MusicBrainz artist.
@@ -36,6 +36,8 @@ def fill_artist_from_musicbrainz(
         metadata.artist_entity_type = entity_type
     if (replace or not metadata.life_span) and (life_span := mb_artist.metadata_life_span):
         metadata.life_span = life_span
+    if not metadata.country:
+        metadata.country = mb_artist.country_code
 
 
 def musicbrainz_work_name(mb_work: MusicBrainzWork, language: str) -> str:
