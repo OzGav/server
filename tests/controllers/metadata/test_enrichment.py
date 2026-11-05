@@ -2209,7 +2209,7 @@ async def test_artist_identity_gives_an_artist_their_life_span_and_a_composer_th
     is_composer: bool, period: Period | None
 ) -> None:
     """
-    An artist whose id came from the tags takes their life span from the link.
+    An artist whose id came from the tags takes their life span and country from the link.
 
     A classical composer also takes the period of their life span.
     """
@@ -2219,6 +2219,7 @@ async def test_artist_identity_gives_an_artist_their_life_span_and_a_composer_th
             name="Dmitri Shostakovich",
             sort_name="Shostakovich, Dmitri",
             type="Person",
+            country="RU",
             life_span=MusicBrainzLifeSpan(begin="1906-09-25", end="1975-08-09", ended=True),
         )
     )
@@ -2240,6 +2241,7 @@ async def test_artist_identity_gives_an_artist_their_life_span_and_a_composer_th
 
     musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
     assert artist.metadata.life_span == LifeSpan(begin="1906-09-25", end="1975-08-09", ended=True)
+    assert artist.metadata.country == "RU"
     assert artist.period == period
 
 

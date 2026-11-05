@@ -757,6 +757,27 @@ async def test_track_overwrite_naming_another_work_moves_it(
     assert (stored.movement_number, stored.movement_name) == (5, "Tag name")
 
 
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_track_overwrite_keeps_musicbrainz_work_ids_only_from_streaming(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch, streaming: bool
+) -> None:
+    """A streaming overwrite keeps the stored work ids, a file overwrite takes its tags' ids."""
+    stored_id, tag_id = _mbid(), _mbid()
+    track = await _add_track(mass, work_ids=[stored_id])
+    source = Mock(spec=MusicProvider, is_streaming_provider=streaming)
+    monkeypatch.setattr(mass, "get_provider", Mock(return_value=source))
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.external_ids = (
+        {(ExternalID.MB_RECORDING, _mbid())} if streaming else {(ExternalID.MB_WORK, tag_id)}
+    )
+
+    await mass.music.tracks.update_item_in_library(track.item_id, update, overwrite=True)
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert _track_work_ids(stored) == ({stored_id} if streaming else {tag_id})
+
+
 async def test_track_of_a_work_gets_its_composers(mass: MusicAssistant) -> None:
     """A track of a work credits the work's composers in order, unless it credits its own."""
     first = await _add_artist(mass, "First")
@@ -1195,10 +1216,10 @@ async def test_streaming_update_drops_the_performing_credit_of_the_composer(
     ]
 
 
-async def test_track_moves_onto_a_work_as_a_movement(
+async def test_track_moves_onto_a_work_as_a_movement_and_off_it(
     mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A track placed on a work as a movement is stored and signalled."""
+    """A track placed on a work as a movement, or taken off it, is stored and signalled."""
     composer = await _add_artist(mass, "Composer")
     movement = await _add_work(mass, f"Movement {_token()}", [composer])
     work = await _add_work(mass, f"Work {_token()}", [composer])
@@ -1218,7 +1239,12 @@ async def test_track_moves_onto_a_work_as_a_movement(
 
     await mass.music.tracks.set_movement_number(int(track.item_id), 3)
     assert (await mass.music.tracks.get_library_item(track.item_id)).movement_number == 3
-    assert signal.call_count == 2
+
+    await mass.music.tracks.set_work(int(track.item_id), None)
+
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert (stored.work, stored.movement_number, stored.movement_name) == (None, None, None)
+    assert signal.call_count == 3
 
 
 async def test_work_movements_are_replaced_or_removed(
