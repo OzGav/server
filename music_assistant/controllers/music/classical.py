@@ -434,6 +434,29 @@ class ClassicalController:
             )
         ]
 
+    async def work_tracks(self, item_id: str) -> list[Track]:
+        """
+        Get the tracks that playing a work plays, in the order they play.
+
+        These are the tracks of the first recording of the work itself, as listed by recordings.
+        A work without one plays the first recording of each of its parts, in the work's order,
+        and for a part without one, of each of its own parts.
+
+        :param item_id: The library id of the work.
+        """
+        firsts: dict[str, Recording] = {}
+        for recording in await self.recordings(item_id):
+            firsts.setdefault(recording.work.item_id, recording)
+        if own := firsts.get(item_id):
+            picked = [own]
+        else:
+            # the recordings of the parts follow in the work's order, a part of a part, such as
+            # a scene of an act, only when the part it sits under has none
+            picked = [
+                x for x in firsts.values() if x.parent_work and x.parent_work.item_id not in firsts
+            ]
+        return [track for recording in picked for track in recording.tracks]
+
     async def other_tracks(
         self,
         artist_id: str,

@@ -51,6 +51,7 @@ from music_assistant.controllers.player_queues.autoplay import (
 )
 from music_assistant.controllers.player_queues.base import _PlayerQueuesBase
 from music_assistant.controllers.player_queues.constants import (
+    CONF_DEFAULT_ENQUEUE_OPTION_ALBUM,
     CONF_DEFAULT_ENQUEUE_OPTION_LIVE_SOURCES,
     MANAGED_POOL_MAX,
     ORDERED_MEDIA_TYPES,
@@ -860,9 +861,12 @@ class QueueLoaderMixin(_PlayerQueuesBase):
                 if option is None:
                     # Radio + AudioSource share a single "live_sources" enqueue default —
                     # both are live infinite streams where REPLACE is almost always the
-                    # right semantic. Other media types use their per-type config key.
+                    # right semantic. A work plays as an album does. Other media types use
+                    # their per-type config key.
                     if media_item.media_type in (MediaType.RADIO, MediaType.AUDIO_SOURCE):
                         config_key = CONF_DEFAULT_ENQUEUE_OPTION_LIVE_SOURCES
+                    elif media_item.media_type == MediaType.WORK:
+                        config_key = CONF_DEFAULT_ENQUEUE_OPTION_ALBUM
                     else:
                         config_key = f"default_enqueue_option_{media_item.media_type.value}"
                     config_value = self.get_config_value(config_key, return_type=str)
