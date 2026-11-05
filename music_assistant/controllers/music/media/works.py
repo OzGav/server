@@ -27,6 +27,8 @@ from music_assistant_models.media_items import (
 )
 
 from music_assistant.constants import (
+    DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
     DB_TABLE_TRACKS,
     DB_TABLE_WORK_ARRANGEMENTS,
     DB_TABLE_WORK_ARTISTS,
@@ -458,6 +460,35 @@ class WorksController(MediaControllerBase[Work]):
         library_item = await self.get_library_item(work_id)
         self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
 
+    async def replace_composer(self, work_id: int, old_id: int, new_id: int) -> None:
+        """
+        Credit one library artist in place of another as composer of a work and on its tracks.
+
+        :param work_id: Library id of the work.
+        :param old_id: Library id of the artist credited now.
+        :param new_id: Library id of the artist to credit instead.
+        """
+        params = {
+            "work_id": work_id,
+            "old_id": old_id,
+            "new_id": new_id,
+            "composer": ArtistRole.COMPOSER.value,
+        }
+        tracks = f"SELECT item_id FROM {DB_TABLE_TRACKS} WHERE work_id = :work_id"
+        # on the tracks the namesake is the composer under any role, such as the main artist
+        for table, owner in (
+            (DB_TABLE_WORK_ARTISTS, "work_id = :work_id AND role = :composer"),
+            (DB_TABLE_TRACK_ARTISTS, f"track_id IN ({tracks})"),
+            (DB_TABLE_TRACK_CREDITS, f"track_id IN ({tracks})"),
+        ):
+            where = f"WHERE {owner} AND artist_id = :old_id"
+            # a credit the new artist already holds stays, so the old one is deleted instead
+            await self.mass.music.database.execute_write(
+                f"UPDATE OR IGNORE {table} SET artist_id = :new_id {where}", params
+            )
+            await self.mass.music.database.execute_write(f"DELETE FROM {table} {where}", params)
+        await self.mass.music.classification.update_item(self.media_type, work_id)
+
     async def set_movements(self, work_id: int, movements: list[WorkMovement] | None) -> None:
         """
         Replace the movements stored for a library work, a library update only adds to them.
@@ -528,6 +559,7 @@ class WorksController(MediaControllerBase[Work]):
             return work_id
         if not work.mbid:
             return None
+        await self._set_library_composers(work)
         return int((await self.add_item_to_library(work)).item_id)
 
     async def _add_library_item(self, item: Work, overwrite_existing: bool = False) -> int:
@@ -656,6 +688,21 @@ class WorksController(MediaControllerBase[Work]):
             await self.mass.music.database.delete(DB_TABLE_WORK_ARRANGEMENTS, {"work_id": db_id})
         for source_id in dict.fromkeys(source_ids):
             await self.add_arrangement(db_id, source_id)
+
+    async def _set_library_composers(self, work: Work) -> None:
+        """Replace the composers of a work by their library artists, adding those if needed."""
+        # matched on the library artists, as a provider may name a composer differently
+        work.composers = UniqueList(
+            [
+                ItemMapping(
+                    media_type=MediaType.ARTIST,
+                    item_id=str(await self._get_library_artist_id(x)),
+                    provider="library",
+                    name=x.name,
+                )
+                for x in work.composers
+            ]
+        )
 
     async def _validate_library_item_merge(self, target: Work, source: Work) -> None:
         """Validate that two works are not different MusicBrainz works."""
