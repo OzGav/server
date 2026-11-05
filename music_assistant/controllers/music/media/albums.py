@@ -19,6 +19,7 @@ from music_assistant_models.enums import (
     ListingType,
     MediaType,
     ProviderFeature,
+    RecordingSource,
     SortDirection,
     SortField,
 )
@@ -76,7 +77,7 @@ from music_assistant.models.music_provider import (
     MusicProvider,
     provider_fetch_log_level,
 )
-from music_assistant.providers.musicbrainz.constants import MAGICISRC_URL
+from music_assistant.providers.musicbrainz.constants import MAGICISRC_URL, MUSICBRAINZ_WEB_URL
 from music_assistant.providers.musicbrainz.provider import (
     is_digital_release,
     relation_urls,
@@ -1222,7 +1223,9 @@ class AlbumsController(MediaControllerBase[Album]):
         """
         Fill the recording ids and ISRCs of a release in on the library tracks at its positions.
 
-        The ISRCs the tracks have that their recordings lack are logged once per release.
+        A track keeps another recording id it has, unless it is classical and a release gave it
+        that one. The ISRCs the tracks have that their recordings lack are logged once per
+        release.
 
         :return: The ids of the library tracks merged away into another one.
         """
@@ -1254,10 +1257,23 @@ class AlbumsController(MediaControllerBase[Album]):
             ):
                 # MagicISRC accepts one ISRC per track position
                 missing_isrcs[track_numbers[release_track.id]] = missing[0]
-            changed = fill_track_from_recording(db_track, recording)
+            # a recording a release gave a classical track before yields to this release's
+            replaced = (
+                db_track.is_classical
+                and db_track.metadata.recording_source == RecordingSource.RELEASE
+                and db_track.mbid not in (None, recording.id)
+            )
+            if replaced:
+                db_track.external_ids.discard((ExternalID.MB_RECORDING, db_track.mbid))
+            changed = fill_track_from_recording(db_track, recording, RecordingSource.RELEASE)
             if not changed and db_track.metadata.last_musicbrainz_lookup is not None:
                 continue
             db_track.metadata.last_musicbrainz_lookup = int(time())
+            if replaced:
+                # a library update would add the new recording id next to the old one
+                await self.mass.music.tracks.set_external_ids(
+                    db_track.item_id, db_track.external_ids
+                )
             merged |= await self.mass.music.tracks.merge_recording_duplicates(db_track)
             await self.mass.music.tracks.update_item_in_library(db_track.item_id, db_track)
         if missing_isrcs:
@@ -1335,19 +1351,20 @@ class AlbumsController(MediaControllerBase[Album]):
                     logging.DEBUG,
                     (
                         'MusicBrainz links album "%s" on %s to release '
-                        "https://musicbrainz.org/release/%s, but the lengths of tracks %s (counted "
+                        "%s/release/%s, but the lengths of tracks %s (counted "
                         "across discs) differ; if %s plays another version, remove the link from "
                         "the release"
                     )
                     if linked
                     else (
                         'Album "%s" on %s has the track count of MusicBrainz release '
-                        "https://musicbrainz.org/release/%s, but the lengths of tracks %s (counted "
+                        "%s/release/%s, but the lengths of tracks %s (counted "
                         "across discs) differ; it may be another edition on %s or a wrong length "
                         "on MusicBrainz, compare with another service"
                     ),
                     album.name,
                     domain,
+                    MUSICBRAINZ_WEB_URL,
                     release.id,
                     ", ".join(map(str, differing)),
                     domain,
@@ -1356,8 +1373,15 @@ class AlbumsController(MediaControllerBase[Album]):
                 continue
             for track, release_track in pairs:
                 recording = release_track.recording
-                # the order alone does not outweigh another recording id the track holds
-                if recording and track.mbid in (None, recording.id):
+                # the order alone does not outweigh another recording id the track has, unless
+                # a release gave that one to a classical track
+                if recording and (
+                    track.mbid in (None, recording.id)
+                    or (
+                        track.is_classical
+                        and track.metadata.recording_source == RecordingSource.RELEASE
+                    )
+                ):
                     in_order.setdefault(track.item_id, release_track)
         return in_order
 

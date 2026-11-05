@@ -22,6 +22,7 @@ from music_assistant_models.enums import (
     MediaType,
     ProviderFeature,
     ProviderType,
+    RecordingSource,
     SortDirection,
     SortField,
 )
@@ -41,7 +42,6 @@ from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import (
     Album,
     Artist,
-    Credit,
     ItemMapping,
     ItemMappingSummary,
     MediaItemMetadata,
@@ -66,8 +66,10 @@ from music_assistant.constants import (
 from music_assistant.controllers.metadata.constants import MUSICBRAINZ_LINK_DOMAINS
 from music_assistant.controllers.music.constants import MATCH_SEARCH_LIMIT, SIMILAR_ITEMS_LIMIT
 from music_assistant.controllers.music.helpers import (
+    has_musicbrainz_id,
     provider_mappings_for_update,
     search_name_match_clause,
+    set_track_recording_id,
 )
 from music_assistant.controllers.music.listing import apply_listing, resolve_listing_sort
 from music_assistant.controllers.music.listing_cache import Listing, invalidate_listings
@@ -83,6 +85,7 @@ from music_assistant.helpers.compare import (
     loose_compare_strings,
     track_durations_agree,
 )
+from music_assistant.helpers.credit_roles import PERFORMING_ROLES, SQL_PERFORMING_ROLES
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.external_ids import is_valid_isrc, normalize_external_id
 from music_assistant.helpers.json import json_dumps, json_loads
@@ -103,6 +106,8 @@ from .works import SUMMARY_WORK_FIELDS, WORK_MAPPING_FIELDS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    from music_assistant_models.media_items import Credit
 
     from music_assistant import MusicAssistant
     from music_assistant.models.media_capabilities import MusicDiscoveryMixin
@@ -917,7 +922,7 @@ class TracksController(MediaControllerBase[Track]):
 
         :param item_id: Provider-native track ID.
         :param provider_instance_id_or_domain: Music provider instance ID or domain.
-        :param mbid: MusicBrainz recording ID.
+        :param mbid: MusicBrainz recording ID an AcoustID fingerprint lookup found.
         :param acoustid: AcoustID UUID.
         :param isrcs: ISRC codes.
         """
@@ -939,8 +944,7 @@ class TracksController(MediaControllerBase[Track]):
             return
 
         changed = False
-        if mbid and not track.mbid:
-            track.mbid = mbid
+        if mbid and set_track_recording_id(track, mbid, RecordingSource.ACOUSTID):
             changed = True
         if acoustid and not any(
             ext_id[0] == ExternalID.ACOUSTID and ext_id[1] == acoustid
@@ -993,6 +997,20 @@ class TracksController(MediaControllerBase[Track]):
             merged.add(other.item_id)
         return merged
 
+    async def mark_recording_read(self, track_id: int, recording_year: int | None) -> None:
+        """
+        Store when a library track's MusicBrainz recording was read, with its recording year.
+
+        :param track_id: Library id of the track.
+        :param recording_year: The year its recording was made, None when not known.
+        """
+        await self.mass.music.database.execute_write(
+            f"UPDATE {DB_TABLE_TRACKS} SET metadata = json_set(COALESCE(metadata, '{{}}'), "
+            "'$.last_musicbrainz_recording_lookup', :now, '$.recording_year', :year) "
+            "WHERE item_id = :track_id",
+            {"now": int(time.time()), "year": recording_year, "track_id": track_id},
+        )
+
     async def set_work(
         self,
         track_id: int,
@@ -1044,6 +1062,38 @@ class TracksController(MediaControllerBase[Track]):
         )
         library_item = await self.get_library_item(track_id)
         self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+
+    async def reread_artist_recordings(self, artist_id: int) -> None:
+        """
+        Have the MusicBrainz link run read the recordings of an artist's classical tracks again.
+
+        Covers the tracks the artist is a track artist of or has any credit on but composer.
+
+        :param artist_id: Library id of the artist.
+        """
+        marker = f"json_extract({DB_TABLE_TRACKS}.metadata, '$.last_musicbrainz_recording_lookup')"
+        recording = has_musicbrainz_id(
+            f"{DB_TABLE_TRACKS}.item_id", MediaType.TRACK, ExternalID.MB_RECORDING
+        )
+        await self.mass.music.database.execute_write(
+            f"UPDATE {DB_TABLE_TRACKS} "
+            "SET metadata = json_remove(metadata, '$.last_musicbrainz_recording_lookup') "
+            f"WHERE is_classical = 1 AND json_valid(metadata) AND {marker} NOT NULL "
+            f"AND {recording} AND item_id IN (SELECT track_id FROM {DB_TABLE_TRACK_ARTISTS} "
+            "WHERE artist_id = :artist_id UNION SELECT track_id FROM "
+            f"{DB_TABLE_TRACK_CREDITS} WHERE artist_id = :artist_id AND role != :composer)",
+            {"artist_id": artist_id, "composer": ArtistRole.COMPOSER.value},
+        )
+
+    async def add_credits(self, item_id: int, item_credits: Iterable[Credit]) -> None:
+        """
+        Add credits to a library track, keeping the credits it has.
+
+        :param item_id: Library id of the track.
+        :param item_credits: The credits to add; main artist credits are left out.
+        """
+        await self._set_credits(item_id, item_credits)
+        await self.mass.music.classification.update(track_ids=[item_id])
 
     async def credit_work_composers(self, work_id: int) -> None:
         """
@@ -2001,6 +2051,7 @@ class TracksController(MediaControllerBase[Track]):
         item.metadata.lrc_lyrics = normalize_lrc_lyrics(
             item.metadata.lrc_lyrics or extract_lrc_lyrics(item.metadata.lyrics)
         )
+        self._mark_own_recording_id(item)
         work_id = (
             await self.mass.music.works.get_or_add_library_work_id(item.work) if item.work else None
         )
@@ -2055,18 +2106,45 @@ class TracksController(MediaControllerBase[Track]):
         """Update Track record in the database, merging data."""
         db_id = int(item_id)  # ensure integer
         cur_item = await self.get_library_item(db_id)
+        self._mark_own_recording_id(update)
         if overwrite:
             await self._keep_held_placement(update, cur_item)
-        metadata = update.metadata if overwrite else cur_item.metadata.update(update.metadata)
+        metadata = update.metadata if overwrite else self._merged_metadata(cur_item, update)
         metadata.lrc_lyrics = normalize_lrc_lyrics(
             metadata.lrc_lyrics or extract_lrc_lyrics(metadata.lyrics)
         )
         update_instances = {x.provider_instance for x in update.provider_mappings}
+        from_streaming = any(
+            (prov := self.mass.get_provider(x, True, provider_type=MusicProvider))
+            and prov.is_streaming_provider
+            for x in update_instances
+        )
         # an update from the only provider instance the track is known on (e.g. a renamed
         # file) has its complete credits, so they replace the stored ones
         replace_credits = bool(update_instances) and all(
             x.provider_instance in update_instances for x in cur_item.provider_mappings
         )
+        # a classical track read from its files has the performers in them now, also none,
+        # until its MusicBrainz recording is read again
+        replace_performers = (
+            (overwrite or replace_credits)
+            and update.provider != "library"
+            and cur_item.is_classical
+            and not from_streaming
+        )
+        if overwrite:
+            # kept until the MusicBrainz link run has read the track's recording again
+            metadata.recording_year = metadata.recording_year or cur_item.metadata.recording_year
+        elif (
+            replace_credits
+            and (
+                replace_performers or any(x.role != ArtistRole.MAIN_ARTIST for x in update.credits)
+            )
+            and not any(x.role in PERFORMING_ROLES for x in update.credits)
+            and any(x.role in PERFORMING_ROLES for x in cur_item.credits)
+        ):
+            # the MusicBrainz link run credits the track artists with their roles again
+            metadata.last_musicbrainz_recording_lookup = None
         cur_item.external_ids.update(update.external_ids)
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
@@ -2121,6 +2199,8 @@ class TracksController(MediaControllerBase[Track]):
         await self._set_track_artists(
             db_id, artists, overwrite=overwrite, resolved_artists=resolved_artists
         )
+        if replace_performers:
+            await self._remove_performers(db_id)
         await self._set_credits(
             db_id,
             update.credits,
@@ -2155,6 +2235,14 @@ class TracksController(MediaControllerBase[Track]):
         stored = metadata.to_dict()
         del stored["classical_tag"]
         return json_dumps(stored)
+
+    async def _remove_performers(self, db_id: int) -> None:
+        """Remove the performing credits of a library track."""
+        await self.mass.music.database.execute_write(
+            f"DELETE FROM {DB_TABLE_TRACK_CREDITS} "
+            f"WHERE track_id = :db_id AND role IN ({SQL_PERFORMING_ROLES})",
+            {"db_id": db_id},
+        )
 
     async def _update_library_item_for_merge(self, item_id: int, update: Track) -> None:
         """Merge track model state without replacing existing album relations."""
@@ -2439,6 +2527,23 @@ class TracksController(MediaControllerBase[Track]):
             "(json_extract(tracks.metadata, '$.explicit') IS NULL "
             "OR json_extract(tracks.metadata, '$.explicit') = 0)"
         ]
+
+    @staticmethod
+    def _mark_own_recording_id(item: Track) -> None:
+        """Mark the recording id a provider track has, as from a file's tags, as its own."""
+        if item.provider != "library" and item.mbid and not item.metadata.recording_source:
+            item.metadata.recording_source = RecordingSource.TAG
+
+    @staticmethod
+    def _merged_metadata(cur_item: Track, update: Track) -> MediaItemMetadata:
+        """Merge the metadata of an update into that of the stored track and return it."""
+        # a recording id found by a name search gives way to one from any other source
+        if (
+            cur_item.metadata.recording_source == RecordingSource.SEARCH
+            and update.metadata.recording_source
+        ):
+            cur_item.metadata.recording_source = None
+        return cur_item.metadata.update(update.metadata)
 
     @staticmethod
     def _recording_ids(track: Track) -> set[str]:
