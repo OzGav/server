@@ -121,14 +121,15 @@ MANAGED_POOL_MAX = 50
 MANAGED_POOL_SOURCE_CAP = 250
 
 # Media types that are not a pool of tracks to shuffle: an album is sequenced by its artist, a
-# podcast or audiobook only makes sense front to back, and a radio station is a single endless
-# stream. Starting one of these plays it as it comes, switching the queue's shuffle off with it,
-# unless the caller asks for shuffle explicitly. Every other type (playlist, artist, genre, ...)
-# keeps whatever the queue is set to. An artist counts as sequenced too when it plays its albums
-# under an album order. Top tracks, an artist without albums, and authors or narrators keep the
-# queue's shuffle.
+# work by its composer, a podcast or audiobook only makes sense front to back, and a radio station
+# is a single endless stream. Starting one of these plays it as it comes, switching the queue's
+# shuffle off with it, unless the caller asks for shuffle explicitly. Every other type (playlist,
+# artist, genre, ...) keeps whatever the queue is set to. An artist counts as sequenced too when it
+# plays its albums under an album order. Top tracks, an artist without albums, and authors or
+# narrators keep the queue's shuffle.
 ORDERED_MEDIA_TYPES = (
     MediaType.ALBUM,
+    MediaType.WORK,
     MediaType.AUDIOBOOK,
     MediaType.PODCAST,
     MediaType.PODCAST_EPISODE,
