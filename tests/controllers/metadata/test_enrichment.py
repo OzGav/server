@@ -2278,6 +2278,31 @@ def _track(external_ids: set[tuple[ExternalID, str]] | None = None) -> Track:
 
 
 @pytest.mark.asyncio
+async def test_track_identity_reads_the_library_album_once_when_asked() -> None:
+    """MusicBrainz is handed the track's library album with its ids, read once when asked."""
+    album = _album({(ExternalID.MB_ALBUM, RELEASE_ID)})
+    given: list[Any] = []
+
+    async def _resolve(_track: Track, get_album: Any) -> None:
+        given.extend([await get_album(), await get_album()])
+
+    musicbrainz = _musicbrainz()
+    musicbrainz.resolve_recording = AsyncMock(side_effect=_resolve)
+    enrichment = _enrichment(musicbrainz)
+    read = AsyncMock(return_value=album)
+    _mass(enrichment).music.albums.get_library_item = read
+    track = _track()
+    track.album = ItemMapping(
+        media_type=MediaType.ALBUM, item_id="2", provider="library", name=album.name
+    )
+
+    await enrichment._link_track_to_musicbrainz(track)
+
+    assert given == [album, album]
+    read.assert_awaited_once_with("2")
+
+
+@pytest.mark.asyncio
 async def test_track_identity_fills_recording_id_and_isrcs_and_links() -> None:
     """The recording's id and every ISRC the track lacks are filled in, then it is linked."""
     recording = MusicBrainzRecording(
@@ -2659,6 +2684,7 @@ async def test_artist_identity_follows_an_artist_merged_into_another() -> None:
     artist = _merged_artist({(ExternalID.MB_ARTIST, OTHER_MBID)})
     # a sync stored a Discogs id on the artist while it was looked up
     _stored_item(enrichment, _merged_artist({(ExternalID.MB_ARTIST, OTHER_MBID), DISCOGS_ID}))
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(return_value=[])
 
     await enrichment._update_artist_metadata(artist, force_refresh=True)
 
@@ -2675,6 +2701,7 @@ async def test_artist_identity_merges_the_library_artists_sharing_a_followed_id(
     enrichment = _enrichment(_musicbrainz_answering_with(MBID))
     artist = _merged_artist({(ExternalID.MB_ARTIST, OTHER_MBID)})
     _stored_item(enrichment, _merged_artist({(ExternalID.MB_ARTIST, OTHER_MBID)}))
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(return_value=[])
 
     await enrichment._update_artist_metadata(artist, force_refresh=True)
 

@@ -38,6 +38,7 @@ from music_assistant_models.helpers import get_global_cache_value
 from music_assistant_models.media_items import (
     Album,
     Artist,
+    ItemMapping,
     MediaItemImage,
     MediaItemMetadata,
     Track,
@@ -76,7 +77,7 @@ from .constants import (
 from .helpers import fill_artist_from_musicbrainz, is_latin, musicbrainz_name
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable, Iterable, Sequence
+    from collections.abc import Awaitable, Callable, Hashable, Iterable, Sequence
 
     from music_assistant_models.config_entries import CoreConfig
     from music_assistant_models.enums import Period
@@ -142,6 +143,13 @@ class MetadataEnrichmentMixin:
 
         @property
         def link_providers_via_musicbrainz(self) -> bool: ...  # noqa: D102
+
+        async def _confirm_composer(
+            self,
+            mbid: str,
+            details: MusicBrainzArtist | None = None,
+            force_refresh: bool = False,
+        ) -> None: ...
 
     async def _update_artist_metadata(  # noqa: PLR0915
         self, artist: Artist, force_refresh: bool = False, rebuild: bool = False
@@ -323,9 +331,35 @@ class MetadataEnrichmentMixin:
         await self.mass.music.artists.update_item_in_library(artist.item_id, artist)
         # an id a name search found may belong to a namesake, so only a reliable one merges
         if merge_mbid:
-            await self.mass.music.artists.merge_library_artists_by_mbid(
-                int(artist.item_id), merge_mbid
+            await self._merge_identified_artist(
+                int(artist.item_id), merge_mbid, force_refresh=force_refresh
             )
+
+    async def _merge_identified_artist(
+        self, artist_id: int, mbid: str, force_refresh: bool = False
+    ) -> None:
+        """
+        Merge the artists sharing an artist's newly found MusicBrainz id, confirming a composer.
+
+        :param artist_id: Library id of the artist.
+        :param mbid: The MusicBrainz artist id it was identified by.
+        :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
+        """
+        survivor_id = await self.mass.music.artists.merge_library_artists_by_mbid(artist_id, mbid)
+        await self._confirm_if_composer(survivor_id, mbid, force_refresh)
+
+    async def _confirm_if_composer(
+        self, artist_id: int, mbid: str, force_refresh: bool = False
+    ) -> None:
+        """
+        Join a classical composer's other spellings and its credits joined with others to it.
+
+        :param artist_id: Library id of the artist.
+        :param mbid: The MusicBrainz artist id of the artist.
+        :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
+        """
+        if await self._is_classical_composer(artist_id):
+            await self._confirm_composer(mbid, force_refresh=force_refresh)
 
     def _select_description(
         self,
@@ -1130,7 +1164,9 @@ class MetadataEnrichmentMixin:
         try:
             # a forced refresh asks MusicBrainz again, rather than reading a cached result
             async with self.mass.cache.handle_refresh(force_refresh):
-                resolved = await musicbrainz.resolve_recording(track)
+                resolved = await musicbrainz.resolve_recording(
+                    track, get_album=_album_getter(self.mass, track)
+                )
             if (
                 rebuild
                 and track.is_classical
@@ -1533,6 +1569,25 @@ def _drop_provider_images(metadata: MediaItemMetadata, provider_instance_id: str
             UniqueList(img for img in metadata.images if img.provider != provider_instance_id)
             or None
         )
+
+
+def _album_getter(
+    mass: MusicAssistant, track: Track
+) -> Callable[[], Awaitable[Album | ItemMapping | None]]:
+    """Return a getter of a track's album with its ids, which reads a library album once."""
+    album = track.album
+    unread = isinstance(album, ItemMapping) and album.provider == "library"
+
+    async def get_album() -> Album | ItemMapping | None:
+        nonlocal album, unread
+        if unread and album:
+            unread = False
+            # a library track only has a summary of its album, without its ids
+            with suppress(MediaNotFoundError):
+                album = await mass.music.albums.get_library_item(album.item_id)
+        return album
+
+    return get_album
 
 
 def _refresh_timestamp(retry_soon: bool, not_before: int = 0) -> int:
