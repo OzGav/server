@@ -352,6 +352,7 @@ async def test_works(library: _Library) -> None:
     ]
     assert rows[0].work.catalog_numbers == ["Op. 55"]
     assert [x.name for x in rows[0].work.composers] == ["Ludwig van Beethoven"]
+    assert all(x.part_names == [] for x in rows)
     # works without a stored type, alone or listed, show the type their title names
     assert [x.work.work_type for x in rows] == [
         WorkType.SYMPHONY,
@@ -514,6 +515,29 @@ async def test_works_without_a_performer_name_no_co_performers(music_mass: Music
     [row] = await music_mass.music.classical.works()
 
     assert (row.recording_count, row.co_performers, row.liked) == (3, [], None)
+
+
+async def test_works_by_performer_cover_a_part_of_a_part(music_mass: MusicAssistant) -> None:
+    """A performer's lone aria of an act counts in the row of its opera, with who else is on it."""
+    lib = await _new_library(music_mass, ("verdi", "singer", "maestro"))
+    await _add_work(lib, "Opera", "verdi")
+    await _add_work(lib, "Act", "verdi", parent="Opera")
+    await _add_work(lib, "Aria", "verdi", parent="Act")
+    await _add_credited_track(
+        lib,
+        "aria",
+        "Aria",
+        [("singer", ArtistRole.SOLOIST, 0), ("maestro", ArtistRole.CONDUCTOR, 0)],
+    )
+
+    [row] = await music_mass.music.classical.works(performer_id=lib.artist_id("singer"))
+
+    assert (row.work.name, row.recording_count, row.co_performers, row.liked) == (
+        "Opera",
+        1,
+        ["Maestro"],
+        False,
+    )
 
 
 @pytest.mark.parametrize(
@@ -823,12 +847,13 @@ def _recording_albums(*albums: tuple[str, str, int | None]) -> list[tuple[str, s
     work = ItemMapping(item_id="1", provider="library", name="Work", media_type=MediaType.WORK)
     performance = _Performance(
         key="k",
+        work_id=1,
         year=None,
         performer_ids=frozenset(),
         album_ids=[int(x) for x, _, _ in albums],
         tracks=[],
     )
-    recording = _build_recording(work, performance, {}, mappings)
+    recording = _build_recording(work, None, performance, {}, mappings)
     return [(x.item_id, x.name, x.year) for x in recording.albums]
 
 
@@ -1041,6 +1066,38 @@ class TestListingVisibility:
         assert hidden_recordings == []
         assert [x.name for x in other_tracks] == ["Visible Other"]
 
+    async def test_work_with_parts_is_listed_through_a_part_the_user_sees(
+        self, restricted_mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A works listing shows a work with parts while a part has a track the user sees.
+
+        The parts are not counted as works of their own.
+        """
+        mass = restricted_mass
+        before = await mass.music.works.library_count()
+        operas: dict[str, str] = {}
+        for name, mapping in (("Heard", _mapping()), ("Unheard", _mapping(HIDDEN_INSTANCE))):
+            part = await _add_mapped_track(mass, f"{name} Aria", mapping)
+            assert part.work is not None
+            opera = await mass.music.works.add_item_to_library(
+                Work(
+                    item_id=uuid4().hex,
+                    provider=WORK_SOURCE,
+                    name=f"{name} Opera",
+                    provider_mappings=set(),
+                )
+            )
+            await mass.music.works.set_parent_work(int(part.work.item_id), int(opera.item_id))
+            operas[name] = opera.item_id
+        monkeypatch.setattr(GET_CURRENT_USER, lambda: LISTENER)
+
+        listed = await mass.music.works.library_items(search="Opera")
+        count = await mass.music.works.library_count()
+
+        assert [x.item_id for x in listed] == [operas["Heard"]]
+        assert count == before + 1
+
 
 class TestFanartVisibility:
     """The fanart of a listing row prefers the artwork of the music sources the user sees."""
@@ -1099,6 +1156,194 @@ class TestArtistFilter:
         assert [(x.artist.name, x.main_role) for x in performers] == [
             ("Conductor Performed", ArtistRole.CONDUCTOR)
         ]
+
+
+class TestArtistsOfWorks:
+    """The composers listing only holds composers of a work."""
+
+    async def test_artists_without_a_work_are_left_out(
+        self, restricted_mass: MusicAssistant
+    ) -> None:
+        """A composer credited only on tracks without a work gets no row in any filter."""
+        mass = restricted_mass
+        await _add_mapped_track(mass, "Work", _mapping())
+        workless = await _add_mapped_track(mass, "Workless", _mapping(), work=False)
+        composer = _credited(workless, ArtistRole.COMPOSER)
+        classical = mass.music.classical
+
+        composers = await classical.composers()
+
+        assert [(x.artist.name, x.work_count) for x in composers] == [("Composer Work", 1)]
+        assert await classical.composers(sort_field=SortField.WORK_COUNT) == composers
+        assert await classical.composers(search="workless") == []
+        assert await classical.composers(artist_id=composer.item_id) == []
+
+
+@pytest.fixture(scope="class", name="parts_library")
+async def parts_library_fixture(music_mass_class: MusicAssistant) -> _Library:
+    """Return a class-scoped library of two operas whose arias are parts of them."""
+    lib = await _new_library(music_mass_class, ("delibes", "bizet", "sutherland", "callas"))
+    await _add_work(lib, "Lakme", "delibes")
+    await _add_work(lib, "Flower Duet", "delibes", parent="Lakme")
+    await _add_work(lib, "Bell Song", "delibes", parent="Lakme")
+    # an opera without composers is filtered by those of its arias
+    await _add_work(lib, "Carmen", None)
+    await _add_work(lib, "Habanera", "bizet", parent="Carmen")
+    for key, work, soloist in (
+        ("Overture", "Lakme", "callas"),
+        ("Duet Sutherland", "Flower Duet", "sutherland"),
+        ("Duet Callas", "Flower Duet", "callas"),
+        ("Bell Sutherland", "Bell Song", "sutherland"),
+        ("Habanera Callas", "Habanera", "callas"),
+    ):
+        await _add_track(lib, key, work, soloist, role=ArtistRole.SOLOIST)
+    return lib
+
+
+class TestPartsOfWorks:
+    """The parts of a work, such as arias, are listed through the work they belong to."""
+
+    @pytest.mark.parametrize(("composer", "expected"), [("delibes", "Lakme"), ("bizet", "Carmen")])
+    async def test_composer_filter_falls_back_to_the_parts(
+        self, parts_library: _Library, composer: str, expected: str
+    ) -> None:
+        """A work matches its own composers, or those of its parts when it has none."""
+        rows = await parts_library.mass.music.classical.works(
+            composer_id=parts_library.artist_id(composer)
+        )
+
+        assert [x.work.name for x in rows] == [expected]
+
+    async def test_performer_filter_matches_through_the_parts(
+        self, parts_library: _Library
+    ) -> None:
+        """A work matches a performer of one of its parts and counts only their recordings."""
+        rows = await parts_library.mass.music.classical.works(
+            performer_id=parts_library.artist_id("sutherland")
+        )
+
+        assert [(x.work.name, x.recording_count) for x in rows] == [("Lakme", 2)]
+
+    @pytest.mark.parametrize(
+        ("performer", "expected"),
+        [
+            (None, {"Lakme": ["Bell Song", "Flower Duet"], "Carmen": ["Habanera"]}),
+            # all parts are named, also those the performer is not on
+            ("callas", {"Lakme": ["Bell Song", "Flower Duet"], "Carmen": ["Habanera"]}),
+        ],
+    )
+    async def test_rows_carry_their_part_names(
+        self, parts_library: _Library, performer: str | None, expected: dict[str, list[str]]
+    ) -> None:
+        """A work row names all its parts in the library, ordered by name."""
+        rows = await parts_library.mass.music.classical.works(
+            performer_id=parts_library.artist_id(performer) if performer else None
+        )
+
+        assert {x.work.name: x.part_names for x in rows} == expected
+
+    @pytest.mark.parametrize(
+        ("search", "expected"),
+        [("lakme bell", ["Lakme"]), ("habanera", ["Carmen"]), ("delibes", ["Lakme"])],
+    )
+    async def test_search_looks_in_the_part_names(
+        self, parts_library: _Library, search: str, expected: list[str]
+    ) -> None:
+        """The works search looks in the names of a work's parts after its composer and title."""
+        rows = await parts_library.mass.music.classical.works(search=search)
+
+        assert [x.work.name for x in rows] == expected
+
+    async def test_recordings_carry_the_parent_work(self, parts_library: _Library) -> None:
+        """The recordings of a part carry the work it is a part of, the work's own carry none."""
+        recordings = await parts_library.mass.music.classical.recordings(
+            parts_library.work_id("Lakme")
+        )
+
+        assert [
+            (x.work.name, x.parent_work.name if x.parent_work else None) for x in recordings
+        ] == [
+            ("Lakme", None),
+            ("Bell Song", "Lakme"),
+            ("Flower Duet", "Lakme"),
+            ("Flower Duet", "Lakme"),
+        ]
+        [habanera] = await parts_library.mass.music.classical.recordings(
+            parts_library.work_id("Habanera")
+        )
+        assert habanera.parent_work is not None
+        assert habanera.parent_work.item_id == parts_library.work_id("Carmen")
+
+
+@pytest.fixture(scope="class", name="staged_library")
+async def staged_library_fixture(music_mass_class: MusicAssistant) -> _Library:
+    """Return a class-scoped library of an opera with acts and arias and a Passion in parts."""
+    lib = await _new_library(music_mass_class, ("puccini", "bach", "karajan", "richter"))
+    for key, name, composer, parent, work_type in (
+        ("Tosca", "Tosca", "puccini", None, WorkType.OPERA),
+        ("Act I", "Tosca, Act I", "puccini", "Tosca", None),
+        ("Recondita", "Tosca: Act I: Recondita armonia", "puccini", "Act I", None),
+        ("Act II", "Tosca, Act II", "puccini", "Tosca", None),
+        ("Vissi", "Tosca: Act II: Vissi d'arte", "puccini", "Act II", None),
+        ("Ed io", "Tosca: Act II: Ed io venivo a lei", "puccini", "Act II", None),
+        ("Act III", "Tosca, Act III", "puccini", "Tosca", None),
+        ("Passion", "St Matthew Passion", "bach", None, None),
+        ("Part II", "St Matthew Passion, Part II", "bach", "Passion", None),
+        ("Part I", "St Matthew Passion, Part I", "bach", "Passion", None),
+    ):
+        await _add_work(lib, key, composer, name=name, parent=parent, work_type=work_type)
+    for key, name, work, conductor, movement in (
+        ("opera_recondita", "Tosca: Recondita armonia", "Tosca", "karajan", None),
+        ("opera_vissi", "Tosca: Vissi d'arte", "Tosca", "karajan", None),
+        ("act_ii", "Tosca, Act II: Scene", "Act II", "karajan", None),
+        ("recondita", "Tosca: Act I: Recondita armonia", "Recondita", "richter", None),
+        ("vissi", "Tosca: Act II: Vissi d'arte", "Vissi", "richter", None),
+        ("ed_io", "Tosca: Act II: Ed io venivo a lei", "Ed io", "richter", None),
+        ("part_i_1", "St Matthew Passion, Part I: No. 1 Kommt", "Part I", "richter", 1),
+        ("part_i_2", "St Matthew Passion, Part I: No. 2 Da Jesus", "Part I", "richter", 2),
+        ("part_ii", "St Matthew Passion, Part II: No. 63 Wahrlich", "Part II", "richter", 63),
+    ):
+        await _add_track(lib, key, work, conductor, name=name, movement=movement)
+    return lib
+
+
+class TestPartsAsMovements:
+    """Parts within parts are listed through their top work."""
+
+    async def test_parts_of_parts_count_in_their_top_work_row(
+        self, staged_library: _Library
+    ) -> None:
+        """Only the top works are rows, each counting the recordings of its parts at any depth."""
+        rows = await staged_library.mass.music.classical.works()
+        [composer] = await staged_library.mass.music.classical.composers(
+            artist_id=staged_library.artist_id("puccini")
+        )
+
+        assert {(x.work.name, x.recording_count) for x in rows} == {
+            ("Tosca", 5),
+            ("St Matthew Passion", 2),
+        }
+        assert (composer.work_count, composer.recording_count) == (1, 5)
+
+    @pytest.mark.parametrize(
+        ("composer", "performer", "search"),
+        [("puccini", None, None), (None, "richter", "act i"), (None, None, "act ii")],
+    )
+    async def test_filters_find_the_top_work_of_a_part_of_a_part(
+        self,
+        staged_library: _Library,
+        composer: str | None,
+        performer: str | None,
+        search: str | None,
+    ) -> None:
+        """A composer or performer of an aria, or a search on an act, finds the opera."""
+        rows = await staged_library.mass.music.classical.works(
+            composer_id=staged_library.artist_id(composer) if composer else None,
+            performer_id=staged_library.artist_id(performer) if performer else None,
+            search=search,
+        )
+
+        assert [x.work.name for x in rows] == ["Tosca"]
 
 
 @pytest.fixture(scope="class", name="main_artist_library")

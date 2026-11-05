@@ -364,6 +364,15 @@ class MusicBrainzWork(DataClassDictMixin):
         ]
 
     @property
+    def part_relations(self) -> list[MusicBrainzRelation]:
+        """Return the relations to the parts of this work, as MusicBrainz lists them."""
+        return [
+            relation
+            for relation in self.relations
+            if relation.type == "parts" and relation.direction == "forward" and relation.work
+        ]
+
+    @property
     def arrangement_of_relations(self) -> list[MusicBrainzRelation]:
         """Return the relations to the works this work is an arrangement of, as ``work``."""
         return self._arrangement_relations("backward")
