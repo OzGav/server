@@ -1,7 +1,12 @@
-"""The credit roles of the artists performing a recording."""
+"""
+The credit roles of performing artists, and helpers for the roles music services name.
+
+The helpers read a role such as "Tenor Vocals".
+"""
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 from music_assistant_models.enums import ArtistRole
@@ -18,3 +23,8 @@ PERFORMING_ROLES: Final[tuple[ArtistRole, ...]] = (
 )
 # the performing roles as quoted SQL values, for an IN clause
 SQL_PERFORMING_ROLES: Final[str] = ", ".join(f"'{x.value}'" for x in PERFORMING_ROLES)
+
+
+def role_word(role: str) -> str:
+    """Return a role in lowercase without spaces or hyphens, as in "mainartist"."""
+    return re.sub(r"[\s-]", "", role).lower()

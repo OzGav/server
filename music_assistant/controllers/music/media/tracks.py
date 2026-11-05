@@ -37,6 +37,7 @@ from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import (
     Album,
     Artist,
+    Credit,
     ItemMapping,
     ItemMappingSummary,
     MediaItemMetadata,
@@ -76,16 +77,18 @@ from music_assistant.helpers.compare import (
     compare_track_evidence,
     compare_track_title,
     get_keep_remasters_apart,
+    is_named_by,
     loose_compare_strings,
     track_durations_agree,
 )
-from music_assistant.helpers.credit_roles import PERFORMING_ROLES, SQL_PERFORMING_ROLES
+from music_assistant.helpers.credit_roles import PERFORMING_ROLES, SQL_PERFORMING_ROLES, role_word
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.external_ids import is_valid_isrc, normalize_external_id
 from music_assistant.helpers.json import json_dumps, json_loads
 from music_assistant.helpers.lyrics import extract_lrc_lyrics, normalize_lrc_lyrics
 from music_assistant.helpers.provider_access import visible_items
-from music_assistant.helpers.util import parse_optional_bool
+from music_assistant.helpers.util import is_placeholder_artist, parse_optional_bool
+from music_assistant.helpers.work_titles import joined_composer_name
 from music_assistant.models.music_provider import MusicProvider
 
 from .base import (
@@ -98,8 +101,6 @@ from .works import SUMMARY_WORK_FIELDS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-    from music_assistant_models.media_items import Credit
 
     from music_assistant import MusicAssistant
     from music_assistant.models.media_capabilities import MusicDiscoveryMixin
@@ -1804,6 +1805,8 @@ class TracksController(MediaControllerBase[Track]):
         item.metadata.lrc_lyrics = normalize_lrc_lyrics(
             item.metadata.lrc_lyrics or extract_lrc_lyrics(item.metadata.lyrics)
         )
+        await self._split_joined_composers(item)
+        await self._credit_performing_composer(item)
         work_id = (
             await self.mass.music.works.get_or_add_library_work_id(item.work) if item.work else None
         )
@@ -1859,6 +1862,8 @@ class TracksController(MediaControllerBase[Track]):
         db_id = int(item_id)  # ensure integer
         cur_item = await self.get_library_item(db_id)
         self._mark_own_recording_id(update)
+        joined_names = await self._split_joined_composers(update)
+        composer_names = await self._credit_performing_composer(update, cur_item)
         if overwrite:
             await self._keep_held_placement(update, cur_item)
         metadata = update.metadata if overwrite else self._merged_metadata(cur_item, update)
@@ -1872,12 +1877,16 @@ class TracksController(MediaControllerBase[Track]):
             for x in update_instances
         )
         # an update from the only provider instance the track is known on (e.g. a renamed
-        # file) carries its complete credits, so they replace the stored ones
-        replace_credits = bool(update_instances) and all(
-            x.provider_instance in update_instances for x in cur_item.provider_mappings
+        # file) carries its complete credits, so they replace the stored ones; a streaming
+        # service names only some of them, so its credits are added to the stored ones
+        replace_credits = (
+            bool(update_instances)
+            and all(x.provider_instance in update_instances for x in cur_item.provider_mappings)
+            and not from_streaming
         )
         # a classical track read from its files has the performers they name now, also none,
-        # until its MusicBrainz recording is read again
+        # until its MusicBrainz recording is read again; a streaming service only adds
+        # performers, as nothing records which service or MusicBrainz credited the stored ones
         replace_performers = (
             (overwrite or replace_credits)
             and update.provider != "library"
@@ -1958,8 +1967,26 @@ class TracksController(MediaControllerBase[Track]):
             update.credits,
             overwrite=overwrite,
             replace=replace_credits,
+            keep_roles=PERFORMING_ROLES if from_streaming else (),
             resolved_artists=resolved_artists,
         )
+        if joined_names:
+            await self._remove_joined_artists(
+                cur_item,
+                work_id,
+                joined_names,
+                main_artists=any(x.name not in joined_names for x in artists),
+            )
+        for credit in cur_item.credits:
+            if credit.role in PERFORMING_ROLES and credit.artist.name in composer_names:
+                await self.mass.music.database.delete(
+                    DB_TABLE_TRACK_CREDITS,
+                    {
+                        "track_id": db_id,
+                        "artist_id": int(credit.artist.item_id),
+                        "role": credit.role.value,
+                    },
+                )
         if work_id:
             await self.credit_work_composers(work_id)
         # update/set track album
@@ -2104,6 +2131,7 @@ class TracksController(MediaControllerBase[Track]):
         item_credits: Iterable[Credit],
         overwrite: bool = False,
         replace: bool = False,
+        keep_roles: Iterable[ArtistRole] = (),
         resolved_artists: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """
@@ -2113,6 +2141,7 @@ class TracksController(MediaControllerBase[Track]):
         :param item_credits: The track's credits; main artist credits are left out.
         :param overwrite: Replace the stored credits, as a refresh from the source does.
         :param replace: Replace the stored credits, as an update from the only source does.
+        :param keep_roles: Roles whose stored credits are kept on a replace.
         :param resolved_artists: Library ids of the artists resolved so far, by provider and item id.
         """
         resolved = {} if resolved_artists is None else resolved_artists
@@ -2125,8 +2154,10 @@ class TracksController(MediaControllerBase[Track]):
             # a source without credits keeps the stored ones, like an empty artists list does
             return
         if overwrite or replace:
+            kept = ", ".join(f"'{x.value}'" for x in keep_roles)
             await self.mass.music.database.execute_write(
-                f"DELETE FROM {DB_TABLE_TRACK_CREDITS} WHERE track_id = :db_id",
+                f"DELETE FROM {DB_TABLE_TRACK_CREDITS} WHERE track_id = :db_id"
+                + (f" AND role NOT IN ({kept})" if kept else ""),
                 {"db_id": db_id},
             )
         for credit, artist_id in rows:
@@ -2199,6 +2230,124 @@ class TracksController(MediaControllerBase[Track]):
         update.movement_name = cur_item.movement_name
         update.external_ids.add((ExternalID.MB_WORK, work_id))
 
+    async def _split_joined_composers(self, track: Track) -> set[str]:
+        """
+        Credit the library composer a joined composer name starts with, as in "Chopin & X".
+
+        The composer also takes the place of the joined name among the main artists.
+        Return the joined names that were replaced.
+        """
+        if not (candidates := self._joined_composer_candidates(track)):
+            return set()
+        replacements: dict[str, Artist] = {}
+        for name, candidate in candidates.items():
+            library_composers = await self.mass.music.artists.get_library_composers(
+                named_by=candidate
+            )
+            matches = [x for x in library_composers if is_named_by(candidate, x)]
+            # a name several composers share, such as "Strauss", stays as it is
+            if len(matches) == 1:
+                replacements[name] = matches[0]
+        return self._replace_joined_composers(track, replacements)
+
+    async def _credit_performing_composer(
+        self, track: Track, cur_item: Track | None = None
+    ) -> set[str]:
+        """
+        Credit a track its source gives a placeholder composer to the composer it credits as artist.
+
+        Some labels give a placeholder composer, as in "Dr, Composer", and credit the real one as
+        performer, as in "Antonio Vivaldi, Orchestra". A main artist or performer named like
+        exactly one confirmed library composer becomes the composer of the track, and of its work
+        when that names none.
+        The performing credits of that artist are dropped, the main artist is kept.
+        Return the names whose performing credits were replaced.
+
+        :param track: The track to add or update with.
+        :param cur_item: The library track as stored, on an update.
+        """
+        work = track.work if isinstance(track.work, Work) else None
+        if (
+            any(x.role == ArtistRole.COMPOSER for x in track.credits)
+            or (work and work.composers)
+            or not self._names_placeholder_composer(track)
+        ):
+            return set()
+        credited = {x.name: x for x in track.artists} | {
+            x.artist.name: x.artist for x in track.credits if x.role in PERFORMING_ROLES
+        }
+        if not credited:
+            return set()
+        artists = self.mass.music.artists
+        library_composers = await artists.get_library_composers()
+        composer_ids = {x.item_id: x for x in library_composers}
+        matches: dict[str, Artist] = {}
+        for name, artist in credited.items():
+            # the library artist of the provider artist itself wins over a name match
+            known = await artists.get_library_item_by_prov_id(artist.item_id, artist.provider)
+            if known and known.item_id in composer_ids:
+                matches[name] = composer_ids[known.item_id]
+                continue
+            found = [x for x in library_composers if is_named_by(name, x)]
+            if len(found) == 1:
+                matches[name] = found[0]
+        # artists naming different composers leave the composer unknown
+        if len({x.item_id for x in matches.values()}) != 1:
+            return set()
+        composer = next(iter(matches.values()))
+        # a track the library credits another composer keeps it
+        if cur_item and any(
+            x.role == ArtistRole.COMPOSER and x.artist.item_id != composer.item_id
+            for x in cur_item.credits
+        ):
+            return set()
+        track.credits = [
+            x
+            for x in track.credits
+            if x.role not in PERFORMING_ROLES or x.artist.name not in matches
+        ]
+        track.credits.append(Credit(artist=composer, role=ArtistRole.COMPOSER))
+        if work:
+            work.composers = UniqueList([composer])
+        return set(matches)
+
+    @staticmethod
+    def _names_placeholder_composer(track: Track) -> bool:
+        """Return whether the source of a track names a placeholder composer, as "Dr, Composer"."""
+        for performer in track.metadata.performers or ():
+            name, *roles = performer.split(", ")
+            if is_placeholder_artist(name) and any(role_word(x) == "composer" for x in roles):
+                return True
+        return False
+
+    @staticmethod
+    def _joined_composer_candidates(track: Track) -> dict[str, str]:
+        """Return the joined composer names of a track with the composer each starts with."""
+        work = track.work if isinstance(track.work, Work) else None
+        composers = [x.artist for x in track.credits if x.role == ArtistRole.COMPOSER]
+        return {
+            artist.name: candidate
+            for artist in [*composers, *(work.composers if work else [])]
+            if (candidate := joined_composer_name(artist.name, track.name))
+        }
+
+    @staticmethod
+    def _replace_joined_composers(track: Track, replacements: dict[str, Artist]) -> set[str]:
+        """Credit each composer in place of its joined name on a track, return the names."""
+        if not replacements:
+            return set()
+        work = track.work if isinstance(track.work, Work) else None
+        track.credits = [
+            replace(x, artist=replacements[x.artist.name])
+            if x.role == ArtistRole.COMPOSER and x.artist.name in replacements
+            else x
+            for x in track.credits
+        ]
+        if work:
+            work.composers = UniqueList(replacements.get(x.name, x) for x in work.composers)
+        track.artists = UniqueList(replacements.get(x.name, x) for x in track.artists)
+        return set(replacements)
+
     @staticmethod
     def _mark_own_recording_id(item: Track) -> None:
         """Mark the recording id a provider track carries, as a file's tags give it, as its own."""
@@ -2224,6 +2373,36 @@ class TracksController(MediaControllerBase[Track]):
             for id_type, value in track.external_ids
             if id_type == ExternalID.MB_RECORDING
         }
+
+    async def _remove_joined_artists(
+        self, track: Track, work_id: int | None, joined_names: set[str], main_artists: bool
+    ) -> None:
+        """
+        Remove the stored credits of a library track and its work for joined names.
+
+        :param track: The library track as stored.
+        :param work_id: The library id of the track's work, if any.
+        :param joined_names: The joined names to remove.
+        :param main_artists: Whether to remove the main artists of the joined names too.
+        """
+        if main_artists:
+            for artist in track.artists:
+                if artist.name in joined_names:
+                    await self.mass.music.database.delete(
+                        DB_TABLE_TRACK_ARTISTS,
+                        {"track_id": int(track.item_id), "artist_id": int(artist.item_id)},
+                    )
+        for credit in track.credits:
+            if credit.role != ArtistRole.COMPOSER or credit.artist.name not in joined_names:
+                continue
+            match = {"artist_id": int(credit.artist.item_id), "role": ArtistRole.COMPOSER.value}
+            await self.mass.music.database.delete(
+                DB_TABLE_TRACK_CREDITS, {"track_id": int(track.item_id), **match}
+            )
+            if work_id:
+                await self.mass.music.database.delete(
+                    DB_TABLE_WORK_ARTISTS, {"work_id": work_id, **match}
+                )
 
     def _get_sort_sql(self, field: SortField, direction: SortDirection | None) -> str:
         """Return the ORDER BY clause for a sort field, ARTIST_NAME through the artists join."""

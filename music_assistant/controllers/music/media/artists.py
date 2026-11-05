@@ -11,6 +11,7 @@ from music_assistant_models.auth import Scope
 from music_assistant_models.enums import (
     AlbumType,
     ArtistEntityType,
+    ArtistRole,
     ArtistType,
     EventType,
     ExternalID,
@@ -52,6 +53,7 @@ from music_assistant.constants import (
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACK_CREDITS,
+    DB_TABLE_TRACKS,
     DB_TABLE_WORK_ARTISTS,
     VARIOUS_ARTISTS_MBID,
     VARIOUS_ARTISTS_NAME,
@@ -60,6 +62,7 @@ from music_assistant.controllers.music.constants import SIMILAR_ITEMS_LIMIT
 from music_assistant.controllers.music.helpers import (
     CREDITED_TRACK_ARTISTS,
     IS_CLASSICAL_COMPOSER,
+    has_musicbrainz_id,
     life_span_period,
     metadata_for_update,
     provider_mappings_for_update,
@@ -1750,6 +1753,39 @@ class ArtistsController(MediaControllerBase[Artist]):
         )
         library_item = await self.get_library_item(item_id)
         self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+
+    async def get_library_composers(self, named_by: str | None = None) -> list[Artist]:
+        """
+        Return the library artists with a MusicBrainz id credited as composer on classical tracks.
+
+        :param named_by: Leave out the composers this name, such as "Chopin", cannot name.
+        """
+        classical_tracks = f"SELECT item_id FROM {DB_TABLE_TRACKS} WHERE is_classical = 1"
+        track_composers = (
+            f"SELECT artist_id FROM {DB_TABLE_TRACK_CREDITS} "
+            f"WHERE role = '{ArtistRole.COMPOSER.value}' AND track_id IN ({classical_tracks})"
+        )
+        has_mbid = has_musicbrainz_id(
+            f"{DB_TABLE_ARTISTS}.item_id", MediaType.ARTIST, ExternalID.MB_ARTIST
+        )
+        query_parts = [
+            f"{DB_TABLE_ARTISTS}.item_id IN ({track_composers})",
+            has_mbid,
+        ]
+        query_params: dict[str, Any] = {}
+        if named_by is not None:
+            # every word of a name is part of the stored search name of an artist it names
+            words = create_safe_string(named_by.replace("-", " ")).split()
+            if not words:
+                return []
+            query_parts.append(
+                f"({DB_TABLE_ARTISTS}.search_name LIKE :named_by "
+                f"OR {DB_TABLE_ARTISTS}.search_sort_name LIKE :named_by)"
+            )
+            query_params["named_by"] = f"%{max(words, key=len)}%"
+        return await self.get_library_items_by_query(
+            extra_query_parts=query_parts, extra_query_params=query_params, limit=0
+        )
 
     async def set_composer_periods(self, artist_ids: Iterable[int] | None = None) -> None:
         """
