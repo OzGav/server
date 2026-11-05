@@ -13,6 +13,7 @@ from music_assistant_models.enums import (
     ExternalID,
     MediaType,
     ProviderType,
+    RecordingSource,
 )
 from music_assistant_models.errors import MediaNotFoundError
 from music_assistant_models.media_items import Album, Artist, ProviderMapping, Track, UniqueList
@@ -428,7 +429,7 @@ async def _set_recording_id(mass: MusicAssistant, track: Track, recording_id: st
 async def _link_track(mass: MusicAssistant, track: Track, recording_id: str) -> None:
     """Run the MusicBrainz link step on a library track that resolves to the recording."""
     recording = MusicBrainzRecording(id=recording_id, title="Track 1", length=201000)
-    resolved = AsyncMock(return_value=recording)
+    resolved = AsyncMock(return_value=(recording, RecordingSource.ISRC))
     with patch.object(MusicbrainzProvider, "resolve_recording", resolved):
         await mass.metadata.link_item_to_musicbrainz(
             await mass.music.tracks.get_library_item(track.item_id)
@@ -584,3 +585,86 @@ async def test_set_identifiers_joins_tracks_of_one_recording(mass: MusicAssistan
     )
 
     assert sorted(await _track_domains(mass), key=len) == [{"spotify"}, {"spotify", "tidal"}]
+
+
+@pytest.mark.parametrize("found", [None, RecordingSource.SEARCH])
+async def test_track_refresh_finds_its_recording_on_its_albums_release(
+    mass: MusicAssistant, found: RecordingSource | None
+) -> None:
+    """A track its own lookup finds only by name, or not at all, takes its release's recording."""
+    mass._providers[TIDAL_INSTANCE] = _TidalStub(mass)
+    album = await _add_spotify_album(mass)
+    album.mbid = RELEASE_ID
+    await mass.music.albums.update_item_in_library(album.item_id, album)
+    track = await _add_tidal_track(mass, album, 1)
+    track.is_classical = True
+    await _add_tidal_track(mass, album, 2)
+    searched = MusicBrainzRecording(id=RECORDING_IDS[1], title="Track 2")
+    resolved = AsyncMock(return_value=(searched, found) if found else None)
+
+    with (
+        patch.object(MusicbrainzProvider, "resolve_recording", resolved),
+        patch.object(
+            MusicbrainzProvider, "get_release_details", AsyncMock(return_value=_release())
+        ),
+        patch.object(MetaDataController, "providers", new_callable=PropertyMock, return_value=[]),
+        # the stub service lists album tracks only
+        patch.object(
+            mass.music.tracks, "get_provider_item", AsyncMock(side_effect=MediaNotFoundError)
+        ),
+    ):
+        await mass.metadata.rebuild_metadata(track)
+
+    linked = await mass.music.tracks.get_library_item(track.item_id)
+    assert (linked.mbid, linked.metadata.recording_source) == (
+        RECORDING_IDS[0],
+        RecordingSource.RELEASE,
+    )
+
+
+@pytest.mark.parametrize(
+    "stored", [RecordingSource.SEARCH, RecordingSource.TAG, RecordingSource.RELEASE]
+)
+async def test_track_update_replaces_only_a_recording_source_found_by_name(
+    mass: MusicAssistant, stored: RecordingSource
+) -> None:
+    """A recording source found by a name search gives way to that of an update, others stay."""
+    track = await _add_tidal_track(mass, await _add_spotify_album(mass), 1)
+    track.mbid = RECORDING_IDS[0]
+    track.metadata.recording_source = stored
+    await mass.music.tracks.update_item_in_library(track.item_id, track)
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.metadata.recording_source = RecordingSource.ISRC
+
+    await mass.music.tracks.update_item_in_library(track.item_id, update)
+
+    updated = await mass.music.tracks.get_library_item(track.item_id)
+    expected = RecordingSource.ISRC if stored == RecordingSource.SEARCH else stored
+    assert updated.metadata.recording_source == expected
+
+
+async def test_added_track_keeps_the_recording_id_it_comes_with_as_its_own(
+    mass: MusicAssistant,
+) -> None:
+    """A track added with a recording id, as a file's tags have it, has it as its own."""
+    album = await _add_spotify_album(mass)
+    added = await mass.music.tracks.add_item_to_library(
+        Track(
+            item_id="td-own",
+            provider=TIDAL_INSTANCE,
+            name="No. 1: Track 1",
+            duration=201,
+            disc_number=1,
+            track_number=1,
+            artists=UniqueList(album.artists),
+            album=album,
+            external_ids={(ExternalID.MB_RECORDING, RECORDING_IDS[0])},
+            provider_mappings={_tidal("td-own")},
+        )
+    )
+
+    stored = await mass.music.tracks.get_library_item(added.item_id)
+    assert (stored.mbid, stored.metadata.recording_source) == (
+        RECORDING_IDS[0],
+        RecordingSource.TAG,
+    )
