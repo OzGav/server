@@ -1761,11 +1761,10 @@ class TracksController(MediaControllerBase[Track]):
         item.metadata.lrc_lyrics = normalize_lrc_lyrics(
             item.metadata.lrc_lyrics or extract_lrc_lyrics(item.metadata.lyrics)
         )
+        self._mark_own_recording_id(item)
         await self._split_joined_composers(item)
         await self._credit_performing_composer(item)
-        work_id = (
-            await self.mass.music.works.get_or_add_library_work_id(item.work) if item.work else None
-        )
+        work_id = await self._get_or_add_work_id(item)
         db_id = await self.mass.music.database.insert(
             self.db_table,
             {
@@ -1866,9 +1865,10 @@ class TracksController(MediaControllerBase[Track]):
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
         cur_work_id = int(cur_item.work.item_id) if cur_item.work else None
+        # a merge keeps the stored work, so the update's work is not added to the library then
         new_work_id = (
-            await self.mass.music.works.get_or_add_library_work_id(update.work)
-            if update.work
+            await self._get_or_add_work_id(update)
+            if not cur_work_id or (update.work and overwrite)
             else None
         )
         # like the artists, a source without a work or movement keeps the stored one
@@ -2141,6 +2141,28 @@ class TracksController(MediaControllerBase[Track]):
         resolved_artists[key] = artist_id
         return artist_id
 
+    async def _get_or_add_work_id(self, track: Track) -> int | None:
+        """
+        Return the library id of a track's work, adding the work if needed, None without a work.
+
+        A work the source names without a MusicBrainz work id, such as one read from the track's
+        title, is not added. When the track carries one MusicBrainz work id of its own, its work
+        is that MusicBrainz work instead, added under the name the source gives.
+        """
+        if not track.work:
+            return None
+        works = self.mass.music.works
+        if (work_id := await works.get_or_add_library_work_id(track.work)) or not isinstance(
+            track.work, Work
+        ):
+            return work_id
+        work_ids = [value for id_type, value in track.external_ids if id_type == ExternalID.MB_WORK]
+        if len(work_ids) != 1:
+            return None
+        return await works.get_or_add_library_work_id(
+            replace(track.work, external_ids={(ExternalID.MB_WORK, work_ids[0])})
+        )
+
     async def _keep_held_placement(self, update: Track, cur_item: Track) -> None:
         """
         Keep a track's work and movement when an update names a part its place already holds.
@@ -2198,7 +2220,7 @@ class TracksController(MediaControllerBase[Track]):
         replacements: dict[str, Artist] = {}
         for name, candidate in candidates.items():
             library_composers = await self.mass.music.artists.get_library_composers(
-                named_by=candidate
+                with_mbid=True, named_by=candidate
             )
             matches = [x for x in library_composers if is_named_by(candidate, x)]
             # a name several composers share, such as "Strauss", stays as it is
@@ -2235,7 +2257,7 @@ class TracksController(MediaControllerBase[Track]):
         if not credited:
             return set()
         artists = self.mass.music.artists
-        library_composers = await artists.get_library_composers()
+        library_composers = await artists.get_library_composers(with_mbid=True)
         composer_ids = {x.item_id: x for x in library_composers}
         matches: dict[str, Artist] = {}
         for name, artist in credited.items():

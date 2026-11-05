@@ -1729,11 +1729,16 @@ class ArtistsController(MediaControllerBase[Artist]):
         library_item = await self.get_library_item(item_id)
         self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
 
-    async def get_library_composers(self, named_by: str | None = None) -> list[Artist]:
+    async def get_library_composers(
+        self, with_mbid: bool, named_by: str | Iterable[str] | None = None
+    ) -> list[Artist]:
         """
-        Return the library artists with a MusicBrainz id credited as composer on classical tracks.
+        Return the library artists credited as composer on classical tracks.
 
+        :param with_mbid: True for the composers with a MusicBrainz artist id, False for those
+            without one.
         :param named_by: Leave out the composers this name, such as "Chopin", cannot name.
+            With several names, a composer any of them may name is kept.
         """
         classical_tracks = f"SELECT item_id FROM {DB_TABLE_TRACKS} WHERE is_classical = 1"
         track_composers = (
@@ -1745,19 +1750,23 @@ class ArtistsController(MediaControllerBase[Artist]):
         )
         query_parts = [
             f"{DB_TABLE_ARTISTS}.item_id IN ({track_composers})",
-            has_mbid,
+            has_mbid if with_mbid else f"NOT {has_mbid}",
         ]
         query_params: dict[str, Any] = {}
         if named_by is not None:
-            # every word of a name is part of the stored search name of an artist it names
-            words = create_safe_string(named_by.replace("-", " ")).split()
-            if not words:
+            name_conditions: list[str] = []
+            for index, name in enumerate([named_by] if isinstance(named_by, str) else named_by):
+                # every word of a name is part of the stored search name of an artist it names
+                if not (words := create_safe_string(name.replace("-", " ")).split()):
+                    continue
+                name_conditions.append(
+                    f"{DB_TABLE_ARTISTS}.search_name LIKE :named_by_{index} "
+                    f"OR {DB_TABLE_ARTISTS}.search_sort_name LIKE :named_by_{index}"
+                )
+                query_params[f"named_by_{index}"] = f"%{max(words, key=len)}%"
+            if not name_conditions:
                 return []
-            query_parts.append(
-                f"({DB_TABLE_ARTISTS}.search_name LIKE :named_by "
-                f"OR {DB_TABLE_ARTISTS}.search_sort_name LIKE :named_by)"
-            )
-            query_params["named_by"] = f"%{max(words, key=len)}%"
+            query_parts.append(f"({' OR '.join(name_conditions)})")
         return await self.get_library_items_by_query(
             extra_query_parts=query_parts, extra_query_params=query_params, limit=0
         )
@@ -1789,6 +1798,22 @@ class ArtistsController(MediaControllerBase[Artist]):
             if period := life_span_period(artist):
                 artist.period = period
                 await self.update_item_in_library(artist.item_id, artist)
+
+    async def clear_composer_period(self, artist_id: int) -> None:
+        """
+        Classify a library artist again and clear its period once it composes nothing.
+
+        :param artist_id: Library id of an artist no longer credited as composer somewhere.
+        """
+        await self.mass.music.classification.update_item(self.media_type, artist_id)
+        await self.mass.music.database.execute_write(
+            f"UPDATE {DB_TABLE_ARTISTS} SET period = NULL WHERE item_id = :artist_id "
+            f"AND NOT EXISTS (SELECT 1 FROM {DB_TABLE_WORK_ARTISTS} "
+            "WHERE artist_id = :artist_id AND role = :composer) "
+            f"AND NOT EXISTS (SELECT 1 FROM {DB_TABLE_TRACK_CREDITS} "
+            "WHERE artist_id = :artist_id AND role = :composer)",
+            {"artist_id": artist_id, "composer": ArtistRole.COMPOSER.value},
+        )
 
     def artist_from_item_mapping(self, item: ItemMapping) -> Artist:
         """Create an Artist object from an ItemMapping object."""

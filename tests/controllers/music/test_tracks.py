@@ -3343,7 +3343,7 @@ async def test_joined_composer_is_replaced_by_the_library_composer(
     with patch.object(music.artists, "get_library_composers", query):
         replaced = await music.tracks._split_joined_composers(track)
 
-    assert query.await_args_list == ([call(named_by=named_by)] if named_by else [])
+    assert query.await_args_list == ([call(with_mbid=True, named_by=named_by)] if named_by else [])
     assert replaced == ({composer_name} if expected else set())
     assert track.credits == [
         Credit(artist=composer, role=ArtistRole.COMPOSER, position=2),
@@ -3446,7 +3446,7 @@ async def test_performer_naming_one_composer_becomes_the_composer(
     ):
         replaced = await music.tracks._credit_performing_composer(track)
 
-    query.assert_awaited_once_with()
+    query.assert_awaited_once_with(with_mbid=True)
     assert replaced == ({performer[0]} if composer else set())
     assert track.credits == (
         [Credit(artist=composer, role=ArtistRole.COMPOSER)] if composer else credits_before
