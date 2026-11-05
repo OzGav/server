@@ -106,11 +106,13 @@ from .constants import (
     GLOBAL_SEARCH_LIMIT,
     GLOBAL_SEARCH_TIMEOUT,
     LIKED_SONGS_FAKE_PLAYLIST_ID_PREFIX,
+    PARSED_ITEM_CACHE_CHECKSUM,
     PLAYLIST_ITEM_TYPES,
     SOLOIST_DATA_DIR_NAME,
 )
 from .helpers import get_spotify_token
 from .parsers import (
+    lists_composers_first,
     parse_album,
     parse_artist,
     parse_audiobook,
@@ -584,13 +586,13 @@ class SpotifyProvider(MusicProvider):
         artist_obj = await self._get_data(f"artists/{prov_artist_id}")
         return parse_artist(artist_obj, self)
 
-    @use_cache()
+    @use_cache(cache_checksum=PARSED_ITEM_CACHE_CHECKSUM)
     async def get_album(self, prov_album_id: str) -> Album:
         """Get full album details by id."""
         album_obj = await self._get_album_data(prov_album_id)
         return parse_album(album_obj, self)
 
-    @use_cache()
+    @use_cache(cache_checksum=PARSED_ITEM_CACHE_CHECKSUM)
     async def get_track(self, prov_track_id: str) -> Track:
         """Get full track details by id."""
         track_obj = await self._get_data(f"tracks/{prov_track_id}")
@@ -833,7 +835,8 @@ class SpotifyProvider(MusicProvider):
             # the resume position stays in MA's own tracking, and Spotify's chapter
             # resume points are read separately via get_resume_position()
 
-    @use_cache(86400 * 365, allow_expired_cache=True)  # 1 year - album track listings are immutable
+    # 1 year - album track listings are immutable
+    @use_cache(86400 * 365, cache_checksum=PARSED_ITEM_CACHE_CHECKSUM, allow_expired_cache=True)
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get all album tracks for given album id."""
         # the album carries its first page of tracks, and shares this request with a
@@ -849,7 +852,7 @@ class SpotifyProvider(MusicProvider):
                     f"albums/{prov_album_id}/tracks", use_cache=False, start=first_page["limit"]
                 )
             ]
-        return [parse_track(item, self) for item in items if item and item["id"]]
+        return self._parse_album_tracks(items)
 
     @use_cache(3600 * 3, allow_expired_cache=True)  # 3 hours
     async def get_playlist_tracks(
@@ -1925,6 +1928,12 @@ class SpotifyProvider(MusicProvider):
             raise
 
         return chapters_data
+
+    def _parse_album_tracks(self, track_objs: list[dict[str, Any]]) -> list[Track]:
+        """Parse the track objects of a whole album, crediting a classical album's composers."""
+        track_objs = [item for item in track_objs if item and item["id"]]
+        composer_first = lists_composers_first(track_objs)
+        return [parse_track(item, self, composer_first=composer_first) for item in track_objs]
 
     async def _get_all_items(
         self,
