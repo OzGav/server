@@ -184,6 +184,9 @@ LISTED_WORK_COMPOSERS: Final[str] = f"""
     WHERE r.item_id = r.root_id OR NOT EXISTS (SELECT 1 FROM {DB_TABLE_WORK_ARTISTS} pa
         WHERE pa.work_id = r.root_id AND pa.role = '{ArtistRole.COMPOSER.value}')"""
 
+# the country an artist is from, as the composers list shows it
+ARTIST_COUNTRY: Final[str] = f"json_extract({DB_TABLE_ARTISTS}.metadata, '$.country')"
+
 # the year of the album a track is listed with
 TRACK_ALBUM_YEAR: Final[str] = f"""(SELECT {DB_TABLE_ALBUMS}.year FROM {DB_TABLE_ALBUM_TRACKS}
     JOIN {DB_TABLE_ALBUMS} ON {DB_TABLE_ALBUMS}.item_id = {DB_TABLE_ALBUM_TRACKS}.album_id
@@ -247,6 +250,8 @@ class ClassicalController:
         artist_id: str | None = None,
         favorite: bool | None = None,
         period: list[Period] | None = None,
+        country: list[str] | None = None,
+        country_unknown: bool = False,
     ) -> list[ClassicalComposer]:
         """
         Get the composers of the classical library, with their work and recording counts.
@@ -260,6 +265,9 @@ class ClassicalController:
             when they are not a classical composer.
         :param favorite: Only include the calling user's likes (True) or dislikes (False).
         :param period: Only include composers of any of these periods.
+        :param country: Only include composers from any of these countries (ISO 3166-1 codes).
+        :param country_unknown: Also include the composers without a country; on its own,
+            only those.
         """
         field, direction = resolve_listing_sort(
             ListingType.CLASSICAL_COMPOSERS, sort_field, sort_direction
@@ -274,6 +282,12 @@ class ClassicalController:
         if period:
             params["periods"] = [x.value for x in period]
             conditions.append(f"{DB_TABLE_ARTISTS}.period IN :periods")
+        if country or country_unknown:
+            matches = [f"{ARTIST_COUNTRY} IS NULL"] if country_unknown else []
+            if country:
+                params["countries"] = list(country)
+                matches.append(f"{ARTIST_COUNTRY} IN :countries")
+            conditions.append(f"({' OR '.join(matches)})")
         if field == SortField.WORK_COUNT:
             sort_key = _sort_sql(DB_TABLE_ARTISTS, SortField.SORT_NAME, SortDirection.ASC)
             ids = await self._ids(DB_TABLE_ARTISTS, conditions, params, search, sort_key)
@@ -292,13 +306,14 @@ class ClassicalController:
         performances = await self._listed_work_performances(
             {x for item_id in ids for x in works[item_id]}
         )
-        fanarts = await self._artist_fanarts(ids)
+        fanarts, countries = await self._artist_fanarts_and_countries(ids)
         return [
             ClassicalComposer(
                 artist=cast("ArtistSummary", artist),
                 fanart=fanarts.get(int(artist.item_id)),
                 work_count=len(works[int(artist.item_id)]),
                 recording_count=sum(len(performances[x]) for x in works[int(artist.item_id)]),
+                country=countries.get(int(artist.item_id)),
             )
             for artist in await self._items(self.mass.music.artists, ids)
         ]
@@ -307,13 +322,18 @@ class ClassicalController:
         """Get the values the composers list can be filtered on, across all its composers."""
         params: dict[str, Any] = {}
         rows = await self.mass.music.database.get_rows_from_query(
-            f"SELECT DISTINCT {DB_TABLE_ARTISTS}.period "
+            f"SELECT DISTINCT {DB_TABLE_ARTISTS}.period, {ARTIST_COUNTRY} AS country "
             f"FROM {DB_TABLE_ARTISTS} WHERE {self._listed_composers(params)}",
             params,
             limit=0,
         )
         periods = {Period(row["period"]) for row in rows if row["period"] is not None}
-        return ClassicalComposerFilters(periods=[x for x in Period if x in periods])
+        countries = {row["country"] for row in rows}
+        return ClassicalComposerFilters(
+            periods=[x for x in Period if x in periods],
+            countries=sorted(x for x in countries if x is not None),
+            country_unknown=None in countries,
+        )
 
     async def performers(
         self,
@@ -378,7 +398,7 @@ class ClassicalController:
             performances = await self._listed_work_performances(
                 {x for item_id in ids for x in works[item_id]}
             )
-        fanarts = await self._artist_fanarts(ids)
+        fanarts, _ = await self._artist_fanarts_and_countries(ids)
         return [
             _performer_row(
                 cast("ArtistSummary", artist),
@@ -775,8 +795,8 @@ class ClassicalController:
 
         While any count is above zero, tracks under Other tracks may still move into their works.
         ``albums`` counts the albums still to identify, ``recordings`` the tracks whose
-        recording is still to read, ``works`` the works still to look up. All zero means
-        linking is done, or is not running.
+        recording is still to read, ``works`` and ``composers`` the works and composers still
+        to look up. All zero means linking is done, or is not running.
         """
         return await self.mass.metadata.get_classical_link_progress()
 
@@ -971,19 +991,31 @@ class ClassicalController:
         by_id = {int(item.item_id): item for item in items}
         return [by_id[item_id] for item_id in ids if item_id in by_id]
 
-    async def _artist_fanarts(self, artist_ids: Sequence[int]) -> dict[int, MediaItemImage]:
-        """Return the fanart to show of the given library artists, by artist id."""
+    async def _artist_fanarts_and_countries(
+        self, artist_ids: Sequence[int]
+    ) -> tuple[dict[int, MediaItemImage], dict[int, str]]:
+        """
+        Return the fanart to show and the country code of the given library artists.
+
+        Both maps are by artist id and leave out the artists without one.
+
+        :param artist_ids: Library ids of the artists.
+        """
         if not artist_ids:
-            return {}
+            return {}, {}
         user = get_current_user()
         hidden_sources = hidden_music_sources(self.mass, user) if user else set()
         fanarts: dict[int, MediaItemImage] = {}
+        countries: dict[int, str] = {}
         for row in await self.mass.music.database.get_rows_from_query(
-            f"SELECT item_id, json_extract(metadata, '$.images') AS images "
+            f"SELECT item_id, json_extract(metadata, '$.images') AS images, "
+            f"{ARTIST_COUNTRY} AS country "
             f"FROM {DB_TABLE_ARTISTS} WHERE item_id IN :artist_ids",
             {"artist_ids": list(artist_ids)},
             limit=0,
         ):
+            if row["country"] is not None:
+                countries[int(row["item_id"])] = row["country"]
             images = json_loads(row["images"]) if row["images"] else None
             if image := preferred_thumb(images, hidden_sources, ImageType.FANART):
                 fanarts[int(row["item_id"])] = MediaItemImage(
@@ -992,7 +1024,7 @@ class ClassicalController:
                     provider=image["provider"],
                     remotely_accessible=image.get("remotely_accessible", False),
                 )
-        return fanarts
+        return fanarts, countries
 
     async def _composer_works(self, artist_ids: Sequence[int] | None) -> dict[int, set[int]]:
         """Return the listed classical works of the given composers, or of every composer."""
