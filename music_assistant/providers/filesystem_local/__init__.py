@@ -116,6 +116,7 @@ from music_assistant.helpers.util import (
     TaskManager,
     detect_charset,
     is_disc_dir,
+    is_placeholder_artist,
     parse_title_and_version,
     try_parse_int,
 )
@@ -185,7 +186,6 @@ from .helpers import (
     get_valid_isrcs,
     is_image_file,
     is_metadata_file,
-    is_placeholder_artist,
     open_real_path,
     parse_track_work,
     performer_credit_role,
