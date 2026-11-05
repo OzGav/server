@@ -1,0 +1,190 @@
+{
+  "languages": [
+    "zxx"
+  ],
+  "attributes": [
+    {
+      "type": "Key",
+      "value": "C minor",
+      "type-id": "7526c19d-3be4-3420-b6cc-9fb6e49fa1a9",
+      "value-id": "d3d0b554-d3f4-3995-b995-5113f3771295"
+    }
+  ],
+  "disambiguation": "",
+  "relations": [
+    {
+      "source-credit": "",
+      "attributes": [],
+      "type": "composer",
+      "direction": "backward",
+      "ended": true,
+      "attribute-ids": {},
+      "target-type": "artist",
+      "attribute-values": {},
+      "end": "1808",
+      "target-credit": "",
+      "begin": "1804",
+      "artist": {
+        "sort-name": "Beethoven, Ludwig van",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+        "country": "DE",
+        "name": "Ludwig van Beethoven",
+        "id": "1f9df192-a621-4f54-8850-2c5373b7eac9",
+        "disambiguation": "German composer"
+      },
+      "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f"
+    },
+    {
+      "ended": false,
+      "attribute-ids": {},
+      "target-type": "artist",
+      "attribute-values": {},
+      "end": null,
+      "target-credit": "",
+      "begin": null,
+      "type-id": "26131498-00e8-4136-b937-22a4be01a63d",
+      "artist": {
+        "sort-name": "Lobkowitz, Joseph Franz von",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+        "country": "AT",
+        "disambiguation": "",
+        "name": "Joseph Franz von Lobkowitz",
+        "id": "8c39b867-dcf4-4b97-b73a-9ba198fea455"
+      },
+      "source-credit": "",
+      "attributes": [],
+      "type": "dedication",
+      "direction": "backward"
+    },
+    {
+      "type": "part of",
+      "series": {
+        "type-id": "49482ff0-fc9e-3b8c-a2d0-30e84d9df002",
+        "disambiguation": "",
+        "id": "004f17aa-0f46-4fec-b939-c5dfc849e5c6",
+        "name": "Works of Ludwig van Beethoven by opus number",
+        "type": "Catalogue"
+      },
+      "direction": "backward",
+      "source-credit": "",
+      "attributes": [
+        "number"
+      ],
+      "ordering-key": 68,
+      "target-credit": "",
+      "end": null,
+      "type-id": "b0d44366-cdf0-3acb-bee6-0f65a77a6ef0",
+      "begin": null,
+      "ended": false,
+      "attribute-ids": {
+        "number": "a59c5830-5ec7-38fe-9a21-c7ea54f6650a"
+      },
+      "target-type": "series",
+      "attribute-values": {
+        "number": "op. 67"
+      }
+    },
+    {
+      "type": "arrangement",
+      "direction": "forward",
+      "source-credit": "",
+      "attributes": [],
+      "target-credit": "",
+      "end": null,
+      "type-id": "51975ed8-bbfa-486b-9f28-5947f4370299",
+      "begin": null,
+      "ended": false,
+      "attribute-ids": {},
+      "target-type": "work",
+      "work": {
+        "type-id": null,
+        "title": "Symphony no. 5 in C minor, S. 464 no. 5",
+        "type": null,
+        "id": "f47df2ea-0671-4466-88f8-38a9d936989b",
+        "attributes": [],
+        "languages": [
+          "zxx"
+        ],
+        "disambiguation": "for piano solo, Liszt",
+        "iswcs": [],
+        "language": "zxx"
+      },
+      "attribute-values": {}
+    },
+    {
+      "attributes": [
+        "movement"
+      ],
+      "source-credit": "",
+      "direction": "forward",
+      "type": "parts",
+      "attribute-values": {},
+      "work": {
+        "language": "zxx",
+        "iswcs": [],
+        "disambiguation": "",
+        "languages": [
+          "zxx"
+        ],
+        "attributes": [],
+        "id": "b6f9ecc3-24d1-38ed-b8a0-091f7cd0c6b2",
+        "title": "Symphony no. 5 in C minor, op. 67: I. Allegro con brio",
+        "type": null,
+        "type-id": null
+      },
+      "attribute-ids": {
+        "movement": "1d05bc4b-9884-4c9f-9f69-616f119047f3"
+      },
+      "ended": false,
+      "target-type": "work",
+      "end": null,
+      "target-credit": "",
+      "begin": null,
+      "type-id": "ca8d3642-ce5f-49f8-91f2-125d72524e6a",
+      "ordering-key": 1
+    },
+    {
+      "attribute-ids": {
+        "movement": "1d05bc4b-9884-4c9f-9f69-616f119047f3"
+      },
+      "ended": false,
+      "target-type": "work",
+      "work": {
+        "type": null,
+        "title": "Symphony no. 5 in C minor, op. 67: II. Andante con moto",
+        "type-id": null,
+        "language": "zxx",
+        "iswcs": [],
+        "disambiguation": "",
+        "attributes": [],
+        "languages": [
+          "zxx"
+        ],
+        "id": "3bc742da-f67b-36c9-b31e-6ed09fdbdadd"
+      },
+      "attribute-values": {},
+      "ordering-key": 2,
+      "end": null,
+      "target-credit": "",
+      "begin": null,
+      "type-id": "ca8d3642-ce5f-49f8-91f2-125d72524e6a",
+      "source-credit": "",
+      "attributes": [
+        "movement"
+      ],
+      "type": "parts",
+      "direction": "forward"
+    }
+  ],
+  "id": "d03bff61-26fc-301b-98ac-4d8e85771cbc",
+  "iswcs": [
+    "T-902.570.042-9",
+    "T-932.416.993-9"
+  ],
+  "language": "zxx",
+  "type-id": "174314aa-0aa4-30cf-96a6-50b281d8d208",
+  "title": "Symphony no. 5 in C minor, op. 67",
+  "type": "Symphony"
+}
