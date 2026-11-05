@@ -839,8 +839,8 @@ class ClassicalController:
 
         While any count is above zero, tracks under Other tracks may still move into their works.
         ``albums`` counts the albums still to identify, ``recordings`` the tracks whose
-        recording is still to read, ``works`` the works still to look up. All zero means
-        linking is done, or is not running.
+        recording is still to read, ``works`` and ``composers`` the works and composers still
+        to look up. All zero means linking is done, or is not running.
         """
         return await self.mass.metadata.get_classical_link_progress()
 
