@@ -77,6 +77,7 @@ from music_assistant.constants import (
     PROVIDERS_WITH_SHAREABLE_URLS,
 )
 from music_assistant.controllers.music.bookmarks import BookmarksController
+from music_assistant.controllers.music.classical import ClassicalController
 from music_assistant.controllers.music.classification import ClassicalClassifier
 from music_assistant.controllers.music.constants import (
     BROWSE_CACHE_EXPIRATION,
@@ -426,6 +427,7 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         self.classification = ClassicalClassifier(self.mass)
         # whether a library upgraded from before classical support still awaits its flags
         self._classify_library = False
+        self.classical = ClassicalController(self.mass)
         self._database: DatabaseConnection | None = None
         self._sync_lock = asyncio.Lock()
         # a sync ran that MUSIC_SYNC_COMPLETED has not announced yet
