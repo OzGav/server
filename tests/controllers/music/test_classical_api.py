@@ -154,6 +154,7 @@ async def test_composers(library: _Library) -> None:
         ("Antonio Vivaldi", 2, 2),
     ]
     assert [x.artist.period for x in rows] == [Period.CLASSICAL, None]
+    assert [x.country for x in rows] == ["DE", None]
 
 
 @pytest.mark.parametrize(
@@ -627,6 +628,38 @@ async def test_composers_period_filter(
 
 
 @pytest.mark.parametrize(
+    ("country", "country_unknown", "expected"),
+    [
+        (["DE"], False, ["Ludwig van Beethoven"]),
+        (["AT", "DE"], False, ["Ludwig van Beethoven"]),
+        (["AT"], False, []),
+        ([], True, ["Antonio Vivaldi"]),
+        (["DE"], True, ["Ludwig van Beethoven", "Antonio Vivaldi"]),
+        ([], False, ["Ludwig van Beethoven", "Antonio Vivaldi"]),
+    ],
+)
+async def test_composers_country_filter(
+    library: _Library, country: list[str], country_unknown: bool, expected: list[str]
+) -> None:
+    """The country filter keeps the composers of any chosen country, or also those without one."""
+    rows = await library.mass.music.classical.composers(
+        country=country, country_unknown=country_unknown
+    )
+
+    assert [x.artist.name for x in rows] == expected
+
+
+async def test_composer_filters_combine(library: _Library) -> None:
+    """A composer matches only when every filter given matches."""
+    classical = library.mass.music.classical
+
+    assert await classical.composers(period=[Period.CLASSICAL], country_unknown=True) == []
+    assert [
+        x.artist.name for x in await classical.composers(period=[Period.CLASSICAL], country=["DE"])
+    ] == ["Ludwig van Beethoven"]
+
+
+@pytest.mark.parametrize(
     ("roles", "expected"),
     [
         ([ArtistRole.CHOIR, ArtistRole.SOLOIST], ["Daniel Barenboim", "Gardiner Singers"]),
@@ -728,7 +761,7 @@ async def test_filter_values(library: _Library) -> None:
     classical = library.mass.music.classical
 
     assert await classical.composer_filters() == ClassicalComposerFilters(
-        periods=[Period.CLASSICAL]
+        periods=[Period.CLASSICAL], countries=["DE"], country_unknown=True
     )
     assert await classical.performer_filters() == ClassicalPerformerFilters(
         roles=[ArtistRole.CONDUCTOR, ArtistRole.ORCHESTRA, ArtistRole.CHOIR, ArtistRole.SOLOIST]
