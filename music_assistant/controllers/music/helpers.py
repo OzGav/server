@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
     from music_assistant_models.enums import MediaType
+    from music_assistant_models.media_items import WorkMovement
 
     from music_assistant.controllers.music.media.base import AudiobookSyncDetails
     from music_assistant.mass import MusicAssistant
@@ -53,6 +54,10 @@ CREDITED_TRACK_ARTISTS: Final[str] = (
     f"(SELECT track_id, artist_id FROM {DB_TABLE_TRACK_ARTISTS} "
     f"UNION ALL SELECT track_id, artist_id FROM {DB_TABLE_TRACK_CREDITS})"
 )
+
+# a piece of a group, such as a scene of a number of an act, is listed under the group and numbered
+# past the list it is in: its group's number times this plus its own number in the group
+PIECE_NUMBERS: Final = 1000
 
 
 class ResumePoint(NamedTuple):
@@ -131,6 +136,16 @@ def search_name_match_clause(
         f"{db_table}.item_id IN "
         f"(SELECT rowid FROM {db_table}_fts WHERE {db_table}_fts MATCH :{param_name})"
     )
+
+
+def group_piece(group_number: int, piece: WorkMovement) -> WorkMovement:
+    """
+    Return a piece of a group as the list holding the group lists it, right under the group.
+
+    :param group_number: The number of the group in the list holding it.
+    :param piece: The piece, numbered as the group's own movements number it.
+    """
+    return replace(piece, number=group_number * PIECE_NUMBERS + piece.number, parent=group_number)
 
 
 def instrument_label(instrument: str | None, artist_name: str) -> str:
