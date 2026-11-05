@@ -22,6 +22,7 @@ from music_assistant_models.media_items import (
 from music_assistant_models.media_items.metadata import LifeSpan
 from music_assistant_models.unique_list import UniqueList
 
+from music_assistant.constants import DB_TABLE_TRACK_ARTISTS, DB_TABLE_TRACK_CREDITS
 from music_assistant.helpers.external_ids import is_valid_isrc
 from music_assistant.helpers.uri import canonical_provider_url, discogs_id_from_url, parse_uri
 
@@ -39,6 +40,12 @@ if TYPE_CHECKING:
 MIN_FTS_TERM_LENGTH: Final[int] = 3
 
 TRAILING_VOCALS: Final = re.compile(r"\s*\bvocals\Z", re.IGNORECASE | re.ASCII)
+
+# every artist credited on a track, its main artists as well as its other credits
+CREDITED_TRACK_ARTISTS: Final[str] = (
+    f"(SELECT track_id, artist_id FROM {DB_TABLE_TRACK_ARTISTS} "
+    f"UNION ALL SELECT track_id, artist_id FROM {DB_TABLE_TRACK_CREDITS})"
+)
 
 
 def search_name_match_clause(
