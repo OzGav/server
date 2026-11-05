@@ -818,6 +818,7 @@ class GenreController(MediaControllerBase[Genre]):
 
         if full_restore:
             await self._bulk_scan_media_genres()
+            await self.mass.music.classification.update_all()
 
         if not created_ids:
             return []
@@ -848,6 +849,7 @@ class GenreController(MediaControllerBase[Genre]):
             await self.mass.music.database.update(
                 DB_TABLE_GENRES, {"item_id": db_id}, {"is_excluded": 1}
             )
+            await self.mass.music.classification.update_all()
             self.mass.signal_event(EventType.MEDIA_ITEM_DELETED, library_item.uri, library_item)
         else:
             await super().remove_item_from_library(item_id, recursive)
@@ -955,6 +957,7 @@ class GenreController(MediaControllerBase[Genre]):
         )
         # Derived album/artist rows can be left orphaned by the deleted track rows.
         await self._propagate_genre_mappings_to_parents()
+        await self.mass.music.classification.update_all()
         updated = await self.get_library_item(db_id)
         self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, updated.uri, updated)
         return updated
@@ -989,6 +992,7 @@ class GenreController(MediaControllerBase[Genre]):
             },
             allow_replace=True,
         )
+        await self.mass.music.classification.update_item(media_type, int(media_id))
 
     async def remove_media_mapping(
         self, genre_id: str | int, media_type: MediaType, media_id: str | int
@@ -1018,6 +1022,7 @@ class GenreController(MediaControllerBase[Genre]):
                 "media_type": media_type.value,
             },
         )
+        await self.mass.music.classification.update_item(media_type, int(media_id))
 
     async def exclude_genre_from_media_item(
         self,
@@ -1054,6 +1059,7 @@ class GenreController(MediaControllerBase[Genre]):
             params,
         )
         await db.commit()
+        await self.mass.music.classification.update_item(media_type, int(media_id))
 
     async def remove_genre_exclusion(
         self,
@@ -1181,6 +1187,7 @@ class GenreController(MediaControllerBase[Genre]):
         # Derived album/artist rows still point at the old source genres; rebuild
         # them from the moved track mappings.
         await self._propagate_genre_mappings_to_parents()
+        await self.mass.music.classification.update_all()
 
         return await self.get_library_item(new_genre_id)
 
@@ -1248,6 +1255,7 @@ class GenreController(MediaControllerBase[Genre]):
 
         # Rebuild derived album/artist rows against the merged track mappings.
         await self._propagate_genre_mappings_to_parents()
+        await self.mass.music.classification.update_all()
 
         updated = await self.get_library_item(target_id)
         self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, updated.uri, updated)
@@ -1330,6 +1338,8 @@ class GenreController(MediaControllerBase[Genre]):
                     },
                     allow_replace=True,
                 )
+            if to_add or to_remove:
+                await self.mass.music.classification.update_item(media_type, media_id_int)
         return {target_mappings[genre_id] for genre_id in to_add}
 
     def register_scheduled_scan_task(self) -> BackgroundTask:
@@ -2449,6 +2459,7 @@ class GenreController(MediaControllerBase[Genre]):
             self.logger.debug("Starting genre mapping scan...")
             update_current_task_progress_text("Scanning unmapped genre metadata")
             self._last_scan_mapped = await self._bulk_scan_unmapped_genres()
+            await self.mass.music.classification.update_all()
             update_current_task_progress_text(f"Mapped {self._last_scan_mapped} genre reference(s)")
             self.logger.info(
                 "Genre mapping scan completed: %d items mapped (%.1fs)",

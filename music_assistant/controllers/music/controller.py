@@ -81,6 +81,7 @@ from music_assistant.constants import (
     PROVIDERS_WITH_SHAREABLE_URLS,
 )
 from music_assistant.controllers.music.bookmarks import BookmarksController
+from music_assistant.controllers.music.classification import ClassicalClassifier
 from music_assistant.controllers.music.constants import (
     BROWSE_CACHE_EXPIRATION,
     CACHE_CATEGORY_SEARCH_RESULTS,
@@ -431,6 +432,9 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         self.recency = RecencyEngine(self.mass)
         self.favorites = FavoritesStore(self.mass)
         self.bookmarks = BookmarksController(self.mass)
+        self.classification = ClassicalClassifier(self.mass)
+        # whether a library upgraded from before classical support still awaits its flags
+        self._classify_library = False
         self._database: DatabaseConnection | None = None
         self._sync_lock = asyncio.Lock()
         # a sync ran that MUSIC_SYNC_COMPLETED has not announced yet
@@ -523,6 +527,9 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         self._register_track_reconciliation_task()
         self._register_unavailable_mapping_check_task()
         self.genres.register_scheduled_scan_task()
+        if self._classify_library:
+            self._classify_library = False
+            self.mass.create_task(self.classification.update_all())
 
     async def close(self) -> None:
         """Cleanup on exit."""

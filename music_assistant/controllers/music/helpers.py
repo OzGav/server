@@ -27,6 +27,7 @@ from music_assistant_models.media_items import (
 from music_assistant_models.media_items.metadata import LifeSpan
 from music_assistant_models.unique_list import UniqueList
 
+from music_assistant.constants import DB_TABLE_TRACK_ARTISTS, DB_TABLE_TRACK_CREDITS
 from music_assistant.helpers.datetime import from_utc_timestamp
 from music_assistant.helpers.external_ids import is_valid_isrc
 from music_assistant.helpers.json import json_dumps
@@ -54,6 +55,12 @@ _GENRE_LOOKUP_TABLE: Final[str] = "temp.genre_lookup"
 _genre_lookup_lock = asyncio.Lock()
 
 TRAILING_VOCALS: Final = re.compile(r"\s*\bvocals\Z", re.IGNORECASE | re.ASCII)
+
+# every artist credited on a track, its main artists as well as its other credits
+CREDITED_TRACK_ARTISTS: Final[str] = (
+    f"(SELECT track_id, artist_id FROM {DB_TABLE_TRACK_ARTISTS} "
+    f"UNION ALL SELECT track_id, artist_id FROM {DB_TABLE_TRACK_CREDITS})"
+)
 
 
 class ResumePoint(NamedTuple):
