@@ -27,6 +27,7 @@ from music_assistant.helpers.util import (
     get_source_ip_for_target,
     guard_single_request,
     import_module_in_thread,
+    is_placeholder_artist,
     is_port_in_use,
     join_task,
     load_provider_module,
@@ -1164,3 +1165,20 @@ def _provider_mapping(item_id: str) -> ProviderMapping:
 def test_is_disc_dir(name: str, expected: bool) -> None:
     """Only a recognized disc/volume naming pattern is treated as a disc subfolder."""
     assert util.is_disc_dir(name) is expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("[traditional]", True),
+        ("D.R", True),
+        (" d. r. ", True),
+        ("Droits réservés", True),
+        # a real name is no placeholder, even when it starts like one
+        ("Dr. Dre", False),
+        ("Andrew", False),
+    ],
+)
+def test_placeholder_names_are_no_artists(name: str, expected: bool) -> None:
+    """MusicBrainz placeholders and the rights reserved label placeholder name no artist."""
+    assert is_placeholder_artist(name) is expected

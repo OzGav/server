@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, call, patch
 
 import pytest
 from music_assistant_models.enums import (
+    ArtistRole,
     ContentType,
     ExternalID,
     ImageType,
@@ -25,12 +26,14 @@ from music_assistant_models.media_items import (
     Album,
     Artist,
     AudioFormat,
+    Credit,
     ItemMapping,
     MediaItemImage,
     ProviderMapping,
     SearchResults,
     Track,
     UniqueList,
+    Work,
 )
 
 from music_assistant.constants import DB_TABLE_TRACKS
@@ -3263,3 +3266,225 @@ async def test_merge_keeps_an_album_thumb_the_source_track_stores(mass: MusicAss
     await mass.music.tracks.merge_library_items(target.item_id, source.item_id)
 
     assert await _stored_image_paths(mass, target.item_id) == [TRACK_THUMB.path, NEW_THUMB.path]
+
+
+JOINED_COMPOSER = "Ludwig van Beethoven & Conducted By William Bowles & Sarah Ainsworth"
+
+
+def _library_artist(item_id: str, name: str, sort_name: str | None = None) -> Artist:
+    """Return a library artist."""
+    return Artist(
+        item_id=item_id, provider="library", name=name, sort_name=sort_name, provider_mappings=set()
+    )
+
+
+def _joined_composer_track(composer_name: str = JOINED_COMPOSER) -> Track:
+    """Return a provider track crediting a composer as main artist, on the track and its work."""
+    track = create_track("spotify_1", "joined", name="Für Elise")
+    composer = Artist(
+        item_id="joined_composer", provider="spotify_1", name=composer_name, provider_mappings=set()
+    )
+    track.artists = UniqueList([composer, *track.artists])
+    track.credits = [
+        Credit(artist=composer, role=ArtistRole.COMPOSER, position=2),
+        Credit(artist=track.artists[0], role=ArtistRole.PERFORMER, instrument="piano"),
+    ]
+    track.work = Work(
+        item_id="Für Elise",
+        provider="spotify_1",
+        name="Für Elise",
+        provider_mappings=set(),
+        composers=UniqueList([composer]),
+    )
+    return track
+
+
+@pytest.mark.parametrize(
+    ("composer_name", "library_composers", "named_by", "expected"),
+    [
+        # Spotify joins the composer with the conductor and soloist it names
+        (
+            JOINED_COMPOSER,
+            ["Ludwig van Beethoven", "Frédéric Chopin"],
+            "Ludwig van Beethoven",
+            "Ludwig van Beethoven",
+        ),
+        # a joined name several library composers match stays as it is
+        (
+            "Strauss & Conducted By Herbert von Karajan",
+            ["Johann Strauss II", "Richard Strauss"],
+            "Strauss",
+            None,
+        ),
+        # a name that joins none never looks up the library composers
+        ("Ludwig van Beethoven", ["Ludwig van Beethoven"], None, None),
+    ],
+)
+async def test_joined_composer_is_replaced_by_the_library_composer(
+    music: MusicController,
+    composer_name: str,
+    library_composers: list[str],
+    named_by: str | None,
+    expected: str | None,
+) -> None:
+    """
+    A joined composer name naming one library composer credits that composer.
+
+    It does so on the track, its work and its main artists. A joined name several library
+    composers match stays as it is, and a name joining none is not looked up.
+    """
+    library = {name: _library_artist(str(x), name) for x, name in enumerate(library_composers, 1)}
+    track = _joined_composer_track(composer_name)
+    composer = library[expected] if expected else track.credits[0].artist
+    performer_credit = track.credits[1]
+    performer = track.artists[1]
+    query = AsyncMock(return_value=list(library.values()))
+
+    with patch.object(music.artists, "get_library_composers", query):
+        replaced = await music.tracks._split_joined_composers(track)
+
+    assert query.await_args_list == ([call(named_by=named_by)] if named_by else [])
+    assert replaced == ({composer_name} if expected else set())
+    assert track.credits == [
+        Credit(artist=composer, role=ArtistRole.COMPOSER, position=2),
+        performer_credit,
+    ]
+    assert isinstance(track.work, Work)
+    assert list(track.work.composers) == [composer]
+    assert list(track.artists) == [composer, performer]
+
+
+async def test_joined_composer_already_a_main_artist_is_not_repeated(
+    music: MusicController,
+) -> None:
+    """A library composer already among the main artists replaces a joined name only once."""
+    beethoven = _library_artist("1", "Ludwig van Beethoven")
+    track = _joined_composer_track()
+    track.artists = UniqueList([beethoven, *track.artists])
+    performer = track.artists[2]
+
+    with patch.object(music.artists, "get_library_composers", AsyncMock(return_value=[beethoven])):
+        await music.tracks._split_joined_composers(track)
+
+    assert list(track.artists) == [beethoven, performer]
+
+
+def _performing_composer_track(
+    name: str = "Antonio Vivaldi", item_id: str = "30290", role: ArtistRole = ArtistRole.ORCHESTRA
+) -> Track:
+    """Return a provider track with a placeholder composer, crediting Vivaldi by default."""
+    track = create_track("qobuz_1", "four_seasons", name="The Four Seasons")
+    performer = Artist(item_id=item_id, provider="qobuz_1", name=name, provider_mappings=set())
+    track.artists = UniqueList([performer])
+    track.credits = [Credit(artist=performer, role=role)]
+    track.metadata.performers = {"Dr, Composer", "Antonio Vivaldi, Orchestra, Artist, MainArtist"}
+    track.work = Work(
+        item_id="The Four Seasons",
+        provider="qobuz_1",
+        name="The Four Seasons",
+        provider_mappings=set(),
+    )
+    return track
+
+
+@pytest.mark.parametrize(
+    ("performer", "library_composers", "by_provider_id", "expected"),
+    [
+        # Qobuz names the composer "Dr, Composer" and credits Vivaldi as orchestra
+        (
+            ("Antonio Vivaldi", "30290", ArtistRole.ORCHESTRA),
+            ["Antonio Vivaldi", "Johann Sebastian Bach"],
+            False,
+            "Antonio Vivaldi",
+        ),
+        # a performer spelled unlike the composer whose provider artist is that composer
+        (
+            ("Dimitri Chostakovitch", "138", ArtistRole.SOLOIST),
+            ["Dmitri Shostakovich"],
+            True,
+            "Dmitri Shostakovich",
+        ),
+        # a performer naming several or no confirmed composers keeps its credit
+        (
+            ("Antonio Vivaldi", "30290", ArtistRole.ORCHESTRA),
+            ["Antonio Vivaldi", "Vivaldi Antonio Lucio"],
+            False,
+            None,
+        ),
+        (
+            ("Antonio Vivaldi", "30290", ArtistRole.ORCHESTRA),
+            ["Johann Sebastian Bach"],
+            False,
+            None,
+        ),
+    ],
+)
+async def test_performer_naming_one_composer_becomes_the_composer(
+    music: MusicController,
+    performer: tuple[str, str, ArtistRole],
+    library_composers: list[str],
+    by_provider_id: bool,
+    expected: str | None,
+) -> None:
+    """
+    A track with a placeholder composer credits the confirmed composer its performer is.
+
+    The performer is that composer by name or by its provider artist. A performer naming
+    several or no confirmed composers keeps its credit, and stays the main artist.
+    """
+    library = {name: _library_artist(str(x), name) for x, name in enumerate(library_composers, 1)}
+    composer = library[expected] if expected else None
+    track = _performing_composer_track(*performer)
+    main_artist = track.artists[0]
+    credits_before = list(track.credits)
+    query = AsyncMock(return_value=list(library.values()))
+    by_id = AsyncMock(return_value=composer if by_provider_id else None)
+
+    with (
+        patch.object(music.artists, "get_library_composers", query),
+        patch.object(music.artists, "get_library_item_by_prov_id", by_id),
+    ):
+        replaced = await music.tracks._credit_performing_composer(track)
+
+    query.assert_awaited_once_with()
+    assert replaced == ({performer[0]} if composer else set())
+    assert track.credits == (
+        [Credit(artist=composer, role=ArtistRole.COMPOSER)] if composer else credits_before
+    )
+    assert isinstance(track.work, Work)
+    assert list(track.work.composers) == ([composer] if composer else [])
+    assert list(track.artists) == [main_artist]
+
+
+async def test_track_with_a_composer_queries_no_composers(music: MusicController) -> None:
+    """A track crediting a composer keeps its performers and never looks up the composers."""
+    track = _performing_composer_track()
+    track.credits.append(Credit(artist=_library_artist("3", "Telemann"), role=ArtistRole.COMPOSER))
+    credits_before = list(track.credits)
+    query = AsyncMock(return_value=[_library_artist("1", "Antonio Vivaldi")])
+
+    with patch.object(music.artists, "get_library_composers", query):
+        replaced = await music.tracks._credit_performing_composer(track)
+
+    query.assert_not_awaited()
+    assert replaced == set()
+    assert track.credits == credits_before
+
+
+async def test_track_without_a_placeholder_composer_is_left_alone(
+    music: MusicController,
+) -> None:
+    """A track that merely names no composer keeps a composer conducting as conductor."""
+    bernstein = Artist(
+        item_id="1", provider="qobuz_1", name="Leonard Bernstein", provider_mappings=set()
+    )
+    track = create_track("qobuz_1", "mahler", name="Symphony No. 5: I. Trauermarsch")
+    track.credits = [Credit(artist=bernstein, role=ArtistRole.CONDUCTOR)]
+    track.metadata.performers = {"Leonard Bernstein, Conductor"}
+    query = AsyncMock(return_value=[_library_artist("1", "Leonard Bernstein")])
+
+    with patch.object(music.artists, "get_library_composers", query):
+        assert await music.tracks._credit_performing_composer(track) == set()
+
+    query.assert_not_awaited()
+    assert track.credits == [Credit(artist=bernstein, role=ArtistRole.CONDUCTOR)]
