@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload
 from music_assistant_models.auth import Scope
 from music_assistant_models.enums import (
     AlbumType,
+    ArtistEntityType,
     ArtistType,
     ExternalID,
     ImageType,
@@ -56,6 +57,8 @@ from music_assistant.constants import (
 from music_assistant.controllers.music.constants import SIMILAR_ITEMS_LIMIT
 from music_assistant.controllers.music.helpers import (
     CREDITED_TRACK_ARTISTS,
+    IS_CLASSICAL_COMPOSER,
+    life_span_period,
     metadata_for_update,
     provider_mappings_for_update,
 )
@@ -83,7 +86,7 @@ from music_assistant.models.music_provider import (
 from .base import MediaControllerBase
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Container, Iterable, Mapping, Sequence
 
     from music_assistant import MusicAssistant
     from music_assistant.models.media_capabilities import MusicDiscoveryMixin
@@ -1698,6 +1701,34 @@ class ArtistsController(MediaControllerBase[Artist]):
             with contextlib.suppress(MediaNotFoundError):  # already merged by a concurrent add
                 await self.merge_library_items(target_id, source_id)
         return target_id
+
+    async def set_composer_periods(self, artist_ids: Iterable[int] | None = None) -> None:
+        """
+        Give the classical composers without a period the period of their stored life dates.
+
+        :param artist_ids: Library ids of the artists to consider, None for the whole library.
+        """
+        scope = ""
+        if artist_ids is not None:
+            if not (ids := ", ".join(str(int(x)) for x in artist_ids)):
+                return
+            scope = f"item_id IN ({ids}) AND "
+        # only people with a year of birth, and of death once died, can be given a period
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT item_id FROM {DB_TABLE_ARTISTS} WHERE {scope}period IS NULL "
+            "AND json_extract(metadata, '$.artist_entity_type') = :person "
+            "AND json_extract(metadata, '$.life_span.begin') != '' "
+            "AND (COALESCE(json_extract(metadata, '$.life_span.ended'), 0) = 0 "
+            "OR json_extract(metadata, '$.life_span.end') != '') "
+            f"AND {IS_CLASSICAL_COMPOSER}",
+            {"person": ArtistEntityType.PERSON.value},
+            limit=0,
+        )
+        for row in rows:
+            artist = await self.get_library_item(row["item_id"])
+            if period := life_span_period(artist):
+                artist.period = period
+                await self.update_item_in_library(artist.item_id, artist)
 
     def artist_from_item_mapping(self, item: ItemMapping) -> Artist:
         """Create an Artist object from an ItemMapping object."""

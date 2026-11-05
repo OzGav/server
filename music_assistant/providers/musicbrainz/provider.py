@@ -12,7 +12,6 @@ from mashumaro.exceptions import InvalidFieldValue, MissingField
 from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import (
     AlbumType,
-    ArtistEntityType,
     ConfigEntryType,
     ExternalID,
     LinkType,
@@ -20,10 +19,10 @@ from music_assistant_models.enums import (
 )
 from music_assistant_models.errors import InvalidDataError
 from music_assistant_models.media_items import MediaItemLink, MediaItemMetadata, UniqueList
-from music_assistant_models.media_items.metadata import LifeSpan
 
 from music_assistant.constants import VARIOUS_ARTISTS_MBID, VARIOUS_ARTISTS_NAME
 from music_assistant.helpers.compare import compare_album_name, compare_strings
+from music_assistant.helpers.datetime import release_year
 from music_assistant.helpers.external_ids import (
     external_id_lookup_values,
     is_valid_barcode,
@@ -65,7 +64,7 @@ from .models import (
     MusicBrainzRelease,
     MusicBrainzReleaseGroup,
     MusicBrainzTag,
-    release_year,
+    MusicBrainzWork,
 )
 from .recommendations import MusicBrainzRecommendationManager
 
@@ -379,18 +378,8 @@ class MusicbrainzProvider(MetadataProvider):
             details = await self.get_artist_details(artist.mbid)
         except InvalidDataError:
             return None
-        artist_entity_type: ArtistEntityType | None = None
-        if details.type:
-            entity_type = ArtistEntityType(details.type.lower())
-            if entity_type != ArtistEntityType.UNKNOWN:
-                artist_entity_type = entity_type
-        life_span: LifeSpan | None = None
-        if details.life_span:
-            life_span = LifeSpan(
-                begin=details.life_span.begin,
-                end=details.life_span.end,
-                ended=details.life_span.ended,
-            )
+        artist_entity_type = details.entity_type
+        life_span = details.metadata_life_span
         links = self._links_from_relations(details.relations)
         genres = _genre_names(details.genres)
         if not artist_entity_type and not life_span and not links and not genres:
@@ -648,6 +637,24 @@ class MusicbrainzProvider(MetadataProvider):
                 raise InvalidDataError from err
         msg = "Invalid MusicBrainz ReleaseGroup ID provided"
         raise InvalidDataError(msg)
+
+    async def get_work_details(self, work_id: str) -> MusicBrainzWork | None:
+        """
+        Get a Work with its aliases and artist, work and series relations by its MusicBrainz id.
+
+        :param work_id: MusicBrainz Work id.
+        :return: The work, or None if MusicBrainz does not know it.
+        :raises InvalidDataError: If MusicBrainz returns a malformed work.
+        """
+        endpoint = f"work/{work_id}?inc=aliases+artist-rels+work-rels+series-rels"
+        if not (result := await self._api_client.get_data(endpoint)):
+            return None
+        if "id" not in result:
+            result["id"] = work_id
+        try:
+            return MusicBrainzWork.from_raw(result)
+        except MissingField as err:
+            raise InvalidDataError from err
 
     async def get_artist_details_by_album(
         self, artistname: str, ref_album: Album

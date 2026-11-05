@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from music_assistant_models.enums import (
 )
 from music_assistant_models.media_items import (
     Artist,
+    Credit,
     ItemMapping,
     MediaItem,
     ProviderMapping,
@@ -119,6 +121,7 @@ async def _add_track(
     work: Work | ItemMapping | None = None,
     movement_number: int | None = None,
     movement_name: str | None = None,
+    item_credits: list[Credit] | None = None,
 ) -> Track:
     """Store a library track, optionally linked to a work."""
     artist = await _add_artist(mass, "Performer")
@@ -136,8 +139,14 @@ async def _add_track(
             movement_number=movement_number,
             movement_total=4 if movement_number else None,
             movement_name=movement_name,
+            credits=item_credits or [],
         )
     )
+
+
+def _composer_ids(track: Track) -> list[str]:
+    """Return the item ids of the composers credited on a track, in order."""
+    return [x.artist.item_id for x in track.credits if x.role == ArtistRole.COMPOSER]
 
 
 def _ids(items: Iterable[MediaItem | ItemMapping]) -> list[str]:
@@ -416,6 +425,20 @@ async def test_library_items_sort_by_composer_in_catalogue_order(mass: MusicAssi
     assert _ids(by_composer_desc) == _ids([k_525, op_9, op_67, uncatalogued, composerless])
 
 
+async def test_server_lists_works_newest_first(mass: MusicAssistant) -> None:
+    """The server can list works newest first, a sort only it uses."""
+    token = _token()
+    older = await _add_work(mass, f"B {token}", date_added=datetime(2020, 1, 1, tzinfo=UTC))
+    newer = await _add_work(mass, f"C {token}", date_added=datetime(2021, 1, 1, tzinfo=UTC))
+    oldest = await _add_work(mass, f"A {token}", date_added=datetime(2019, 1, 1, tzinfo=UTC))
+
+    newest_first = await mass.music.works.get_library_items_by_query(
+        search=token, sort_field=SortField.TIMESTAMP_ADDED, sort_direction=SortDirection.DESC
+    )
+
+    assert _ids(newest_first) == _ids([newer, older, oldest])
+
+
 async def test_library_items_sort_by_composition_year(mass: MusicAssistant) -> None:
     """Sorting by year composed lists the oldest first by default, works without a year last."""
     token = _token()
@@ -521,6 +544,7 @@ async def test_track_work_with_its_musicbrainz_id_is_added(mass: MusicAssistant)
     work = await mass.music.works.get_library_item(first.work.item_id)
     assert work.name == name
     assert _ids(work.composers) == [composer.item_id]
+    assert _composer_ids(first) == [composer.item_id]
 
 
 async def test_track_overwrite_without_work_keeps_work(mass: MusicAssistant) -> None:
@@ -569,6 +593,43 @@ async def test_track_overwrite_replaces_work(mass: MusicAssistant) -> None:
     assert overwritten.work is not None
     assert overwritten.work.item_id == other.item_id
     assert overwritten.movement_number == 3
+
+
+async def test_track_of_a_work_gets_its_composers(mass: MusicAssistant) -> None:
+    """A track of a work credits the work's composers in order, unless it credits its own."""
+    first = await _add_artist(mass, "First")
+    second = await _add_artist(mass, "Second")
+    own = await _add_artist(mass, "Own")
+    work = await _add_work(mass, f"Work {_token()}", [first, second])
+
+    bare = await _add_track(mass, work)
+    credited = await _add_track(
+        mass, work, item_credits=[Credit(artist=own, role=ArtistRole.COMPOSER)]
+    )
+    workless = await _add_track(mass)
+
+    assert _composer_ids(bare) == [first.item_id, second.item_id]
+    assert [x.position for x in bare.credits if x.role == ArtistRole.COMPOSER] == [0, 1]
+    assert _composer_ids(credited) == [own.item_id]
+    assert _composer_ids(workless) == []
+
+
+async def test_reread_track_keeps_its_work_composers(mass: MusicAssistant) -> None:
+    """A track read again from its only provider, which replaces its credits, keeps them."""
+    composer = await _add_artist(mass, "Composer")
+    conductor = await _add_artist(mass, "Conductor")
+    work = await _add_work(mass, f"Work {_token()}", [composer])
+    track = await _add_track(mass, work)
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.credits = [Credit(artist=conductor, role=ArtistRole.CONDUCTOR)]
+
+    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+
+    assert _composer_ids(stored) == [composer.item_id]
+    assert [x.artist.item_id for x in stored.credits if x.role == ArtistRole.CONDUCTOR] == [
+        conductor.item_id
+    ]
 
 
 async def test_removing_a_work_unlinks_it(mass: MusicAssistant) -> None:
