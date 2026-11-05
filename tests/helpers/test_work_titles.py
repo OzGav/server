@@ -6,6 +6,7 @@ import pytest
 from music_assistant_models.enums import WorkType
 
 from music_assistant.helpers.work_titles import (
+    parent_work_name,
     parse_catalog_numbers,
     part_key,
     part_label,
@@ -68,6 +69,13 @@ def test_same_part_written_differently(first: str, second: str) -> None:
     """The same act or part written differently has one key."""
     assert part_key(first) is not None
     assert part_key(first) == part_key(second)
+
+
+def test_act_is_part_of_the_work_before_it() -> None:
+    """An act after a comma, a slash or a colon is part of the work named before it."""
+    assert parent_work_name("La bohème, SC 67 / Act 1") == "La bohème, SC 67"
+    assert parent_work_name("La bohème, SC 67, Act I") == "La bohème, SC 67"
+    assert parent_work_name("Turandot: Atto III") == "Turandot"
 
 
 @pytest.mark.parametrize(

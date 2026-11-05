@@ -21,17 +21,20 @@ if TYPE_CHECKING:
     from music_assistant.providers.musicbrainz.models import MusicBrainzArtist, MusicBrainzWork
 
 
-def fill_artist_from_musicbrainz(artist: Artist, mb_artist: MusicBrainzArtist) -> None:
+def fill_artist_from_musicbrainz(
+    artist: Artist, mb_artist: MusicBrainzArtist, replace: bool = False
+) -> None:
     """
     Fill an artist's empty entity type and life span in from its MusicBrainz artist.
 
     :param artist: The artist to fill in.
     :param mb_artist: Its MusicBrainz artist.
+    :param replace: Replace the life span by MusicBrainz's when it has one.
     """
     metadata = artist.metadata
     if not metadata.artist_entity_type and (entity_type := mb_artist.entity_type):
         metadata.artist_entity_type = entity_type
-    if not metadata.life_span and (life_span := mb_artist.metadata_life_span):
+    if (replace or not metadata.life_span) and (life_span := mb_artist.metadata_life_span):
         metadata.life_span = life_span
 
 
