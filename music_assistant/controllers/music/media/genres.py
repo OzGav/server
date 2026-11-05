@@ -56,6 +56,7 @@ from music_assistant.constants import (
     GENRE_ICONS_DIR_NAME,
     RESOURCES_DIR,
 )
+from music_assistant.controllers.music.classification import CLASSICAL_GENRE_KEY
 from music_assistant.controllers.music.helpers import search_name_match_clause
 from music_assistant.controllers.music.listing import resolve_listing_sort
 from music_assistant.controllers.tasks.context import update_current_task_progress_text
@@ -66,7 +67,7 @@ from music_assistant.helpers.json import json_loads, serialize_to_json
 from .base import MediaControllerBase
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from music_assistant_models.event import MassEvent
 
@@ -115,6 +116,7 @@ class _SyncGenreLookup:
     primary_name_to_genre: dict[str, int]
     alias_to_genre: dict[str, list[int]]
     excluded_names: set[str]
+    classical_genre_ids: set[int]
 
 
 # Curated default genres per taxonomy: (content_type, mapping). Music keeps content_type None;
@@ -1253,6 +1255,19 @@ class GenreController(MediaControllerBase[Genre]):
             if to_add or to_remove:
                 await self.mass.music.classification.update_item(media_type, media_id_int)
 
+    async def names_classical_genre(self, genre_names: Iterable[str]) -> bool:
+        """
+        Return whether any of the given music genre names maps to the curated classical genre.
+
+        :param genre_names: Genre names as tagged, such as the genre tags of a file.
+        """
+        genre_ids: set[int] = set()
+        for name in genre_names:
+            # resolved one by one, as a name the library does not know resolves all to nothing
+            genre_ids |= await self._resolve_genre_names_cached({name}, None) or set()
+        lookup = await self._get_sync_genre_lookup(None)
+        return not genre_ids.isdisjoint(lookup.classical_genre_ids)
+
     def register_scheduled_scan_task(self) -> BackgroundTask:
         """Register the recurring genre mapping scan task."""
         utc_hour, utc_minute = local_clock_time_to_utc(4, 0)
@@ -2072,11 +2087,7 @@ class GenreController(MediaControllerBase[Genre]):
         :return: The resolved genre ids, or None when any name is unknown to the
             taxonomy and a full resolution (with genre creation) is required.
         """
-        cache_key = content_type.value if content_type else None
-        lookup = self._sync_lookup_cache.get(cache_key)
-        if lookup is None or (time.monotonic() - lookup.built_at) > SYNC_GENRE_LOOKUP_TTL:
-            lookup = await self._build_sync_genre_lookup(content_type)
-            self._sync_lookup_cache[cache_key] = lookup
+        lookup = await self._get_sync_genre_lookup(content_type)
         target_ids: set[int] = set()
         for name in genre_names:
             if not (normalized := self._normalize_genre_name(name)):
@@ -2093,6 +2104,15 @@ class GenreController(MediaControllerBase[Genre]):
                 return None
         return target_ids
 
+    async def _get_sync_genre_lookup(self, content_type: MediaType | None) -> _SyncGenreLookup:
+        """Return the cached genre lookup snapshot of a taxonomy, rebuilt once it is stale."""
+        cache_key = content_type.value if content_type else None
+        lookup = self._sync_lookup_cache.get(cache_key)
+        if lookup is None or (time.monotonic() - lookup.built_at) > SYNC_GENRE_LOOKUP_TTL:
+            lookup = await self._build_sync_genre_lookup(content_type)
+            self._sync_lookup_cache[cache_key] = lookup
+        return lookup
+
     async def _build_sync_genre_lookup(self, content_type: MediaType | None) -> _SyncGenreLookup:
         """Build a fresh in-memory genre lookup snapshot for a single taxonomy."""
         alias_to_genre, primary_name_to_genre = await self._build_genre_lookup(content_type)
@@ -2102,11 +2122,21 @@ class GenreController(MediaControllerBase[Genre]):
             {"content_type": content_type.value if content_type else None},
             limit=0,
         )
+        classical_rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT item_id FROM {DB_TABLE_GENRES} "
+            "WHERE translation_key = :key AND content_type IS :content_type",
+            {
+                "key": CLASSICAL_GENRE_KEY,
+                "content_type": content_type.value if content_type else None,
+            },
+            limit=0,
+        )
         return _SyncGenreLookup(
             built_at=time.monotonic(),
             primary_name_to_genre=primary_name_to_genre,
             alias_to_genre=alias_to_genre,
             excluded_names={row["search_name"] for row in excluded_rows},
+            classical_genre_ids={int(row["item_id"]) for row in classical_rows},
         )
 
     async def _get_synced_genre_ids(
