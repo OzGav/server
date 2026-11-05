@@ -66,7 +66,9 @@ WORK_SORT_FIELDS: Final[frozenset[SortField]] = frozenset(
 )
 
 
-def work_sort_sql(field: SortField, direction: SortDirection | None) -> str:
+def work_sort_sql(
+    field: SortField, direction: SortDirection | None, one_composer: bool = False
+) -> str:
     """
     Return the ORDER BY clause for a works sort on the title, composer or year composed.
 
@@ -75,15 +77,17 @@ def work_sort_sql(field: SortField, direction: SortDirection | None) -> str:
 
     :param field: One of WORK_SORT_FIELDS.
     :param direction: The sort direction, the works listing's default when None.
+    :param one_composer: Whether the works are those of one composer, whose catalog then
+        orders them all, also those shared with a composer listed before them.
     """
     default = get_listing_default_direction(ListingType.LIBRARY_WORKS, field)
     order = (direction or default).value.upper()
     name_sort = f"{DB_TABLE_WORKS}.name_sort"
     item_id = f"{DB_TABLE_WORKS}.item_id"
     if field == SortField.COMPOSER:
+        catalog = f"{DB_TABLE_WORKS}.catalog_sort ASC NULLS LAST, {name_sort} ASC, {item_id}"
         return (
-            f"{FIRST_COMPOSER_SORT_NAME} {order} NULLS LAST, "
-            f"{DB_TABLE_WORKS}.catalog_sort ASC NULLS LAST, {name_sort} ASC, {item_id}"
+            catalog if one_composer else f"{FIRST_COMPOSER_SORT_NAME} {order} NULLS LAST, {catalog}"
         )
     if field == SortField.YEAR:
         return f"{DB_TABLE_WORKS}.composition_year {order} NULLS LAST, {name_sort} ASC, {item_id}"

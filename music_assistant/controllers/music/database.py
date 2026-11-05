@@ -827,6 +827,11 @@ class MusicDatabaseSetupMixin:
             f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORKS}_parent_work_id_idx "
             f"on {DB_TABLE_WORKS}(parent_work_id);"
         )
+        # partial index on the few classical tracks the classical listings start from
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_TRACKS}_is_classical_idx "
+            f"on {DB_TABLE_TRACKS}(is_classical) WHERE is_classical = 1;"
+        )
         # index on tracks.work_id for the Work detail page query
         await self.database.execute(
             f"CREATE INDEX IF NOT EXISTS {DB_TABLE_TRACKS}_work_id_idx "

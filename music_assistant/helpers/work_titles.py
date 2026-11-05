@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Final
+
+from music_assistant_models.enums import WorkType
 
 # a movement title such as "I. Allegro", "3. Presto" or "No. 4. The Call" starts with its
 # number and a full stop, one such as "Mvt. I-Allegro" or "Mvt. 3 Andantino" with "Mvt."
@@ -57,6 +60,37 @@ _FORM_WORD = re.compile(
     r"|quartetto|quatuor|quintet|quintets|quintett|quintetto|konzert|konzerte))\b",
     re.IGNORECASE,
 )
+# the work types a title names, the first match wins; opera is left out as titles use it
+# loosely, such as "La scala di seta Opera: Overture"
+_TITLE_WORK_TYPES: Final[tuple[tuple[WorkType, re.Pattern[str]], ...]] = tuple(
+    (work_type, re.compile(pattern))
+    for work_type, pattern in (
+        (WorkType.QUARTET, r"\bstring quartets?\b"),
+        (WorkType.SYMPHONIC_POEM, r"\bsymphonic poems?\b"),
+        (WorkType.SYMPHONY, r"\bsympho(ny|nie|nies)\b|\bsinfonie\b"),
+        (WorkType.CONCERTO, r"\bconcert(o|os|i)\b"),
+        (WorkType.SONATA, r"\bsonat(a|as|e)\b"),
+        (WorkType.MASS, r"\b(mass|missa|messe)\b"),
+        (WorkType.OVERTURE, r"\bovertures?\b|\bouvertüre\b"),
+        (WorkType.SUITE, r"\bsuites?\b"),
+        (WorkType.CANTATA, r"\bcantatas?\b|\bkantate\b"),
+        (WorkType.ORATORIO, r"\boratorios?\b"),
+        (WorkType.MOTET, r"\bmotets?\b"),
+        (WorkType.MADRIGAL, r"\bmadrigals?\b"),
+        (WorkType.PARTITA, r"\bpartitas?\b"),
+        (WorkType.ETUDE, r"\b[ée]tudes?\b"),
+    )
+)
+# a nickname in double quotes or guillemets, such as "Concert sans orchestre"
+_QUOTED_NICKNAME = re.compile(r'"[^"]*"|«[^»]*»')
+
+# a type label in brackets, such as "(Opera)", unless a quoted name follows as in an excerpt,
+# or as the last word after a bracket or quote, such as "Cavalleria Rusticana (Rustic Chivalry)
+# Opera", so a name such as "The Phantom of the Opera" never counts
+_TYPE_LABEL: Final[re.Pattern[str]] = re.compile(
+    r'\((opera|ballet|operetta)\)(?!\s*["«])|[)"”»]\s*(opera|ballet|operetta)\W*$',
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -98,6 +132,18 @@ def names_classical_work(title: str) -> bool:
     :param title: The title of a work, such as "Symphony No. 5" or "Suite, BWV 1068".
     """
     return _FORM_WORD.search(title) is not None or _CATALOG_NUMBER.search(title) is not None
+
+
+def title_work_type(title: str) -> WorkType | None:
+    """
+    Return the work type a work title names as a whole word, None when it names none.
+
+    :param title: The title of a work, such as "Piano Concerto No. 21" or "Aida (Opera)".
+    """
+    text = _QUOTED_NICKNAME.sub(" ", title.lower())
+    return next(
+        (work_type for work_type, pattern in _TITLE_WORK_TYPES if pattern.search(text)), None
+    ) or (WorkType((m[1] or m[2]).lower()) if (m := _TYPE_LABEL.search(title)) else None)
 
 
 def numeral_value(numeral: str) -> int | None:

@@ -224,13 +224,16 @@ def provider_mappings_for_update(
 
 
 def usable_thumb(
-    images: Iterable[dict[str, Any]] | None, hidden_sources: AbstractSet[str]
+    images: Iterable[dict[str, Any]] | None,
+    hidden_sources: AbstractSet[str],
+    image_type: ImageType = ImageType.THUMB,
 ) -> dict[str, Any] | None:
     """
-    Return the first thumb of a library item's stored (raw) images the viewer can be shown.
+    Return the first image of a type of a library item's stored images the viewer can be shown.
 
     :param images: The stored (raw) images of the item.
     :param hidden_sources: Music sources hidden from the viewer.
+    :param image_type: The type of image to pick, a thumb by default.
     """
     # same semantics as the MediaItem.available property: an empty cache means unknown
     available_providers: AbstractSet[str] = get_global_cache_value("available_providers") or set()
@@ -238,7 +241,7 @@ def usable_thumb(
         (
             image
             for image in images or ()
-            if image["type"] == ImageType.THUMB.value
+            if image["type"] == image_type.value
             and (
                 image.get("remotely_accessible")
                 or (
@@ -252,20 +255,25 @@ def usable_thumb(
 
 
 def preferred_thumb(
-    images: Iterable[dict[str, Any]] | None, hidden_sources: AbstractSet[str]
+    images: Iterable[dict[str, Any]] | None,
+    hidden_sources: AbstractSet[str],
+    image_type: ImageType = ImageType.THUMB,
 ) -> dict[str, Any] | None:
     """
-    Return the thumb to show of a library item's stored (raw) images.
+    Return the thumb (or other image type) to show of a library item's stored (raw) images.
 
     A library item can carry the artwork of several music sources, not all of which the
-    viewer can be shown. The first thumb that can be shown is preferred, falling back to
-    the first thumb.
+    viewer can be shown. The first image that can be shown is preferred, falling back to
+    the first image of the type.
 
     :param images: The stored (raw) images of the item.
     :param hidden_sources: Music sources hidden from the viewer.
+    :param image_type: The type of image to pick.
     """
-    thumbs = [image for image in images or () if image["type"] == ImageType.THUMB.value]
-    return usable_thumb(thumbs, hidden_sources) or (thumbs[0] if thumbs else None)
+    candidates = [image for image in images or () if image["type"] == image_type.value]
+    return usable_thumb(candidates, hidden_sources, image_type) or (
+        candidates[0] if candidates else None
+    )
 
 
 def sibling_instance_mappings(
