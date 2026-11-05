@@ -2012,6 +2012,7 @@ async def test_artist_identity_follows_an_artist_merged_into_another() -> None:
     artist = _merged_artist({(ExternalID.MB_ARTIST, OTHER_MBID)})
     # a sync stored a Discogs id on the artist while it was looked up
     _stored_item(enrichment, _merged_artist({(ExternalID.MB_ARTIST, OTHER_MBID), DISCOGS_ID}))
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(return_value=[])
 
     await enrichment._update_artist_metadata(artist, force_refresh=True)
 
@@ -2028,6 +2029,7 @@ async def test_artist_identity_merges_the_library_artists_sharing_a_followed_id(
     enrichment = _enrichment(_musicbrainz_answering_with(MBID))
     artist = _merged_artist({(ExternalID.MB_ARTIST, OTHER_MBID)})
     _stored_item(enrichment, _merged_artist({(ExternalID.MB_ARTIST, OTHER_MBID)}))
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(return_value=[])
 
     await enrichment._update_artist_metadata(artist, force_refresh=True)
 

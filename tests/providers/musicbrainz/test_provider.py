@@ -1890,6 +1890,54 @@ async def test_resolve_recording_by_isrc_of_a_single_recording_needs_no_title(
 
 
 @pytest.mark.parametrize(
+    ("album_ids", "release_recording", "expected"),
+    [
+        ({(ExternalID.MB_ALBUM, "rel-1")}, "rec-1", "REC-1"),
+        (set(), "rec-1", None),
+        ({(ExternalID.MB_ALBUM, "rel-1")}, "rec-other", None),
+    ],
+)
+async def test_resolve_recording_by_isrc_on_the_album_release_needs_no_artist_credit(
+    album_ids: set[tuple[ExternalID, str]], release_recording: str, expected: str | None
+) -> None:
+    """A recording crediting other artists is the track when it is on the album's release."""
+    release = _release_lookup("rel-1")
+    release["media"][0]["tracks"][0]["recording"]["id"] = release_recording
+    performer_credit = _credit("The Royal Festival Orchestra", "artist-orchestra")
+    isrc_lookup = {
+        "isrc": ISRC,
+        "recordings": [
+            _recording_lookup("REC-1", title="Dance of the Hours", credit=performer_credit)
+        ],
+    }
+    provider, get_data = _routed_provider(
+        {
+            f"isrc/{ISRC}": isrc_lookup,
+            "release/rel-1": release,
+            "recording/REC-1": _recording_lookup("REC-1"),
+        }
+    )
+    get_album = AsyncMock(return_value=_album_item(external_ids=album_ids))
+    track = _track_item(
+        "Ponchielli: Dance of the Hours",
+        artist="Amilcare Ponchielli",
+        external_ids={(ExternalID.ISRC, ISRC)},
+    )
+
+    recording = await provider.resolve_recording(track, get_album)
+
+    assert (recording[0].id if recording else None) == expected
+    get_album.assert_awaited_once_with()
+    expected_requests = [f"isrc/{ISRC}"]
+    if album_ids:
+        expected_requests.append("release/rel-1")
+    if expected:
+        expected_requests.append("recording/REC-1")
+    # the name search finds nothing here, so the ISRC leg alone decides
+    assert [r for r in _requested(get_data) if r != "recording?query"] == expected_requests
+
+
+@pytest.mark.parametrize(
     ("album_ids", "expected"),
     [
         (
@@ -1917,6 +1965,37 @@ async def test_resolve_recording_logs_an_isrc_musicbrainz_lacks(
 
     assert [record.getMessage() for record in caplog.records] == [expected]
     get_album.assert_awaited_once_with()
+
+
+async def test_resolve_recording_logs_a_recording_waiting_for_its_album(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A recording crediting other artists is logged when the album is not identified."""
+    performer_credit = _credit("The Royal Festival Orchestra", "artist-orchestra")
+    isrc_lookup = {
+        "isrc": ISRC,
+        "recordings": [
+            _recording_lookup("rec-1", title="Dance of the Hours", credit=performer_credit)
+        ],
+    }
+    provider, _ = _routed_provider({f"isrc/{ISRC}": isrc_lookup})
+    provider.logger = logging.getLogger("test_musicbrainz")
+    caplog.set_level(logging.DEBUG, logger="test_musicbrainz")
+    get_album = AsyncMock(return_value=_album_item())
+    track = _track_item(
+        "Ponchielli: Dance of the Hours",
+        artist="Amilcare Ponchielli",
+        external_ids={(ExternalID.ISRC, ISRC)},
+    )
+
+    assert await provider.resolve_recording(track, get_album) is None
+
+    assert [record.getMessage() for record in caplog.records] == [
+        f'ISRC {ISRC} of "Ponchielli: Dance of the Hours" is on MusicBrainz recording '
+        "https://musicbrainz.org/recording/rec-1, which credits other artists, so it needs "
+        'album "In Rainbows" identified, add its streaming link or barcode to the release of '
+        "that recording"
+    ]
 
 
 async def test_resolve_recording_logs_nothing_for_an_isrc_of_other_recordings(
@@ -3038,3 +3117,33 @@ def test_work_type_maps_musicbrainz_types(mb_type: str | None, work_type: WorkTy
 def test_work_musical_key_comes_from_its_key_attribute(name: str, expected: str | None) -> None:
     """The key of a work is its Key attribute, None for a work without one."""
     assert _work(name).musical_key == expected
+
+
+# ---------------------------------------------------------------------------
+# get_artists_by_name
+# ---------------------------------------------------------------------------
+
+
+async def test_artists_by_name_keeps_only_those_carrying_the_name() -> None:
+    """Return the artists whose name or an alias is the name, punctuation and accents aside."""
+    # MusicBrainz writes the hyphen in Saint-Saëns as a Unicode hyphen
+    provider, get_data = _provider(
+        {
+            "artists": [
+                {
+                    "id": "camille",
+                    "name": "Camille Saint\u2010Saëns",
+                    "sort-name": "Saint\u2010Saëns, Camille",
+                    "aliases": [{"name": "Saint Saens", "sort-name": "Saint Saens"}],
+                },
+                {"id": "marie", "name": "Marie Saint-Saëns", "sort-name": "Saint-Saëns, Marie"},
+                {"id": "broken", "sort-name": "no name"},
+            ]
+        }
+    )
+
+    artists = await provider.get_artists_by_name("Saint-Saëns")
+
+    assert [x.id for x in artists] == ["camille"]
+    assert get_data.await_args is not None
+    assert get_data.await_args.kwargs["query"] == 'artist:"Saint\\-Saëns" OR alias:"Saint\\-Saëns"'
