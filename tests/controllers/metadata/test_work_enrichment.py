@@ -1541,6 +1541,29 @@ async def test_composer_musicbrainz_does_not_confirm_gets_no_musicbrainz_id(
     cast("Mock", ctrl.schedule_update_metadata).assert_not_called()
 
 
+async def test_library_composers_named_by_a_name_leave_out_the_others(
+    mass: MusicAssistant,
+) -> None:
+    """Asked for the composers a name may name, the composers it cannot name are left out."""
+    token = _token()
+    composers = [
+        await _add_artist(mass, f"Ralph Vaughan-Williams{token}", uuid4().hex),
+        await _add_artist(mass, f"Frédéric Chopin{token}", uuid4().hex),
+    ]
+    for composer in composers:
+        work = await _add_work(
+            mass, f"Symphony {composer.name}", [composer], work_type=WorkType.SYMPHONY
+        )
+        await _add_track(mass, work, [], composer)
+
+    artists = mass.music.artists
+    for name, composer in zip(
+        (f"Vaughan-Williams{token}", f"Frederic Chopin{token}"), composers, strict=True
+    ):
+        found = await artists.get_library_composers(named_by=name)
+        assert [x.item_id for x in found] == [composer.item_id]
+
+
 @pytest.mark.parametrize(
     ("name", "mb_name", "mb_sort_name", "expected"),
     [

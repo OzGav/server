@@ -9,6 +9,13 @@ from typing import Final
 from music_assistant_models.enums import WorkType
 from music_assistant_models.helpers import create_safe_string
 
+from music_assistant.helpers.compare import compare_strings, is_named_in
+
+# credit wording in a joined name, such as "Beethoven & Conducted By William Bowles"
+_CREDIT_WORDING = re.compile(
+    r"\b(?:conducted|performed|arranged|orchestrated|directed)\s+by\b", re.IGNORECASE
+)
+
 # a movement title such as "I. Allegro", "3. Presto" or "No. 4. The Call" starts with its
 # number and a full stop, one such as "Mvt. I-Allegro" or "Mvt. 3 Andantino" with "Mvt."
 _NUMBERED_MOVEMENT = re.compile(r"^(?:(?:No\.\s)?([IVX]+|\d+)\.\s|Mvt\.\s([IVX]+|\d+)[-\s])")
@@ -102,6 +109,13 @@ _TYPE_LABEL: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
+# a movement marked as such, as in "Mvt. III-Rondo" or "Mvt. 3 The Young Prince"
+_MARKED_MOVEMENT = re.compile(r"Mvt\.\s(?:[IVX]+|\d+)[-\s]")
+# what ends the work of a "Work: Piece" title: a colon followed by a space or straight by the
+# quoted text of an aria ('La Bohème, Act I:"Che gelida manina"'), so catalog numbers such as
+# "Hob. I:94" are never split, or a comma followed by a marked movement, as in "Scheherazade,
+# Op. 35, Mvt. 3 The Young Prince"
+_WORK_SEPARATOR = re.compile(rf':(?:\s+|(?=["“]))|,\s+(?={_MARKED_MOVEMENT.pattern})')
 # the words naming an act or part of a work, the numbered ones with the kind of part they name
 _NUMBERED_PART_WORDS = {"Act": "act", "Part": "part", "Pt.": "part"}
 # the German, Italian and French words for an act or part, only read where one closes a title
@@ -132,6 +146,9 @@ _PART_SUBTITLE = re.compile(
 )
 # a name starting with a word and a number, such as "Variation No. 1", "Var. 1" or "Act II"
 _WORD_AND_NUMBER = re.compile(r"^([^\W\d_]{3,})\.?\s+(?:(?i:no|nr)\.?\s*|n°\s*)?(\d+|[IVX]+)\b")
+# a numbered piece after a comma or dash, as in "Erster Teil, 9a. Evangelista" or "Miserere -
+# 01. Miserere Mei", whose own text may hold a colon
+_NUMBERED_PIECE_WITHIN = re.compile(r"(?:, | - )\d+[a-z]?\.\s")
 
 
 @dataclass(frozen=True)
@@ -286,8 +303,59 @@ def numeral_value(numeral: str) -> int | None:
     return _ROMAN_NUMERALS.index(numeral) + 1 if numeral in _ROMAN_NUMERALS else None
 
 
+def joined_composer_name(name: str, title: str) -> str | None:
+    """
+    Return the composer a joined artist name starts with, or None when it names no composer.
+
+    A name such as "Beethoven & Conducted By William Bowles & Sarah Ainsworth" starts with the
+    composer when the rest of it credits performers by their part, or when the title starts
+    with the composer, as in "Chopin & Sarah Ainsworth" for "Chopin: Nocturne No. 2".
+
+    :param name: The artist name, such as "Frédéric Chopin & Sarah Ainsworth".
+    :param title: The title of the track the artist is credited on.
+    """
+    first, separator, rest = name.partition(" & ")
+    if not separator or not (first := first.strip()):
+        return None
+    if _CREDIT_WORDING.search(rest):
+        return first
+    segments = _split_work_title(title)
+    if len(segments) > 1 and _names_composer(segments[0], first):
+        return first
+    return None
+
+
 def _movement_number(movement: str) -> int | None:
     """Return the number a movement title starts with, or None when it starts with none."""
     if not (match := _NUMBERED_MOVEMENT.match(movement)):
         return None
     return numeral_value(match.group(1) or match.group(2))
+
+
+def _split_work_title(title: str) -> list[str]:
+    """Return the non-empty segments a title's work separators outside brackets divide it in."""
+    segments: list[str] = []
+    start = 0
+    for match in _WORK_SEPARATOR.finditer(title):
+        before = title[: match.start()]
+        # a colon inside brackets belongs to an annotation, as in "(Excerpt: Opening)"
+        if before.count("(") > before.count(")") or before.count("[") > before.count("]"):
+            continue
+        segment = title[start : match.start()]
+        # a colon after the number of a piece, or in a marked movement, belongs to the text of
+        # that piece, as in "Mvt. III-Rondo: Allegro"
+        if _NUMBERED_PIECE_WITHIN.search(segment) or _MARKED_MOVEMENT.match(segment.strip()):
+            break
+        segments.append(segment.strip())
+        start = match.end()
+    segments.append(title[start:].strip())
+    return [segment for segment in segments if segment]
+
+
+def _names_composer(segment: str, composer: str) -> bool:
+    """Return whether a title segment is a composer's name or surname, as in "Beethoven"."""
+    return (
+        compare_strings(segment, composer)
+        or is_named_in(segment, composer)
+        or compare_strings(segment.rsplit(maxsplit=1)[-1], composer.rsplit(maxsplit=1)[-1])
+    )
