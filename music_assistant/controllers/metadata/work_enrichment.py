@@ -7,6 +7,9 @@ and composers. Every library work is a MusicBrainz work, found through its own
 MusicBrainz id. The composers MusicBrainz names for a work without any are taken from the
 library's own artists, and are credited on its tracks without a composer too.
 
+Library works that turn out to be the same MusicBrainz work are merged into the one holding
+the most tracks.
+
 A work looked up for the first time takes its MusicBrainz name, in the user's language, and
 lists the catalog numbers its name gives first.
 A work refreshed by hand is looked up again as on its first lookup, taking MusicBrainz's
@@ -109,7 +112,11 @@ class WorkEnrichmentMixin:
         given = work
         # MusicBrainz answers a merged work's old id with the work it was merged into
         await self._follow_merged_id(work, hierarchy[0].id)
+        # the caller reads the outcome off the work it passed in, which a merge may remove
         _fill_work_from_musicbrainz(work, hierarchy, reload)
+        if survivor := await self._merge_duplicate_works(work, hierarchy[0].id):
+            work = survivor
+            _fill_work_from_musicbrainz(work, hierarchy, reload)
         new_composers: list[Artist] = []
         if not work.composers:
             new_composers = [
@@ -156,6 +163,15 @@ class WorkEnrichmentMixin:
                 break
             hierarchy.append(parent_work)
         return hierarchy
+
+    async def _merge_duplicate_works(self, work: Work, mbid: str) -> Work | None:
+        """Merge the library works that are a given MusicBrainz work, return the survivor if any."""
+        works = self.mass.music.works
+        if (
+            survivor_id := await works.merge_library_works_by_mbid(int(work.item_id), mbid)
+        ) is None:
+            return None
+        return await works.get_library_item(survivor_id)
 
     async def _take_musicbrainz_name(
         self, work: Work, mb_work: MusicBrainzWork, reload: bool = False
