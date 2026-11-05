@@ -7,6 +7,9 @@ and composers. Every library work is a MusicBrainz work, found through its own
 MusicBrainz id. The composers MusicBrainz names for a work without any are taken from the
 library's own artists, and are credited on its tracks without a composer too.
 
+Library works that turn out to be the same MusicBrainz work are merged into the one with
+the most tracks.
+
 A work looked up for the first time takes its MusicBrainz name, in the user's language, and
 lists the catalog numbers in its name first.
 A work refreshed by hand is looked up again as on its first lookup, taking MusicBrainz's
@@ -22,7 +25,7 @@ from time import time
 from typing import TYPE_CHECKING
 
 from music_assistant_models.enums import ExternalID
-from music_assistant_models.errors import InvalidDataError
+from music_assistant_models.errors import InvalidDataError, MediaNotFoundError
 from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import Artist, UniqueList, Work
 
@@ -72,13 +75,16 @@ class WorkEnrichmentMixin:
         The work takes MusicBrainz's current data as on its first lookup.
 
         :param work: The library work.
-        :return: The work as it is in the library afterwards.
+        :return: The work as it is in the library afterwards, or the work given when it left.
         """
         works = self.mass.music.works
         reloaded = await self._link_work_to_musicbrainz(
             await works.get_library_item(work.item_id), reload=True, force_refresh=True
         )
-        return await works.get_library_item(reloaded.item_id)
+        try:
+            return await works.get_library_item(reloaded.item_id)
+        except MediaNotFoundError:
+            return work
 
     async def _link_work_to_musicbrainz(
         self, work: Work, reload: bool = False, force_refresh: bool = False
@@ -90,7 +96,7 @@ class WorkEnrichmentMixin:
         :param reload: Look it up again as on its first lookup, replacing what MusicBrainz
             gives now.
         :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
-        :return: The library work.
+        :return: The library work, or the work it merged into.
         """
         if not (musicbrainz := self._musicbrainz_provider()):
             return work
@@ -104,7 +110,11 @@ class WorkEnrichmentMixin:
         given = work
         # MusicBrainz answers a merged work's old id with the work it was merged into
         await self._follow_merged_id(work, hierarchy[0].id)
+        # the caller reads the outcome off the work it passed in, which a merge may remove
         _fill_work_from_musicbrainz(work, hierarchy, reload)
+        if survivor := await self._merge_duplicate_works(work, hierarchy[0].id):
+            work = survivor
+            _fill_work_from_musicbrainz(work, hierarchy, reload)
         new_composers: list[Artist] = []
         if not work.composers:
             new_composers = [
@@ -180,6 +190,15 @@ class WorkEnrichmentMixin:
                 break
             hierarchy.append(parent_work)
         return hierarchy
+
+    async def _merge_duplicate_works(self, work: Work, mbid: str) -> Work | None:
+        """Merge the library works that are a given MusicBrainz work, return the survivor if any."""
+        works = self.mass.music.works
+        if (
+            survivor_id := await works.merge_library_works_by_mbid(int(work.item_id), mbid)
+        ) is None:
+            return None
+        return await works.get_library_item(survivor_id)
 
     async def _take_musicbrainz_name(
         self, work: Work, mb_work: MusicBrainzWork, reload: bool = False
