@@ -6,6 +6,7 @@ import pytest
 from music_assistant_models.enums import WorkType
 
 from music_assistant.helpers.work_titles import (
+    joined_composer_name,
     parent_work_name,
     parse_catalog_numbers,
     part_key,
@@ -106,6 +107,27 @@ def test_different_parts_have_different_keys(first: str, second: str) -> None:
 def test_whole_work_has_no_part_key(work: str) -> None:
     """A work that is not an act or part, or a piece within one, has no part key."""
     assert part_key(work) is None
+
+
+@pytest.mark.parametrize(
+    ("name", "title", "expected"),
+    [
+        (
+            "Ludwig van Beethoven & Conducted By William Bowles & Sarah Ainsworth",
+            "Für Elise",
+            "Ludwig van Beethoven",
+        ),
+        ("Chopin & Sarah Ainsworth", "Chopin: Nocturne No. 2: Andante", "Chopin"),
+        ("Frédéric Chopin & Sarah Ainsworth", "Chopin: Nocturne No. 2", "Frédéric Chopin"),
+        ("Simon & Garfunkel", "The Sound of Silence", None),
+        ("Simon & Garfunkel", "Bridge over Troubled Water: Live", None),
+        ("Chopin & Sarah Ainsworth", "Chopin", None),
+        ("Ludwig van Beethoven", "Beethoven: Für Elise", None),
+    ],
+)
+def test_joined_composer_name(name: str, title: str, expected: str | None) -> None:
+    """A joined name starts with its composer only when its credits or the title say so."""
+    assert joined_composer_name(name, title) == expected
 
 
 @pytest.mark.parametrize(

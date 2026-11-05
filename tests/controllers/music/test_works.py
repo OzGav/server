@@ -37,6 +37,7 @@ from music_assistant_models.media_items import (
 from music_assistant.constants import DB_TABLE_WORK_ARRANGEMENTS, DB_TABLE_WORK_ARTISTS
 from music_assistant.controllers.webserver.helpers.auth_middleware import current_user
 from music_assistant.mass import MusicAssistant
+from music_assistant.models.music_provider import MusicProvider
 
 PROVIDER_INSTANCE = "works_instance"
 # works are added the way a tag parser hands them over, from their source without mappings
@@ -1063,6 +1064,62 @@ async def test_parts_are_listed_through_their_work(mass: MusicAssistant) -> None
 
     assert sorted(_ids(listed)) == sorted([opera.item_id, lone.item_id])
     assert _ids(by_part) == [opera.item_id]
+
+
+async def test_streaming_update_drops_the_joined_composer_it_replaces(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A joined name replaced on a streaming update loses its artist, track and work credits."""
+    beethoven = await _add_artist(mass, "Ludwig van Beethoven")
+    joined = await _add_artist(mass, "Ludwig van Beethoven & Conducted By William Bowles")
+    composers = AsyncMock(return_value=[])
+    monkeypatch.setattr(mass.music.artists, "get_library_composers", composers)
+    work = await _add_work(mass, f"Für Elise {_token()}", [joined])
+    track = await _add_track(
+        mass, work, item_credits=[Credit(artist=joined, role=ArtistRole.COMPOSER)]
+    )
+    performer = track.artists[0]
+    track.artists = UniqueList([joined])
+    await mass.music.tracks.update_item_in_library(track.item_id, track)
+    composers.return_value = [beethoven]
+    streaming = Mock(spec=MusicProvider, is_streaming_provider=True)
+    monkeypatch.setattr(mass, "get_provider", Mock(return_value=streaming))
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.credits = [Credit(artist=joined, role=ArtistRole.COMPOSER)]
+
+    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+    stored_work = await mass.music.works.get_library_item(work.item_id)
+
+    assert _composer_ids(stored) == [beethoven.item_id]
+    assert _ids(stored_work.composers) == []
+    assert sorted(_ids(stored.artists)) == sorted([performer.item_id, beethoven.item_id])
+
+
+async def test_streaming_update_drops_the_performing_credit_of_the_composer(
+    mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A performer that becomes the composer on a streaming update loses its stored credit."""
+    vivaldi = await _add_artist(mass, "Antonio Vivaldi")
+    composers = AsyncMock(return_value=[])
+    monkeypatch.setattr(mass.music.artists, "get_library_composers", composers)
+    work = await _add_work(mass, f"Le quattro stagioni {_token()}", work_type=WorkType.CONCERTO)
+    track = await _add_track(
+        mass, work, item_credits=[Credit(artist=vivaldi, role=ArtistRole.ORCHESTRA)]
+    )
+    composers.return_value = [vivaldi]
+    streaming = Mock(spec=MusicProvider, is_streaming_provider=True)
+    monkeypatch.setattr(mass, "get_provider", Mock(return_value=streaming))
+    update = await mass.music.tracks.get_library_item(track.item_id)
+    update.provider_mappings = {_mapping()}
+    update.credits = [Credit(artist=vivaldi, role=ArtistRole.ORCHESTRA)]
+    update.metadata.performers = {"Dr, Composer", f"{vivaldi.name}, Orchestra"}
+
+    stored = await mass.music.tracks.update_item_in_library(track.item_id, update)
+
+    assert [(x.artist.item_id, x.role) for x in stored.credits] == [
+        (vivaldi.item_id, ArtistRole.COMPOSER)
+    ]
 
 
 async def test_track_moves_onto_a_work_as_a_movement(
