@@ -71,6 +71,7 @@ from music_assistant.constants import (
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACK_CREDITS,
+    DB_TABLE_WORK_ARTISTS,
     EXTERNAL_ID_PROVIDER,
     MASS_LOGGER_NAME,
 )
@@ -163,6 +164,11 @@ ItemCls = TypeVar("ItemCls", bound="MediaItemType")
 JSON_KEYS = (
     "artists",
     "credits",
+    "composers",
+    "catalog_numbers",
+    "parent_work",
+    "arrangement_of",
+    "work",
     "track_album",
     "metadata",
     "provider_mappings",
@@ -185,6 +191,7 @@ RELATION_TABLE_COLUMNS = {
     DB_TABLE_AUDIOBOOK_ARTISTS: ("audiobook_id", "artist_id"),
     DB_TABLE_TRACK_ARTISTS: ("track_id", "artist_id"),
     DB_TABLE_TRACK_CREDITS: ("track_id", "artist_id", "role", "instrument", "position"),
+    DB_TABLE_WORK_ARTISTS: ("work_id", "artist_id", "role", "position"),
 }
 
 # When set (task-local), per-item MEDIA_ITEM_ADDED/UPDATED events and the on_item_updated
@@ -4469,6 +4476,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                 (DB_TABLE_AUDIOBOOK_ARTISTS, "artist_id"),
                 (DB_TABLE_TRACK_ARTISTS, "artist_id"),
                 (DB_TABLE_TRACK_CREDITS, "artist_id"),
+                (DB_TABLE_WORK_ARTISTS, "artist_id"),
             )
         if self.media_type == MediaType.AUDIOBOOK:
             return ((DB_TABLE_AUDIOBOOK_ARTISTS, "audiobook_id"),)
