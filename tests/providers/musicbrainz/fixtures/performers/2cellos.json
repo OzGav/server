@@ -1,0 +1,163 @@
+{
+  "artist-credit": [
+    {
+      "joinphrase": "",
+      "name": "2Cellos",
+      "artist": {
+        "name": "2CELLOS",
+        "id": "c8e94c78-0e17-4d9a-b1f6-96e1b22ebe97",
+        "type": "Group",
+        "sort-name": "2CELLOS"
+      }
+    }
+  ],
+  "title": "2CELLOS",
+  "id": "4b8d8534-4dc9-41da-9db0-d9a1b57abe96",
+  "date": "2011-09-21",
+  "status": "Official",
+  "relations": [],
+  "media": [
+    {
+      "tracks": [
+        {
+          "position": 1,
+          "number": "1",
+          "id": "de11e033-c1c4-3a52-93d5-4843bc39e2ed",
+          "recording": {
+            "id": "5710edd9-9211-4764-a322-0a2360054ca0",
+            "relations": [
+              {
+                "begin": null,
+                "end": null,
+                "type": "instrument",
+                "direction": "backward",
+                "attribute-values": {},
+                "attributes": [
+                  "cello"
+                ],
+                "artist": {
+                  "sort-name": "Hauser, Stjepan",
+                  "id": "6fbb482c-528a-4138-aaed-27abc777ed7a",
+                  "type": "Person",
+                  "name": "Stjepan Hauser"
+                },
+                "target-credit": "",
+                "target-type": "artist"
+              },
+              {
+                "target-type": "artist",
+                "target-credit": "",
+                "attributes": [
+                  "cello"
+                ],
+                "artist": {
+                  "name": "Luka Šulić",
+                  "id": "0afe2d8d-2445-46e5-a165-7d7dda2b8330",
+                  "type": "Person",
+                  "sort-name": "Šulić, Luka"
+                },
+                "attribute-values": {},
+                "end": null,
+                "direction": "backward",
+                "type": "instrument",
+                "begin": null
+              },
+              {
+                "begin": null,
+                "attribute-values": {},
+                "end": null,
+                "type": "instrument arranger",
+                "direction": "backward",
+                "artist": {
+                  "name": "Stjepan Hauser",
+                  "type": "Person",
+                  "id": "6fbb482c-528a-4138-aaed-27abc777ed7a",
+                  "sort-name": "Hauser, Stjepan"
+                },
+                "attributes": [],
+                "target-credit": "",
+                "target-type": "artist"
+              },
+              {
+                "attribute-values": {},
+                "type": "instrument arranger",
+                "end": null,
+                "direction": "backward",
+                "attributes": [],
+                "artist": {
+                  "sort-name": "Šulić, Luka",
+                  "type": "Person",
+                  "id": "0afe2d8d-2445-46e5-a165-7d7dda2b8330",
+                  "name": "Luka Šulić"
+                },
+                "begin": null,
+                "target-type": "artist",
+                "target-credit": ""
+              },
+              {
+                "begin": null,
+                "attributes": [],
+                "attribute-values": {},
+                "type": "mixed at",
+                "end": null,
+                "direction": "backward",
+                "target-credit": "",
+                "place": {
+                  "id": "f005e798-341e-4f30-b2ea-4d54d64e6022",
+                  "type": "Studio",
+                  "name": "Morris Studio"
+                },
+                "target-type": "place"
+              },
+              {
+                "target-credit": "",
+                "target-type": "place",
+                "place": {
+                  "name": "Morris Studio",
+                  "type": "Studio",
+                  "id": "f005e798-341e-4f30-b2ea-4d54d64e6022"
+                },
+                "begin": null,
+                "attributes": [],
+                "type": "recorded at",
+                "end": null,
+                "direction": "backward",
+                "attribute-values": {}
+              },
+              {
+                "begin": null,
+                "attributes": [
+                  "cover",
+                  "instrumental"
+                ],
+                "direction": "forward",
+                "end": null,
+                "type": "performance",
+                "attribute-values": {},
+                "target-credit": "",
+                "work": {
+                  "attributes": [],
+                  "title": "Where the Streets Have No Name",
+                  "type": "Song",
+                  "id": "6d0b966b-4f31-393d-ae32-a07e477f7744"
+                },
+                "target-type": "work"
+              }
+            ],
+            "title": "Where the Streets Have No Name",
+            "length": 242133
+          },
+          "title": "Where the Streets Have No Name",
+          "length": 244613
+        }
+      ],
+      "track-offset": 0,
+      "format": "CD",
+      "track-count": 13,
+      "id": "e2314f81-da20-3092-8e50-ab75f15424eb",
+      "position": 1,
+      "title": ""
+    }
+  ],
+  "barcode": "4547366061154"
+}
