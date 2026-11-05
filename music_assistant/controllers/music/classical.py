@@ -202,7 +202,8 @@ _SECTION_LABEL: Final[re.Pattern[str]] = re.compile(r"\b[^\W\d_]+\s(?:[IVXLC]+|\
 # the work tracks with the albums they are on, one row per album
 WORK_TRACKS_QUERY: Final[str] = f"""
     SELECT t.item_id AS track_id, t.work_id, t.movement_number, t.movement_name,
-        t.search_name,
+        t.search_name, CASE WHEN json_valid(t.metadata)
+            THEN json_extract(t.metadata, '$.recording_year') END AS recording_year,
         (SELECT MIN(e.external_id) FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} e
             WHERE e.media_type = '{MediaType.TRACK.value}' AND e.item_id = t.item_id
             AND e.external_id_type = '{ExternalID.MB_RECORDING.value}') AS mb_recording,
@@ -414,6 +415,7 @@ class ClassicalController:
         offset: int = 0,
         sort_field: SortField | None = None,
         sort_direction: SortDirection | None = None,
+        period: list[Period] | None = None,
         work_type: list[WorkType] | None = None,
         work_type_unknown: bool = False,
     ) -> list[ClassicalWorkEntry]:
@@ -439,6 +441,7 @@ class ClassicalController:
             the year composed or the recording count. A composer's works sort on the composer by
             catalogue number alone, those shared with another composer among them.
         :param sort_direction: Sort direction, the field's default when omitted.
+        :param period: Only include works whose composer is of any of these periods, as shown.
         :param work_type: Only include works of any of these types, as shown.
         :param work_type_unknown: Also include the works without a type; on its own, only
             those.
@@ -456,7 +459,7 @@ class ClassicalController:
             "year_to": year_to,
         }
         search_term = create_safe_string(search, True, True) if search else ""
-        shown_filters = bool(search_term or work_type or work_type_unknown)
+        shown_filters = bool(search_term or period or work_type or work_type_unknown)
         if field == SortField.RECORDING_COUNT:
             sort_key = work_sort_sql(SortField.COMPOSER, SortDirection.ASC, bool(composer_id))
         else:
@@ -466,7 +469,9 @@ class ClassicalController:
         if shown_filters or field == SortField.RECORDING_COUNT:
             ids = await self._work_ids(sort_key, **filters)
             if shown_filters:
-                ids = await self._matching_works(ids, search_term, work_type, work_type_unknown)
+                ids = await self._matching_works(
+                    ids, search_term, period, work_type, work_type_unknown
+                )
         else:
             ids = await self._work_ids(sort_key, limit=limit, offset=offset, **filters)
         if field == SortField.RECORDING_COUNT:
@@ -485,11 +490,13 @@ class ClassicalController:
                 ids = _page(ids, limit, offset)
             performances = await self._listed_work_performances(ids)
         part_names = await self._part_names(ids)
+        shown = await self._shown_works(ids)
         entries = [
             ClassicalWorkEntry(
                 work=_with_title_work_type(cast("WorkSummary", work)),
                 recording_count=_recording_count(performances[int(work.item_id)], performer),
                 part_names=part_names[int(work.item_id)],
+                period=shown[int(work.item_id)].period,
             )
             for work in await self._items(self.mass.music.works, ids)
         ]
@@ -501,9 +508,11 @@ class ClassicalController:
         """Get the values the works list can be filtered on, across all its works."""
         ids = await self._work_ids(f"{DB_TABLE_WORKS}.item_id")
         shown = (await self._shown_works(ids)).values()
+        periods = {x.period for x in shown}
         work_types = {x.work_type for x in shown}
         years = [x.year for x in shown if x.year is not None]
         return ClassicalWorkFilters(
+            periods=[x for x in Period if x in periods],
             work_types=[x for x in WorkType if x in work_types],
             work_type_unknown=None in work_types,
             earliest_year=min(years, default=None),
@@ -765,8 +774,9 @@ class ClassicalController:
         Get how many classical items MusicBrainz linking still has to check.
 
         While any count is above zero, tracks under Other tracks may still move into their works.
-        ``albums`` counts the albums still to identify, ``works`` the works still to look up.
-        All zero means linking is done, or is not running.
+        ``albums`` counts the albums still to identify, ``recordings`` the tracks whose
+        recording is still to read, ``works`` the works still to look up. All zero means
+        linking is done, or is not running.
         """
         return await self.mass.metadata.get_classical_link_progress()
 
@@ -861,6 +871,7 @@ class ClassicalController:
         self,
         work_ids: list[int],
         search_term: str,
+        periods: Sequence[Period] | None,
         work_types: Sequence[WorkType] | None,
         work_type_unknown: bool,
     ) -> list[int]:
@@ -869,6 +880,7 @@ class ClassicalController:
 
         :param work_ids: The listed works to match.
         :param search_term: The normalized search term, or empty to match any work.
+        :param periods: Only match works whose composer is of any of these periods.
         :param work_types: Only match works of any of these types, as shown.
         :param work_type_unknown: Also match the works without a type; on its own, only those.
         """
@@ -878,6 +890,7 @@ class ClassicalController:
             x
             for x in work_ids
             if (not search_term or search_term in shown[x].search_text(part_names[x]))
+            and (not periods or shown[x].period in periods)
             and (
                 not (work_types or work_type_unknown)
                 or (
@@ -894,7 +907,7 @@ class ClassicalController:
             return {}
         rows = await self.mass.music.database.get_rows_from_query(
             "SELECT w.item_id, w.name, w.work_type, w.catalog_numbers, w.composition_year, "
-            "c.name AS composer "
+            "c.name AS composer, c.period "
             f"FROM {DB_TABLE_WORKS} w LEFT JOIN {DB_TABLE_ARTISTS} c ON c.item_id = "
             f"(SELECT wa.artist_id FROM {DB_TABLE_WORK_ARTISTS} wa WHERE wa.work_id = w.item_id "
             f"AND wa.role = '{ArtistRole.COMPOSER.value}' ORDER BY wa.position, wa.rowid LIMIT 1) "
@@ -914,6 +927,7 @@ class ClassicalController:
                 work_type=WorkType(row["work_type"])
                 if row["work_type"] is not None
                 else title_work_type(row["name"]),
+                period=Period(row["period"]) if row["period"] is not None else None,
                 year=row["composition_year"],
             )
             for row in rows
@@ -1460,6 +1474,7 @@ class ClassicalController:
                     or create_safe_string(row["movement_name"] or "", True, True)
                     or row["search_name"],
                     mb_recording=(row["mb_recording"] or "").casefold() or None,
+                    recording_year=row["recording_year"],
                 )
                 work_tracks[int(row["work_id"])].append(track)
             if row["album_id"] is not None:
@@ -1502,6 +1517,7 @@ class _ShownWork:
 
     names: list[str]  # the first composer, the title and the first catalogue number
     work_type: WorkType | None = None
+    period: Period | None = None
     year: int | None = None
 
     def search_text(self, part_names: Sequence[str]) -> str:
@@ -1527,6 +1543,7 @@ class _WorkTrack:
     track_id: int
     movement: int | str
     mb_recording: str | None
+    recording_year: int | None = None
     performers: set[int] = field(default_factory=set)
     leaders: set[int] = field(default_factory=set)
     directors: set[int] = field(default_factory=set)
@@ -1534,8 +1551,10 @@ class _WorkTrack:
 
     @property
     def year(self) -> int | None:
-        """Return the earliest year of the albums the track is on."""
-        return min((x.year for x in self.appearances if x.year), default=None)
+        """Return the year the track was recorded, else the earliest year of its albums."""
+        return self.recording_year or min(
+            (x.year for x in self.appearances if x.year), default=None
+        )
 
     @property
     def performance_key(self) -> str:
