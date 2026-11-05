@@ -401,6 +401,9 @@ DEFAULT_GENRES: Final[tuple[str, ...]] = tuple(entry["genre"] for entry in DEFAU
 
 # fallback genre for a podcast or audiobook whose provider has no categories of its own
 DEFAULT_AUDIOBOOK_PODCAST_GENRE: Final[str] = "Spoken Word"
+# words a performer credit puts before the instrument to show how the artist took part, as in
+# "solo piano"
+PARTICIPATION_WORDS: Final[frozenset[str]] = frozenset({"solo", "guest", "additional"})
 
 
 # all other
