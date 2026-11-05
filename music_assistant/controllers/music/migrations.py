@@ -42,6 +42,7 @@ from music_assistant.constants import (
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_RADIOS,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORKS,
     DEFAULT_GENRE_MAPPING,
     GENRE_ICONS_DIR_NAME,
     LOUDNESS_MEASUREMENT_MIN_LUFS,
@@ -1448,6 +1449,26 @@ async def migrate_database(  # noqa: C901, PLR0912, PLR0915
             # create_tables makes a missing table with the column already in place
             if "duplicate column" not in str(err) and "no such table" not in str(err):
                 raise
+
+    if prev_version <= 74:
+        # classical music support adds the work and movement columns of tracks and the
+        # classical flags, its new tables are created at startup like every missing table
+        for table, column, definition in (
+            (DB_TABLE_ARTISTS, "period", "TEXT"),
+            (DB_TABLE_ARTISTS, "is_classical", "BOOLEAN NOT NULL DEFAULT 0"),
+            (DB_TABLE_ALBUMS, "is_classical", "BOOLEAN NOT NULL DEFAULT 0"),
+            (DB_TABLE_TRACKS, "work_id", f"INTEGER REFERENCES {DB_TABLE_WORKS}(item_id)"),
+            (DB_TABLE_TRACKS, "movement_number", "INTEGER"),
+            (DB_TABLE_TRACKS, "movement_total", "INTEGER"),
+            (DB_TABLE_TRACKS, "movement_name", "TEXT"),
+            (DB_TABLE_TRACKS, "is_classical", "BOOLEAN NOT NULL DEFAULT 0"),
+            (DB_TABLE_TRACKS, "classical_tag", "BOOLEAN NOT NULL DEFAULT 0"),
+        ):
+            table_columns = await _table_columns(database, table)
+            # skip (test) databases without this table and columns added by an earlier run
+            if not table_columns or column in table_columns:
+                continue
+            await database.execute(f"ALTER TABLE {table} ADD COLUMN [{column}] {definition}")
 
     # (re)build the FTS search tables so they are in sync with the content tables;
     # this both populates them on first migration to the FTS-enabled schema and
