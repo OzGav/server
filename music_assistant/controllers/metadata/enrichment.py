@@ -143,6 +143,13 @@ class MetadataEnrichmentMixin:
         @property
         def link_providers_via_musicbrainz(self) -> bool: ...  # noqa: D102
 
+        async def _confirm_composer(
+            self,
+            mbid: str,
+            details: MusicBrainzArtist | None = None,
+            force_refresh: bool = False,
+        ) -> None: ...
+
     async def _update_artist_metadata(  # noqa: PLR0915
         self, artist: Artist, force_refresh: bool = False, rebuild: bool = False
     ) -> None:
@@ -323,9 +330,35 @@ class MetadataEnrichmentMixin:
         await self.mass.music.artists.update_item_in_library(artist.item_id, artist)
         # an id a name search found may belong to a namesake, so only a reliable one merges
         if merge_mbid:
-            await self.mass.music.artists.merge_library_artists_by_mbid(
-                int(artist.item_id), merge_mbid
+            await self._merge_identified_artist(
+                int(artist.item_id), merge_mbid, force_refresh=force_refresh
             )
+
+    async def _merge_identified_artist(
+        self, artist_id: int, mbid: str, force_refresh: bool = False
+    ) -> None:
+        """
+        Merge the artists sharing an artist's newly found MusicBrainz id, confirming a composer.
+
+        :param artist_id: Library id of the artist.
+        :param mbid: The MusicBrainz artist id it was identified by.
+        :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
+        """
+        survivor_id = await self.mass.music.artists.merge_library_artists_by_mbid(artist_id, mbid)
+        await self._confirm_if_composer(survivor_id, mbid, force_refresh)
+
+    async def _confirm_if_composer(
+        self, artist_id: int, mbid: str, force_refresh: bool = False
+    ) -> None:
+        """
+        Join a classical composer's other spellings and its credits joined with others to it.
+
+        :param artist_id: Library id of the artist.
+        :param mbid: The MusicBrainz artist id of the artist.
+        :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
+        """
+        if await self._is_classical_composer(artist_id):
+            await self._confirm_composer(mbid, force_refresh=force_refresh)
 
     def _select_description(
         self,

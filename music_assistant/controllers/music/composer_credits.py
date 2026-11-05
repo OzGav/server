@@ -41,7 +41,9 @@ async def split_joined_composers(mass: MusicAssistant, track: Track) -> set[str]
         return set()
     replacements: dict[str, Artist] = {}
     for name, candidate in candidates.items():
-        library_composers = await mass.music.artists.get_library_composers(named_by=candidate)
+        library_composers = await mass.music.artists.get_library_composers(
+            with_mbid=True, named_by=candidate
+        )
         matches = [x for x in library_composers if is_named_by(candidate, x)]
         # a name several composers share, such as "Strauss", stays as it is
         if len(matches) == 1:
@@ -79,7 +81,7 @@ async def credit_performing_composer(
     if not credited:
         return set()
     artists = mass.music.artists
-    library_composers = await artists.get_library_composers()
+    library_composers = await artists.get_library_composers(with_mbid=True)
     composer_ids = {x.item_id: x for x in library_composers}
     matches: dict[str, Artist] = {}
     for name, artist in credited.items():
