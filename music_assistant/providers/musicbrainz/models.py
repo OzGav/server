@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mashumaro import DataClassDictMixin
 from music_assistant_models.enums import WorkType
+from music_assistant_models.media_items import WorkMovement
 
 from music_assistant.helpers.datetime import release_year
+from music_assistant.helpers.work_titles import part_name
 
 from .constants import (
     ARRANGEMENT_RELATION_TYPES,
@@ -99,6 +101,7 @@ class MusicBrainzRelation(DataClassDictMixin):
     ended: bool = False
     attributes: list[str] = field(default_factory=list)
     attribute_values: dict[str, str] = field(default_factory=dict)
+    ordering_key: int | None = None
 
     @property
     def begin_year(self) -> int | None:
@@ -333,7 +336,8 @@ class MusicBrainzWork(DataClassDictMixin):
         """
         Return the relation to the work this work is a part of, if any.
 
-        The relation has the parent as its ``work``. Of a part of several works, such as of
+        The relation has the parent as its ``work`` and the position of this part
+        within the parent as its ``ordering_key``. Of a part of several works, such as of
         a work and of an edition of it, the first one MusicBrainz lists is returned.
         """
         return next(iter(self.parent_relations), None)
@@ -355,6 +359,38 @@ class MusicBrainzWork(DataClassDictMixin):
             for relation in self.relations
             if relation.type == "parts" and relation.direction == "forward" and relation.work
         ]
+
+    @property
+    def movements(self) -> list[WorkMovement]:
+        """
+        Return the parts of the work as its movements, in order.
+
+        Each movement has its own number, the one MusicBrainz orders the part by, or the one
+        after the part before it when the part has none or that number is taken.
+        """
+        parts = self.part_relations
+        parts.sort(key=lambda x: (x.ordering_key is None, x.ordering_key or 0))
+        movements: list[WorkMovement] = []
+        for relation in parts:
+            if not relation.work:
+                continue
+            number = max(relation.ordering_key or 0, movements[-1].number + 1 if movements else 1)
+            movements.append(
+                WorkMovement(
+                    number=number,
+                    name=part_name(relation.work.title, self.title),
+                    mbid=relation.work.id,
+                )
+            )
+        return movements
+
+    def part_movement(self, part_id: str) -> WorkMovement | None:
+        """
+        Return a part of the work as its movement, numbered and named as in ``movements``.
+
+        :param part_id: MusicBrainz id of the part.
+        """
+        return next((x for x in self.movements if x.mbid == part_id), None)
 
     @property
     def arrangement_of_relations(self) -> list[MusicBrainzRelation]:

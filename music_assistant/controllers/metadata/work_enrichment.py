@@ -1,34 +1,17 @@
 """
 MusicBrainz work enrichment for the Metadata Controller.
 
-Provides the WorkEnrichmentMixin, mixed into the MetaDataController, which fills the empty
-fields of library works in from MusicBrainz: their type, year, language, catalog numbers, key
-and composers. Every library work is a MusicBrainz work, found through its own
-MusicBrainz id. The composers MusicBrainz names for a work without any are taken from the
-library's own artists, and are credited on its tracks without a composer too.
-
-Library works that turn out to be the same MusicBrainz work are merged into the one with
-the most tracks. A work gets linked to the library works MusicBrainz lists as its
-originals or arrangements, and a part of a larger work, such as an aria or a movement, to
-the work right above it, such as the act of an opera; a typed work below no typed level,
-such as a concerto of a set, only when the library has that work. A level the library
-lacks is added without tracks, named in the user's language, together with the levels above
-it up to the topmost typed one, or up to the top when none is typed.
-A work looked up for the first time, and a level added, takes in the library works
-MusicBrainz lists as its parts, such as the pieces of a set, and a part whose parent is
-further up its MusicBrainz hierarchy moves under the level right above it.
-
-A work looked up for the first time takes its MusicBrainz name, in the user's language, and
-lists the catalog numbers in its name first.
-A work refreshed by hand is looked up again as on its first lookup, taking MusicBrainz's
-current name, version, type, year, language, key, catalog numbers, parent, parts and
-arrangements; a work MusicBrainz merged into another takes the other's id.
+Provides the WorkEnrichmentMixin, mixed into the MetaDataController, which fills library works
+in from MusicBrainz: their details, composers, movements, arrangements and the works they are
+part of. Library works that turn out to be the same MusicBrainz work are merged.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
+from dataclasses import replace
 from time import time
 from typing import TYPE_CHECKING
 
@@ -40,19 +23,27 @@ from music_assistant_models.media_items.metadata import MediaItemMetadata
 
 from music_assistant.constants import (
     DB_TABLE_EXTERNAL_ID_LOOKUP,
+    DB_TABLE_TRACKS,
     DB_TABLE_WORKS,
 )
+from music_assistant.controllers.music.helpers import group_piece
 from music_assistant.helpers.compare import is_named_by
-from music_assistant.helpers.work_titles import parse_catalog_numbers
+from music_assistant.helpers.work_titles import (
+    parse_catalog_numbers,
+    part_label,
+    part_name,
+    without_movement_number,
+    without_part_subtitle,
+)
 from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider
 
 from .constants import MAX_MUSICBRAINZ_WORK_DEPTH
-from .helpers import fill_artist_from_musicbrainz, musicbrainz_work_name
+from .helpers import fill_artist_from_musicbrainz, is_latin, musicbrainz_work_name
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from music_assistant_models.media_items import Album
+    from music_assistant_models.media_items import Album, WorkMovement
 
     from music_assistant import MusicAssistant
     from music_assistant.providers.musicbrainz.models import (
@@ -159,20 +150,36 @@ class WorkEnrichmentMixin:
         if survivor := await self._merge_duplicate_works(work, hierarchy[0].id):
             work = survivor
             _fill_work_from_musicbrainz(work, hierarchy, reload)
+        if first_lookup or not work.metadata.movements:
+            # the pieces stored under its groups, such as the scenes of a number, stay
+            pieces = [x for x in work.metadata.movements or [] if x.parent is not None]
+            work.metadata.movements = [
+                *await self._shown_movements(
+                    musicbrainz, hierarchy[0], force_refresh, fetched_works
+                ),
+                *pieces,
+            ] or None
         new_composers: list[Artist] = []
         if not work.composers:
             new_composers = await self._get_library_composers(_composer_relations(hierarchy))
             work.composers = UniqueList(new_composers)
-        moved_from = await self._set_parent_work(musicbrainz, work, hierarchy, reload)
-        # a library update keeps the parent a work has, so a move is stored with the work
-        await works.update_from_musicbrainz(work, replace=reload, parent=moved_from is not None)
+        moved_from = await self._set_parent_work(
+            musicbrainz, work, hierarchy, reload, force_refresh, fetched_works
+        )
+        # a library update keeps the parent a work has, so a move is stored with the work, and it
+        # adds to the movements a work has, so on a first lookup these are replaced
+        await works.update_from_musicbrainz(
+            work, replace=reload, parent=moved_from is not None, movements=first_lookup
+        )
         if first_lookup:
             await self._take_musicbrainz_name(work, hierarchy[0], reload)
         await self._link_arrangements(int(work.item_id), hierarchy[0], replace=reload)
         if moved_from:
             await works.remove_if_empty(moved_from.item_id)
         if first_lookup:
-            await self._adopt_parts(int(work.item_id), hierarchy)
+            await self._adopt_parts(
+                musicbrainz, int(work.item_id), hierarchy, force_refresh, fetched_works
+            )
         if new_composers:
             await self.mass.music.tracks.credit_work_composers(int(work.item_id))
         else:
@@ -184,6 +191,9 @@ class WorkEnrichmentMixin:
         await self.mass.music.classification.set_composer_periods(
             int(x.item_id) for x in work.composers
         )
+        if reload:
+            await self._number_movement_tracks(work)
+        await self._move_movement_tracks(musicbrainz, work, hierarchy, force_refresh, fetched_works)
         # marked once every step is done, so a lookup cut short is done again on the next run
         looked_up = int(time())
         given.metadata.last_musicbrainz_lookup = work.metadata.last_musicbrainz_lookup = looked_up
@@ -196,6 +206,8 @@ class WorkEnrichmentMixin:
         work: Work,
         hierarchy: Sequence[MusicBrainzWork],
         reload: bool,
+        force_refresh: bool,
+        fetched_works: dict[str, MusicBrainzWork | None] | None = None,
     ) -> Work | None:
         """
         Give a work the library work of the MusicBrainz level above it as its parent.
@@ -208,6 +220,9 @@ class WorkEnrichmentMixin:
         :param work: The library work, given its new parent.
         :param hierarchy: The work's MusicBrainz work followed by the works above it.
         :param reload: Whether the work is looked up again.
+        :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
+        :param fetched_works: The MusicBrainz works fetched so far in a refresh, by id, read
+            first and added to.
         :return: The parent the work moved away from, if any.
         """
         old_parent = (
@@ -219,7 +234,9 @@ class WorkEnrichmentMixin:
         if levels and (
             not old_parent or reload or _gives_way_to_musicbrainz(old_parent, hierarchy)
         ):
-            parent = await self._get_or_add_parent_work(musicbrainz, levels, work)
+            parent = await self._get_or_add_parent_work(
+                musicbrainz, levels, work, force_refresh, fetched_works
+            )
             work.parent_work = ItemMapping.from_item(parent)
             return old_parent if old_parent and old_parent.item_id != parent.item_id else None
         if reload and old_parent:
@@ -295,17 +312,25 @@ class WorkEnrichmentMixin:
 
     async def _adopt_parts(
         self,
+        musicbrainz: MusicbrainzProvider,
         work_id: int,
         hierarchy: Sequence[MusicBrainzWork],
+        force_refresh: bool,
+        fetched_works: dict[str, MusicBrainzWork | None] | None = None,
         child_id: int | None = None,
     ) -> None:
         """
         Move the library works MusicBrainz lists as parts of the work under it.
 
-        A former parent left empty leaves the library.
+        The tracks of a part moving under it become its movements, and a former parent left
+        empty leaves the library.
 
+        :param musicbrainz: The MusicBrainz provider.
         :param work_id: Library id of the work.
         :param hierarchy: The work's MusicBrainz work followed by the works above it.
+        :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
+        :param fetched_works: The MusicBrainz works fetched so far in a refresh, by id, read
+            first and added to.
         :param child_id: Library id of a work that is left where it is, such as the work being
             linked below the work.
         """
@@ -327,10 +352,233 @@ class WorkEnrichmentMixin:
         )
         for row in rows:
             sibling = await works.get_library_item(row["item_id"])
-            if sibling.mbid in part_ids:
-                await works.set_parent_work(int(sibling.item_id), work_id)
-                if sibling.parent_work and int(sibling.parent_work.item_id) != work_id:
-                    await works.remove_if_empty(sibling.parent_work.item_id)
+            # the MusicBrainz work of a part is read only to move its tracks
+            if sibling.mbid not in part_ids or not (
+                mb_sibling := await self._get_work_details(
+                    musicbrainz, sibling.mbid, force_refresh, fetched_works
+                )
+            ):
+                continue
+            await works.set_parent_work(int(sibling.item_id), work_id)
+            await self._move_movement_tracks(
+                musicbrainz, sibling, [mb_sibling, *hierarchy], force_refresh, fetched_works
+            )
+            if sibling.parent_work and int(sibling.parent_work.item_id) != work_id:
+                await works.remove_if_empty(sibling.parent_work.item_id)
+
+    async def _move_movement_tracks(
+        self,
+        musicbrainz: MusicbrainzProvider,
+        work: Work,
+        hierarchy: Sequence[MusicBrainzWork],
+        force_refresh: bool,
+        fetched_works: dict[str, MusicBrainzWork | None] | None = None,
+    ) -> None:
+        """
+        Move the tracks of a movement work onto the work right above it, if the library has it.
+
+        Only tracks performing the movement alone move, whatever works above it they also name.
+        They are numbered by the movement's place in the list of parts of the work above it and
+        named as the track names it, else as that list does, both without a number of their own.
+        A moved track has the movement's MusicBrainz work id, as the movement it performs.
+        A movement that is a group of pieces, such as a scene, leaves its pieces under it in the
+        movements of the work above. The movement work leaves the library once empty.
+
+        :param musicbrainz: The MusicBrainz provider.
+        :param work: The library work.
+        :param hierarchy: The work's MusicBrainz work followed by the works above it.
+        :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
+        :param fetched_works: The MusicBrainz works fetched so far in a refresh, by id, read
+            first and added to.
+        """
+        if len(hierarchy) < 2:
+            return
+        mb_work, mb_parent = hierarchy[0], hierarchy[1]
+        works = self.mass.music.works
+        parent = await works.get_library_item_by_external_id(mb_parent.id, ExternalID.MB_WORK)
+        if not parent or parent.item_id == work.item_id:
+            return
+        database = self.mass.music.database
+        rows = await database.get_rows_from_query(
+            f"SELECT item_id, movement_name FROM {DB_TABLE_TRACKS} t WHERE work_id = :work_id "
+            f"AND NOT EXISTS (SELECT 1 FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} e "
+            "WHERE e.media_type = :media_type AND e.item_id = t.item_id "
+            "AND e.external_id_type = :id_type AND e.external_id NOT IN :chain_ids)",
+            {
+                "work_id": int(work.item_id),
+                "media_type": MediaType.TRACK.value,
+                "id_type": ExternalID.MB_WORK.value,
+                # the ids of the works above, which tags may name together with the movement
+                "chain_ids": [x.id for x in hierarchy],
+            },
+            limit=0,
+        )
+        if not rows:
+            return
+        track_ids = [int(row["item_id"]) for row in rows]
+        if movement := mb_parent.part_movement(mb_work.id):
+            movement = await self._shown_movement(
+                musicbrainz, mb_parent, movement, force_refresh, fetched_works
+            )
+        number, mb_name = (movement.number, movement.name) if movement else (None, mb_work.title)
+        for row in rows:
+            # the track's own name of the movement, in its language and setting sections apart
+            # that MusicBrainz joins, such as a Christe within the Kyrie
+            name = row["movement_name"]
+            # a track linked by its file's tags lacks the movement's id, without which a move of
+            # the work above would later take it on as performing that whole work
+            await self.mass.music.tracks.set_work(
+                int(row["item_id"]),
+                int(parent.item_id),
+                number,
+                without_movement_number(name or mb_name),
+                mb_work_id=mb_work.id,
+            )
+        self.logger.debug(
+            'Moved %s tracks of work "%s" onto "%s"', len(rows), work.name, parent.name
+        )
+        if number is not None:
+            await self._store_group_pieces(int(parent.item_id), number, mb_work)
+        await self.mass.music.classification.update(track_ids=track_ids)
+        await self.mass.music.tracks.credit_work_composers(int(parent.item_id))
+        await self.mass.music.works.remove_if_empty(work.item_id)
+
+    async def _number_movement_tracks(self, work: Work) -> None:
+        """
+        Give the tracks of a work performing one movement it lists that movement's number.
+
+        :param work: The library work, with its movements.
+        """
+        numbers = {
+            x.mbid.casefold(): x.number
+            for x in work.metadata.movements or []
+            if x.parent is None and x.mbid
+        }
+        if not numbers:
+            return
+        database = self.mass.music.database
+        rows = await database.get_rows_from_query(
+            f"SELECT t.item_id, t.movement_number, e.external_id FROM {DB_TABLE_TRACKS} t "
+            f"JOIN {DB_TABLE_EXTERNAL_ID_LOOKUP} e ON e.media_type = :media_type "
+            "AND e.item_id = t.item_id AND e.external_id_type = :id_type "
+            "WHERE t.work_id = :work_id",
+            {
+                "work_id": int(work.item_id),
+                "media_type": MediaType.TRACK.value,
+                "id_type": ExternalID.MB_WORK.value,
+            },
+            limit=0,
+        )
+        performed: dict[int, tuple[int | None, set[int]]] = {}
+        for row in rows:
+            found = performed.setdefault(row["item_id"], (row["movement_number"], set()))[1]
+            if (number := numbers.get(row["external_id"].casefold())) is not None:
+                found.add(number)
+        for track_id, (stored, found) in performed.items():
+            # a track performing several movements has no number of one
+            if len(found) == 1:
+                number = found.pop()
+                if number != stored:
+                    await self.mass.music.tracks.set_movement_number(track_id, number)
+
+    async def _store_group_pieces(
+        self, work_id: int, number: int, mb_group: MusicBrainzWork
+    ) -> None:
+        """
+        Store the pieces of a group in the movements of the work listing it, under the group.
+
+        The pieces replace those stored for the group before. A group without pieces, such as a
+        single aria, stores nothing.
+
+        :param work_id: Library id of the work listing the group, such as the act.
+        :param number: The number of the group in the work's movements.
+        :param mb_group: The group's MusicBrainz work, with its parts.
+        """
+        if not (pieces := mb_group.movements):
+            return
+        work = await self.mass.music.works.get_library_item(work_id)
+        movements = [
+            *(x for x in work.metadata.movements or [] if x.parent != number),
+            *(group_piece(number, x) for x in pieces),
+        ]
+        # written as a whole, as a library update would keep the pieces it replaces
+        await self.mass.music.works.set_movements(work_id, movements)
+
+    async def _shown_movements(
+        self,
+        musicbrainz: MusicbrainzProvider,
+        mb_work: MusicBrainzWork,
+        force_refresh: bool,
+        fetched_works: dict[str, MusicBrainzWork | None] | None = None,
+    ) -> list[WorkMovement]:
+        """
+        Return the movements of a MusicBrainz work named as its list of movements shows them.
+
+        Movements that would be named alike, such as two acts of different versions both
+        shown as "Act I", keep MusicBrainz's names.
+
+        :param musicbrainz: The MusicBrainz provider.
+        :param mb_work: The MusicBrainz work.
+        :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
+        :param fetched_works: The MusicBrainz works fetched so far in a refresh, by id, read
+            first and added to.
+        """
+        movements = mb_work.movements
+        shown = [
+            await self._shown_movement(musicbrainz, mb_work, x, force_refresh, fetched_works)
+            for x in movements
+        ]
+        counts = Counter(x.name for x in shown)
+        return [
+            movement if new.name != movement.name and counts[new.name] > 1 else new
+            for movement, new in zip(movements, shown, strict=True)
+        ]
+
+    async def _shown_movement(
+        self,
+        musicbrainz: MusicbrainzProvider,
+        mb_work: MusicBrainzWork,
+        movement: WorkMovement,
+        force_refresh: bool,
+        fetched_works: dict[str, MusicBrainzWork | None] | None = None,
+    ) -> WorkMovement:
+        """
+        Return a movement of a MusicBrainz work named as the work's list of movements shows it.
+
+        A movement is named in Latin script, if MusicBrainz has such a name. An act or part with
+        parts of its own is then named as "Act I" or "Part II", and a single piece named after its
+        act, such as an act's intermezzo, by its own name.
+
+        :param musicbrainz: The MusicBrainz provider.
+        :param mb_work: The MusicBrainz work the movement is a part of.
+        :param movement: The movement, as the work lists it.
+        :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
+        :param fetched_works: The MusicBrainz works fetched so far in a refresh, by id, read
+            first and added to.
+        """
+        name, work_name = movement.name, mb_work.title
+        part: MusicBrainzWork | None = None
+        if not is_latin(name) and movement.mbid:
+            part = await self._get_work_details(
+                musicbrainz, movement.mbid, force_refresh, fetched_works
+            )
+            work_name = musicbrainz_work_name(mb_work, self.preferred_language)
+            if part and is_latin(latin := musicbrainz_work_name(part, self.preferred_language)):
+                name = part_name(latin, work_name)
+        # part_label reads the end of a work's name, which an act's subtitle must not end
+        if not (label := part_label(f"{without_part_subtitle(work_name)}: {name}")):
+            return replace(movement, name=name)
+        if not part and movement.mbid:
+            part = await self._get_work_details(
+                musicbrainz, movement.mbid, force_refresh, fetched_works
+            )
+        if not part:
+            return replace(movement, name=name)
+        if part.movements:
+            return replace(movement, name=label)
+        # a single piece named after its act, such as "Atto III. Intermezzo"
+        own_name = name[len(without_part_subtitle(name)) :]
+        return replace(movement, name=own_name[2:] if own_name.startswith(". ") else name)
 
     async def _with_parent_works(
         self,
@@ -389,7 +637,12 @@ class WorkEnrichmentMixin:
         return await works.get_library_item(survivor_id)
 
     async def _get_or_add_parent_work(
-        self, musicbrainz: MusicbrainzProvider, levels: Sequence[MusicBrainzWork], child: Work
+        self,
+        musicbrainz: MusicbrainzProvider,
+        levels: Sequence[MusicBrainzWork],
+        child: Work,
+        force_refresh: bool,
+        fetched_works: dict[str, MusicBrainzWork | None] | None = None,
     ) -> Work:
         """
         Return the library work of a child's parent MusicBrainz work, adding it if needed.
@@ -402,13 +655,18 @@ class WorkEnrichmentMixin:
         :param levels: The parent MusicBrainz work followed by the levels above it that are to
             be library works.
         :param child: The library work it is the parent of.
+        :param force_refresh: Whether to ask MusicBrainz again rather than read a cached answer.
+        :param fetched_works: The MusicBrainz works fetched so far in a refresh, by id, read
+            first and added to.
         """
         mb_work = levels[0]
         works = self.mass.music.works
         if holder := await works.get_library_item_by_external_id(mb_work.id, ExternalID.MB_WORK):
             return holder
         grandparent = (
-            await self._get_or_add_parent_work(musicbrainz, levels[1:], child)
+            await self._get_or_add_parent_work(
+                musicbrainz, levels[1:], child, force_refresh, fetched_works
+            )
             if len(levels) > 1
             else None
         )
@@ -425,9 +683,19 @@ class WorkEnrichmentMixin:
             parent_work=ItemMapping.from_item(grandparent) if grandparent else None,
         )
         _fill_work_from_musicbrainz(parent, levels)
+        parent.metadata.movements = (
+            await self._shown_movements(musicbrainz, mb_work, force_refresh, fetched_works) or None
+        )
         added = await works.create_library_item(parent)
         await self._link_arrangements(int(added.item_id), mb_work)
-        await self._adopt_parts(int(added.item_id), levels, int(child.item_id))
+        await self._adopt_parts(
+            musicbrainz,
+            int(added.item_id),
+            levels,
+            force_refresh,
+            fetched_works,
+            int(child.item_id),
+        )
         return added
 
     async def _link_arrangements(

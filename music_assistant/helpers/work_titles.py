@@ -7,10 +7,21 @@ from dataclasses import dataclass
 from typing import Final
 
 from music_assistant_models.enums import WorkType
+from music_assistant_models.helpers import create_safe_string
 
 # a movement title such as "I. Allegro", "3. Presto" or "No. 4. The Call" starts with its
 # number and a full stop, one such as "Mvt. I-Allegro" or "Mvt. 3 Andantino" with "Mvt."
 _NUMBERED_MOVEMENT = re.compile(r"^(?:(?:No\.\s)?([IVX]+|\d+)\.\s|Mvt\.\s([IVX]+|\d+)[-\s])")
+# the number opening a movement, as in "XXX. Aria", "no. 44. Chorus", "no. 9: Finale",
+# "38a. Evangelista", "N°13b Aria" or "Mvt. II-Andante" but not "No. 1 in A major", with any
+# scene before it, as in "Scena 2. no. 15. ..." or "Картина III, no. 14a. ..."
+_NUMBER_WORD = r"(?:[Nn][or]\.|N[°º])\s?"
+_OPENING_MOVEMENT_NUMBER = re.compile(
+    r"^(?:(?:[Ss]cen[ae]|Картина) (?:\d+|[IVXL]+)[.,]\s)?"
+    rf"(?:(?:{_NUMBER_WORD})?(?:\d{{1,3}}[A-Za-z]?|[IVXL]+[a-e]?)[.,:]\s"
+    rf"|{_NUMBER_WORD}\d{{1,3}}[A-Za-z]?\s(?!in\s)"
+    r"|Mvt\.\s(?:[IVX]+|\d+)(?:\s*-\s*|\s+))"
+)
 _ROMAN_NUMERALS = (
     "I",
     "II",
@@ -92,6 +103,42 @@ _TYPE_LABEL: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
+# the words naming an act or part of a work, the numbered ones with the kind of part they name
+_NUMBERED_PART_WORDS = {"Act": "act", "Part": "part", "Pt.": "part"}
+# the German, Italian and French words for an act or part, only read where one closes a title
+_CLOSING_PART_WORDS = {
+    **_NUMBERED_PART_WORDS,
+    "Teil": "part",
+    "Atto": "act",
+    "Acte": "act",
+    "Akt": "act",
+    "Aufzug": "act",
+}
+_UNNUMBERED_PART_WORDS = ("Anhang", "Appendix")
+# an act or part closing a work title, only followed by a scene of the act and catalog
+# numbers, such as "La bohème, Act II", "Messiah, HWV 56, Pt. 2", "Swan Lake, Act II, Op. 20,
+# TH 12", "The Nutcracker, Act II, Scene 3, Op. 71", "La bohème, SC 67 / Act 1" or
+# MusicBrainz's "Turandot: Atto III"
+_ACT_OR_PART = re.compile(
+    rf"^(?P<work>.+)(?:, | / |: )(?:(?P<word>{'|'.join(map(re.escape, _CLOSING_PART_WORDS))}) "
+    rf"(?P<number>[IVX]+|\d+)(?:, (?:Scene|[Ss]cena|[Ss]cène) (?P<scene>[IVX]+|\d+))?"
+    rf"|(?P<label>{'|'.join(_UNNUMBERED_PART_WORDS)}))"
+    rf"(?P<catalog>(?:, {_CATALOG_NUMBER.pattern})*)$"
+)
+# the subtitle right after the number of an act or part, as in "Luisa Miller: Atto II.
+# “L'intrigo”" or "Don Carlo: Atto I (II)"
+_PART_SUBTITLE = re.compile(
+    rf"(?P<part>\b(?:{'|'.join(map(re.escape, _CLOSING_PART_WORDS))}) (?:[IVX]+|\d+))"
+    r"(?:\.\s.+|\s\(.+\))$"
+)
+# a colon, comma or full stop between the segments of a work title
+_TITLE_SEPARATOR = re.compile(r"\s*[:,.]")
+# a colon, or the full stop after a Roman number such as an act's, and the space after it,
+# closing a shared start of two titles
+_ENDING_SEPARATOR = re.compile(r"(?::|\b[IVXL]+\.)\s+$")
+# a name starting with a word and a number, such as "Variation No. 1", "Var. 1" or "Act II"
+_WORD_AND_NUMBER = re.compile(r"^([^\W\d_]{3,})\.?\s+(?:(?i:no|nr)\.?\s*|n°\s*)?(\d+|[IVX]+)\b")
+
 
 @dataclass(frozen=True)
 class TrackWork:
@@ -114,6 +161,109 @@ def split_movement_title(title: str) -> TrackWork | None:
     if parent and (number := _movement_number(movement)):
         return TrackWork(parent, movement_name=movement, movement_number=number)
     return None
+
+
+def part_key(work: str) -> tuple[str, int | str] | None:
+    """
+    Return what sets an act or part apart from the other parts of its work, or None.
+
+    The same act or part written differently, such as "Part 1", "Part I" and "Pt. 1", has
+    one key. An unnumbered part, such as an "Anhang", is told apart by its label.
+
+    :param work: The name of a work, such as "Messiah, HWV 56, Pt. 2".
+    """
+    if not (match := _ACT_OR_PART.match(work)):
+        return None
+    if match["label"]:
+        return "label", create_safe_string(match["label"], True, True)
+    value = numeral_value(match["number"])
+    return (_CLOSING_PART_WORDS[match["word"]], value) if value else None
+
+
+def part_label(work: str) -> str | None:
+    """
+    Return how the act or part a work name ends with is shown, or None for any other work.
+
+    The act or part is named in English with a Roman number, keeping its scene and leaving out
+    its subtitle, so "Tosca, SC 69 / Act 3" becomes "Act III" and MusicBrainz's "Luisa Miller:
+    Atto II. “L'intrigo”" becomes "Act II".
+
+    :param work: The name of a work, such as "Swan Lake, Act II, Scene 1, Op. 20".
+    """
+    match = _ACT_OR_PART.match(work) or _ACT_OR_PART.match(without_part_subtitle(work))
+    if not match or not match["word"]:
+        return None
+    kind, value = _CLOSING_PART_WORDS[match["word"]], numeral_value(match["number"])
+    if not value or value > len(_ROMAN_NUMERALS):
+        return None
+    label = f"{kind.capitalize()} {_ROMAN_NUMERALS[value - 1]}"
+    return f"{label}, Scene {match['scene']}" if match["scene"] else label
+
+
+def without_part_subtitle(work: str) -> str:
+    """
+    Return the name of an act or part without the subtitle after its number.
+
+    MusicBrainz's "Luisa Miller: Atto II. “L'intrigo”" becomes "Luisa Miller: Atto II" and
+    "Don Carlo: Atto I (II)" becomes "Don Carlo: Atto I". Any other name comes back as it is.
+
+    :param work: The name of a work, such as "La bohème: Atto I. In soffitta".
+    """
+    return _PART_SUBTITLE.sub(r"\g<part>", work)
+
+
+def part_name(title: str, parent_title: str) -> str:
+    """Return the title of a part without the start it shares with the title of its work, if any."""
+    # the parts of an act with a subtitle, such as "Luisa Miller: Atto II. “L'intrigo”", share
+    # its title only up to the act's number
+    parent_title = without_part_subtitle(parent_title)
+    shared = next(
+        (
+            index
+            for index, (char, parent_char) in enumerate(zip(title, parent_title, strict=False))
+            if char.casefold() != parent_char.casefold()
+        ),
+        min(len(title), len(parent_title)),
+    )
+    # a start shared with only part of the work's title ends where both titles go on with a
+    # separator, as "L'Arlésienne Suite no. 1" does in "L'Arlésienne Suite no. 1: III.
+    # Adagietto" and "L'Arlésienne Suite no. 1, op. 23bis", or right after one, as "Carmina
+    # Burana: " in "Carmina Burana: II. In Taberna" and "Carmina Burana: Cantiones profanæ ..."
+    if not shared or (
+        shared < len(parent_title)
+        and not (
+            _TITLE_SEPARATOR.match(title, shared) and _TITLE_SEPARATOR.match(parent_title, shared)
+        )
+        and not _ENDING_SEPARATOR.search(title[:shared])
+    ):
+        return title
+    return title[shared:].lstrip(" :,.-") or title
+
+
+def word_and_number(name: str) -> tuple[str, int] | None:
+    """
+    Return the word and number a name starts with, or None when it starts otherwise.
+
+    The word comes lowercase and without accents, so "Variation No. 1" becomes "variation"
+    and 1, and "Variatio IV." becomes "variatio" and 4.
+
+    :param name: The name of a movement or part, such as "Var. 1".
+    """
+    if not (match := _WORD_AND_NUMBER.match(name)):
+        return None
+    number = numeral_value(match.group(2))
+    return (create_safe_string(match.group(1), True, True), number) if number else None
+
+
+def without_movement_number(name: str) -> str:
+    """
+    Return a movement name without the number it opens with, such as "Christe" for "02. Christe".
+
+    A scene before the number goes with it, so "Scene II. No. 2 Aria" becomes "Aria".
+
+    :param name: The name of a movement, such as a track's "No. 3, O mio babbino caro".
+    """
+    return _OPENING_MOVEMENT_NUMBER.sub("", name, count=1) or name
 
 
 def parse_catalog_numbers(title: str) -> list[str]:
