@@ -64,6 +64,11 @@ from music_assistant.constants import (
     DB_TABLE_WORKS,
 )
 from music_assistant.controllers.metadata.constants import MUSICBRAINZ_LINK_DOMAINS
+from music_assistant.controllers.music.composer_credits import (
+    credit_performing_composer,
+    remove_joined_artists,
+    split_joined_composers,
+)
 from music_assistant.controllers.music.constants import MATCH_SEARCH_LIMIT, SIMILAR_ITEMS_LIMIT
 from music_assistant.controllers.music.helpers import (
     has_musicbrainz_id,
@@ -2052,6 +2057,8 @@ class TracksController(MediaControllerBase[Track]):
             item.metadata.lrc_lyrics or extract_lrc_lyrics(item.metadata.lyrics)
         )
         self._mark_own_recording_id(item)
+        await split_joined_composers(self.mass, item)
+        await credit_performing_composer(self.mass, item)
         work_id = (
             await self.mass.music.works.get_or_add_library_work_id(item.work) if item.work else None
         )
@@ -2107,6 +2114,8 @@ class TracksController(MediaControllerBase[Track]):
         db_id = int(item_id)  # ensure integer
         cur_item = await self.get_library_item(db_id)
         self._mark_own_recording_id(update)
+        joined_names = await split_joined_composers(self.mass, update)
+        composer_names = await credit_performing_composer(self.mass, update, cur_item)
         if overwrite:
             await self._keep_held_placement(update, cur_item)
         metadata = update.metadata if overwrite else self._merged_metadata(cur_item, update)
@@ -2120,12 +2129,16 @@ class TracksController(MediaControllerBase[Track]):
             for x in update_instances
         )
         # an update from the only provider instance the track is known on (e.g. a renamed
-        # file) has its complete credits, so they replace the stored ones
-        replace_credits = bool(update_instances) and all(
-            x.provider_instance in update_instances for x in cur_item.provider_mappings
+        # file) has its complete credits, so they replace the stored ones; a streaming
+        # service has only some of them, so its credits are added to the stored ones
+        replace_credits = (
+            bool(update_instances)
+            and all(x.provider_instance in update_instances for x in cur_item.provider_mappings)
+            and not from_streaming
         )
         # a classical track read from its files has the performers in them now, also none,
-        # until its MusicBrainz recording is read again
+        # until its MusicBrainz recording is read again; a streaming service only adds
+        # performers, as nothing records which service or MusicBrainz credited the stored ones
         replace_performers = (
             (overwrite or replace_credits)
             and update.provider != "library"
@@ -2206,8 +2219,27 @@ class TracksController(MediaControllerBase[Track]):
             update.credits,
             overwrite=overwrite,
             replace=replace_credits,
+            keep_performers=from_streaming,
             resolved_artists=resolved_artists,
         )
+        if joined_names:
+            await remove_joined_artists(
+                self.mass,
+                cur_item,
+                work_id,
+                joined_names,
+                main_artists=any(x.name not in joined_names for x in artists),
+            )
+        for credit in cur_item.credits:
+            if credit.role in PERFORMING_ROLES and credit.artist.name in composer_names:
+                await self.mass.music.database.delete(
+                    DB_TABLE_TRACK_CREDITS,
+                    {
+                        "track_id": db_id,
+                        "artist_id": int(credit.artist.item_id),
+                        "role": credit.role.value,
+                    },
+                )
         if work_id:
             await self.credit_work_composers(work_id)
         # update/set track album
@@ -2420,6 +2452,7 @@ class TracksController(MediaControllerBase[Track]):
         item_credits: Iterable[Credit],
         overwrite: bool = False,
         replace: bool = False,
+        keep_performers: bool = False,
         resolved_artists: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """
@@ -2429,6 +2462,7 @@ class TracksController(MediaControllerBase[Track]):
         :param item_credits: The track's credits; main artist credits are left out.
         :param overwrite: Replace the stored credits, as a refresh from the source does.
         :param replace: Replace the stored credits, as an update from the only source does.
+        :param keep_performers: Keep the stored performing credits on a replace.
         :param resolved_artists: Library ids of the artists resolved so far, by provider and item id.
         """
         resolved = {} if resolved_artists is None else resolved_artists
@@ -2442,7 +2476,8 @@ class TracksController(MediaControllerBase[Track]):
             return
         if overwrite or replace:
             await self.mass.music.database.execute_write(
-                f"DELETE FROM {DB_TABLE_TRACK_CREDITS} WHERE track_id = :db_id",
+                f"DELETE FROM {DB_TABLE_TRACK_CREDITS} WHERE track_id = :db_id"
+                + (f" AND role NOT IN ({SQL_PERFORMING_ROLES})" if keep_performers else ""),
                 {"db_id": db_id},
             )
         for credit, artist_id in rows:
