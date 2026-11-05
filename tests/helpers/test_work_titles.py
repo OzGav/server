@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from music_assistant_models.enums import WorkType
 
-from music_assistant.helpers.work_titles import parse_catalog_numbers
+from music_assistant.helpers.work_titles import parse_catalog_numbers, title_work_type
 
 
 @pytest.mark.parametrize(
@@ -41,3 +42,41 @@ def test_parse_catalog_numbers(title: str, expected: list[str]) -> None:
     Single letter catalogs count only after a comma.
     """
     assert parse_catalog_numbers(title) == expected
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Piano Concerto No. 21 in C Major, K. 467", WorkType.CONCERTO),
+        (
+            'The Four Seasons, Violin Concerto No. 2 in G Minor, RV 315 "L\'estate"',
+            WorkType.CONCERTO,
+        ),
+        (
+            'Grand Sonata No. 3 in F Minor, Op. 14 "Concert sans orchestre"',
+            WorkType.SONATA,
+        ),
+        ("Missa Papae Marcelli", WorkType.MASS),
+        ("Symphonie fantastique in C Minor, Op. 14", WorkType.SYMPHONY),
+        ("The Sorcerer's Apprentice (symphonic poem)", WorkType.SYMPHONIC_POEM),
+        ("String Quartet in D Minor, Op. 103", WorkType.QUARTET),
+        ("3 Études, Op. 65", WorkType.ETUDE),
+        ("Carmen (Opera) Suite No. 1", WorkType.SUITE),
+        ("La scala di seta Opera: Overture", WorkType.OVERTURE),
+        ("Madama Butterfly", None),
+        ("Adagio for Strings, Op. 11", None),
+        ('Prelude "Symphony"', None),
+        ("Swan Lake (Ballet)", WorkType.BALLET),
+        ('Dance of the Hours (Ballet) "La Gioconda"', None),
+        ("Requiem in D minor, K. 626", None),
+        ("Aida (Opera)", WorkType.OPERA),
+        ('Die Fledermaus "The Bat" Operetta', WorkType.OPERETTA),
+        ("The Phantom of the Opera", None),
+        ("La gazza ladra (The Thieving Magpie) Opera.", WorkType.OPERA),
+        ("Opera Overture", WorkType.OVERTURE),
+        ("Opera Arias", None),
+    ],
+)
+def test_title_work_type(title: str, expected: WorkType | None) -> None:
+    """A work title names its type as a whole word or bracket label, outside a quoted nickname."""
+    assert title_work_type(title) == expected
