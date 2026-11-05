@@ -45,6 +45,8 @@ async def favorites_mass(
     # remove_item_from_library routes audio analysis cleanup through the AA controller
     streams = MagicMock()
     streams.audio_analysis.delete_audio_analysis = AsyncMock()
+    # a full track fetch, as set_item_favorite does, reads its audio metadata there too
+    streams.audio_analysis.get_track_audio_metadata = AsyncMock(return_value=None)
     monkeypatch.setattr(music_mass_module, "streams", streams, raising=False)
     # the store remembers the users of a sync burst; every test names its own
     music_mass_module.music.favorites._users = None
@@ -348,3 +350,95 @@ async def test_removing_an_item_drops_its_favorites(favorites_mass: MusicAssista
     await mass.music.tracks.remove_item_from_library(track.item_id)
 
     assert await _favorite_rows(mass, track.item_id) == []
+
+
+async def test_set_items_likes_several_items_and_announces_each(
+    favorites_mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every item is liked for the user and each like is announced once."""
+    mass = favorites_mass
+    _known_users(mass, monkeypatch, USER_A)
+    tracks: list[Any] = [await _add_track(mass, f"Like Several {n}") for n in range(3)]
+
+    with patch.object(mass, "signal_event", MagicMock()) as signal_event:
+        handled = await mass.music.set_items_favorite(tracks, True)
+
+    assert handled == 3
+    for track in tracks:
+        rows = await _favorite_rows(mass, track.item_id)
+        assert {row["user_id"]: row["favorite"] for row in rows} == {USER_A: 1}
+    announced = [call.args for call in signal_event.call_args_list]
+    assert [(event, uri) for event, uri, _ in announced] == [
+        (EventType.FAVORITE_UPDATED, track.uri) for track in tracks
+    ]
+    assert all(payload.favorite is True for _, _, payload in announced)
+
+
+async def test_set_items_dislike_replaces_a_like(
+    favorites_mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dislike for several items takes the place of an earlier like."""
+    mass = favorites_mass
+    _known_users(mass, monkeypatch, USER_A)
+    tracks: list[Any] = [await _add_track(mass, f"Dislike Several {n}") for n in range(2)]
+    await mass.music.set_items_favorite(tracks, True)
+
+    assert await mass.music.set_items_favorite(tracks, False) == 2
+
+    for track in tracks:
+        rows = await _favorite_rows(mass, track.item_id)
+        assert {row["user_id"]: row["favorite"] for row in rows} == {USER_A: 0}
+
+
+async def test_set_items_clear_skips_an_item_without_a_library_item(
+    favorites_mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Clearing leaves an explicit row on library items and skips the others without a failure."""
+    mass = favorites_mass
+    _known_users(mass, monkeypatch, USER_A)
+    tracks: list[Any] = [await _add_track(mass, f"Clear Several {n}") for n in range(2)]
+    await mass.music.set_items_favorite(tracks, True)
+    # a track of a source that is not in the library at all
+    outside = create_track(PROV_OWNED, uuid4().hex, name="Outside The Library", isrc=uuid4().hex)
+    get_item = mass.music.get_item
+
+    async def _get_item(media_type: MediaType, item_id: str, *args: Any, **kwargs: Any) -> Any:
+        # the source is not loaded in the test, so the outside track is served from here
+        if item_id == outside.item_id:
+            return outside
+        return await get_item(media_type, item_id, *args, **kwargs)
+
+    monkeypatch.setattr(mass.music, "get_item", _get_item)
+
+    with patch.object(mass, "signal_event", MagicMock()) as signal_event:
+        handled = await mass.music.set_items_favorite([tracks[0], outside, tracks[1]], None)
+
+    assert handled == 3
+    for track in tracks:
+        rows = await _favorite_rows(mass, track.item_id)
+        assert {row["user_id"]: row["favorite"] for row in rows} == {USER_A: None}
+    # nothing was announced for the skipped item
+    assert [call.args[1] for call in signal_event.call_args_list] == [
+        tracks[0].uri,
+        tracks[1].uri,
+    ]
+
+
+async def test_set_items_stops_at_a_failure_and_keeps_the_earlier_items(
+    favorites_mass: MusicAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The count tells how many items were handled, and later items are left alone."""
+    mass = favorites_mass
+    _known_users(mass, monkeypatch, USER_A)
+    first, last = await _add_track(mass, "Before The Failure"), await _add_track(mass, "After It")
+    # an audio source can never be a favorite, so this item fails
+    failing = MagicMock(media_type=MediaType.AUDIO_SOURCE)
+
+    items: list[Any] = [first, failing, last]
+
+    handled = await mass.music.set_items_favorite(items, True)
+
+    assert handled == 1
+    first_rows = await _favorite_rows(mass, first.item_id)
+    assert {row["user_id"]: row["favorite"] for row in first_rows} == {USER_A: 1}
+    assert await _favorite_rows(mass, last.item_id) == []

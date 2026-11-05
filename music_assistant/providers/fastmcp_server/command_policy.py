@@ -462,7 +462,7 @@ def resolve_command_policy(
         else "storage_secret_write"
         if command in _STORAGE_SECRET_COMMANDS
         else "favorite_clear"
-        if command == "music/favorites/set_item"
+        if command in {"music/favorites/set_item", "music/favorites/set_items"}
         else None
     )
     return CommandDecision(
@@ -701,7 +701,7 @@ def _storage_secret_preflight(arguments: Mapping[str, Any]) -> CommandPreflight:
 
 
 def _favorite_clear_preflight(arguments: Mapping[str, Any]) -> CommandPreflight:
-    """Require the delete capability when ``set_item`` clears a favorite (favorite=None)."""
+    """Require the delete capability when ``set_item(s)`` clears a favorite (favorite=None)."""
     if arguments.get("favorite") is not None:
         return CommandPreflight()
     return CommandPreflight(additional_required=frozenset({str(Capability.DELETE_FAVORITES)}))

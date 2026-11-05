@@ -1627,6 +1627,7 @@ async def test_classical_schema_upgrade_matches_a_fresh_install(
     ):
         await music.database.execute(f"DROP TABLE {table}")
     await music.database.execute(f"DROP INDEX {DB_TABLE_TRACKS}_work_id_idx")
+    await music.database.execute(f"DROP INDEX {DB_TABLE_TRACKS}_is_classical_idx")
     for table, column in (
         (DB_TABLE_ARTISTS, "period"),
         (DB_TABLE_ARTISTS, "is_classical"),

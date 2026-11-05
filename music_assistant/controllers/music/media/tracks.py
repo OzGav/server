@@ -47,6 +47,7 @@ from music_assistant_models.media_items import (
 from music_assistant.constants import (
     DB_TABLE_ALBUM_TRACKS,
     DB_TABLE_ALBUMS,
+    DB_TABLE_ARTISTS,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACK_CREDITS,
     DB_TABLE_TRACKS,
@@ -75,6 +76,7 @@ from music_assistant.helpers.external_ids import is_valid_isrc, normalize_extern
 from music_assistant.helpers.json import json_dumps, json_loads
 from music_assistant.helpers.lyrics import extract_lrc_lyrics, normalize_lrc_lyrics
 from music_assistant.helpers.provider_access import visible_items
+from music_assistant.helpers.util import parse_optional_bool
 from music_assistant.models.music_provider import MusicProvider
 
 from .base import (
@@ -161,6 +163,13 @@ class TracksController(MediaControllerBase[Track]):
                 'name', w.name,
                 'sort_name', w.sort_name,
                 'media_type', '{MediaType.WORK.value}'"""
+        artist_fields = f"""
+                'item_id', artists.item_id,
+                'provider', 'library',
+                'name', artists.name,
+                'sort_name', artists.sort_name,
+                'media_type', 'artist',
+                'external_ids', json({self._external_ids_query(MediaType.ARTIST, "artists")})"""
         # NOTE: the track_album subquery is fully self-contained (correlated) so the
         # outer query needs no join with album_tracks (which would fan out rows for
         # tracks that appear on multiple albums and force a GROUP BY). For tracks on
@@ -172,16 +181,7 @@ class TracksController(MediaControllerBase[Track]):
             {self._external_ids_query()} AS external_ids,
             {self._favorite_query()} AS favorite,
             {self._provider_mappings_query()} AS provider_mappings,
-
-            (SELECT JSON_GROUP_ARRAY(
-                json_object(
-                'item_id', artists.item_id,
-                'provider', 'library',
-                    'name', artists.name,
-                    'sort_name', artists.sort_name,
-                    'media_type', 'artist',
-                    'external_ids', json({self._external_ids_query(MediaType.ARTIST, "artists")})
-                )) FROM artists JOIN track_artists on track_artists.track_id = tracks.item_id  WHERE artists.item_id = track_artists.artist_id) AS artists,
+            {self._artists_query(artist_fields)} AS artists,
             {self._credits_query()} AS credits,
             {self._work_query(work_fields)} AS work,
             (SELECT
@@ -746,6 +746,45 @@ class TracksController(MediaControllerBase[Track]):
             provider_filter=self._ensure_provider_filter(None),
             in_library_only=True,
         )
+
+    async def get_library_tracks_with_credits(self, track_ids: Iterable[int]) -> dict[int, Track]:
+        """
+        Return library tracks with only their artists, credits and favorite state, by track id.
+
+        The artists and credits come in the order of a full library track, the favorite state is
+        that of the calling user.
+
+        :param track_ids: Library ids of the tracks.
+        """
+        if not (unique_ids := list(set(track_ids))):
+            return {}
+        artist_fields = """
+                'item_id', artists.item_id,
+                'provider', 'library',
+                'name', artists.name,
+                'media_type', 'artist'"""
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT {DB_TABLE_TRACKS}.item_id, {self._favorite_query()} AS favorite, "
+            f"{self._credits_query()} AS credits, "
+            f"{self._artists_query(artist_fields)} AS artists "
+            f"FROM {DB_TABLE_TRACKS} WHERE {DB_TABLE_TRACKS}.item_id IN :track_ids",
+            {"track_ids": unique_ids, "favorite_user_id": self._favorite_user_id()},
+            limit=0,
+        )
+        return {
+            int(row["item_id"]): Track.from_dict(
+                {
+                    "item_id": str(row["item_id"]),
+                    "provider": "library",
+                    "name": "",
+                    "provider_mappings": [],
+                    "favorite": parse_optional_bool(row["favorite"]),
+                    "artists": json_loads(row["artists"]),
+                    "credits": json_loads(row["credits"]),
+                }
+            )
+            for row in rows
+        }
 
     async def get_library_match(self, item: Track) -> Track | None:
         """
@@ -1943,6 +1982,13 @@ class TracksController(MediaControllerBase[Track]):
             FROM {DB_TABLE_TRACK_CREDITS} c JOIN artists ON artists.item_id = c.artist_id
             WHERE c.track_id = {DB_TABLE_TRACKS}.item_id
             ORDER BY CASE c.role {role_order} ELSE {len(ArtistRole)} END, c.position, c.rowid))"""
+
+    def _artists_query(self, artist_fields: str) -> str:
+        """Return a subquery selecting the main artists of a track as a JSON array."""
+        return f"""(SELECT JSON_GROUP_ARRAY(json_object({artist_fields}))
+            FROM {DB_TABLE_ARTISTS} JOIN {DB_TABLE_TRACK_ARTISTS}
+            ON {DB_TABLE_TRACK_ARTISTS}.track_id = {DB_TABLE_TRACKS}.item_id
+            WHERE {DB_TABLE_ARTISTS}.item_id = {DB_TABLE_TRACK_ARTISTS}.artist_id)"""
 
     def _work_query(self, work_fields: str) -> str:
         """Return a subquery selecting the work mapping of a track as a JSON object."""

@@ -11,6 +11,7 @@ from datetime import datetime
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, Final, NamedTuple, cast
 
+from aiohttp import ClientError
 from music_assistant_models.auth import Scope
 from music_assistant_models.background_task import BackgroundTask, TaskMetadata, TaskSchedule
 from music_assistant_models.config_entries import (
@@ -77,6 +78,7 @@ from music_assistant.constants import (
     PROVIDERS_WITH_SHAREABLE_URLS,
 )
 from music_assistant.controllers.music.bookmarks import BookmarksController
+from music_assistant.controllers.music.classical import ClassicalController
 from music_assistant.controllers.music.classification import ClassicalClassifier
 from music_assistant.controllers.music.constants import (
     BROWSE_CACHE_EXPIRATION,
@@ -420,6 +422,7 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
         self.classification = ClassicalClassifier(self.mass)
         # whether a library upgraded from before classical support still awaits its flags
         self._classify_library = False
+        self.classical = ClassicalController(self.mass)
         self._database: DatabaseConnection | None = None
         self._sync_lock = asyncio.Lock()
         # a sync ran that MUSIC_SYNC_COMPLETED has not announced yet
@@ -1710,6 +1713,29 @@ class MusicController(MusicDatabaseSetupMixin, CoreController):
                 self.mass.create_task(
                     provider.set_favorite(prov_mapping.item_id, full_item.media_type, favorite)
                 )
+
+    @api_command("music/favorites/set_items", required_scope=Scope.LIBRARY_WRITE)
+    async def set_items_favorite(
+        self,
+        items: list[str | MediaItemType | ItemMapping],
+        favorite: bool | None,
+    ) -> int:
+        """
+        Set the calling user's like, dislike or unset on several media items, in order.
+
+        Stops at the first item that fails and keeps what was saved before it.
+
+        :param items: The items (uri or media item) to set the state on.
+        :param favorite: True to like, False to dislike, None to clear the state.
+        :return: The number of items handled, so items[:n] are done and items[n] failed.
+        """
+        for done, item in enumerate(items):
+            try:
+                await self.set_item_favorite(item, favorite)
+            except (MusicAssistantError, ClientError, TimeoutError) as err:
+                self.logger.warning("Setting the favorite state of %s failed: %s", item, err)
+                return done
+        return len(items)
 
     @api_command("music/favorites/add_item", required_scope=Scope.LIBRARY_WRITE)
     async def add_item_to_favorites(

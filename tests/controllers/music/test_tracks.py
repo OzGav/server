@@ -6,7 +6,9 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, call, patch
 
 import pytest
+from music_assistant_models.auth import User, UserRole
 from music_assistant_models.enums import (
+    ArtistRole,
     ContentType,
     ExternalID,
     ImageType,
@@ -25,6 +27,7 @@ from music_assistant_models.media_items import (
     Album,
     Artist,
     AudioFormat,
+    Credit,
     ItemMapping,
     MediaItemImage,
     ProviderMapping,
@@ -49,6 +52,8 @@ from music_assistant.providers.builtin.constants import CONF_KEY_TRACKS, StoredI
 from tests.conftest import full_mass_context
 
 from .helpers import ISRC, create_album, create_track
+
+GET_CURRENT_USER = "music_assistant.controllers.music.media.base.get_current_user"
 
 ALBUM_THUMB = MediaItemImage(
     type=ImageType.THUMB, path="http://images/album1.jpg", provider="spotify_1"
@@ -3141,6 +3146,35 @@ async def test_overwrite_update_replaces_artists(mass: MusicAssistant) -> None:
 
     refreshed = await mass.music.tracks.get_library_item(db_track.item_id)
     assert [artist.name for artist in refreshed.artists] == ["Other Artist"]
+
+
+async def test_library_tracks_with_credits_match_the_full_tracks(mass: MusicAssistant) -> None:
+    """The slim tracks hold the artists and credits of a full track and the user's favorite."""
+    track = create_track("spotify_1", "track1")
+    second = create_track("spotify_1", "track2").artists[0]
+    second.name = "Second Artist"
+    track.artists = UniqueList([track.artists[0], second])
+    track.credits = [Credit(artist=second, role=ArtistRole.COMPOSER)]
+    db_track = await mass.music.tracks.add_item_to_library(track)
+    await mass.music.favorites.set(MediaType.TRACK, int(db_track.item_id), True, ["user_a"])
+    full = await mass.music.tracks.get_library_item(db_track.item_id)
+
+    with patch(GET_CURRENT_USER, return_value=User("user_a", "user_a", UserRole.USER)):
+        tracks = await mass.music.tracks.get_library_tracks_with_credits(
+            [int(db_track.item_id), int(db_track.item_id), 0]
+        )
+    anonymous = await mass.music.tracks.get_library_tracks_with_credits([int(db_track.item_id)])
+
+    assert list(tracks) == [int(db_track.item_id)]
+    slim = tracks[int(db_track.item_id)]
+    assert [x.item_id for x in slim.artists] == [x.item_id for x in full.artists]
+    assert len(slim.artists) == 2
+    assert [(x.artist.item_id, x.role) for x in slim.credits] == [
+        (x.artist.item_id, x.role) for x in full.credits
+    ]
+    assert len(slim.credits) == 1
+    assert slim.favorite is True
+    assert anonymous[int(db_track.item_id)].favorite is None
 
 
 async def _add_track_on_album_with_thumb(
