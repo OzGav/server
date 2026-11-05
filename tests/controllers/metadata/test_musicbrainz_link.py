@@ -6,12 +6,13 @@ import asyncio
 from time import time
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import aiohttp
 import pytest
 from music_assistant_models.enums import (
     ArtistEntityType,
+    ArtistRole,
     EventType,
     ExternalID,
     MediaType,
@@ -24,6 +25,7 @@ from music_assistant_models.event import MassEvent
 from music_assistant_models.media_items import (
     Album,
     Artist,
+    Credit,
     MediaItemMetadata,
     ProviderMapping,
     Track,
@@ -49,10 +51,12 @@ from music_assistant.controllers.metadata.constants import (
 )
 from music_assistant.controllers.metadata.controller import (
     _albums_to_identify_query,
+    _albums_with_recordings_to_read_query,
     _artists_to_identify_query,
     _misses_musicbrainz_links,
     _relink_query,
     _tracks_to_identify_query,
+    _tracks_with_recording_to_read_query,
     _works_to_enrich_query,
 )
 from music_assistant.controllers.tasks import TasksController
@@ -202,10 +206,17 @@ def _queue(
     """
     queried: list[str] = []
     music = _mass(ctrl).music
+    performer_queries = (
+        _albums_with_recordings_to_read_query(),
+        _tracks_with_recording_to_read_query(),
+    )
 
     def _answer(name: str, items: Sequence[Mock], relink_items: Sequence[Mock]) -> AsyncMock:
         async def _query(**kwargs: Any) -> list[Mock]:
             params = kwargs.get("extra_query_params") or {}
+            if kwargs["extra_query_parts"][0] in performer_queries:
+                queried.append(f"{name} performers")
+                return []
             if "domain" in params:
                 queried.append(f"relink {name} {params['domain']}")
                 return list(relink_items)[: kwargs["limit"]]
@@ -269,15 +280,24 @@ async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
     with patch(f"{_CONTROLLER}.time", return_value=float(NOW)):
         await ctrl._link_library_to_musicbrainz()
 
-    assert queried == ["albums", "artists", "tracks", "works"]
+    assert queried == [
+        "albums",
+        "artists",
+        "tracks",
+        "albums performers",
+        "tracks performers",
+        "works",
+    ]
     music = _mass(ctrl).music
     for controller, query, params in (
         (music.albums, _albums_to_identify_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.artists, _artists_to_identify_query(), {}),
         (music.tracks, _tracks_to_identify_query(), {}),
+        (music.albums, _albums_with_recordings_to_read_query(), {"stale": NOW - REFRESH_INTERVAL}),
+        (music.tracks, _tracks_with_recording_to_read_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.works, _works_to_enrich_query(), {}),
     ):
-        controller.get_library_items_by_query.assert_awaited_once_with(
+        controller.get_library_items_by_query.assert_any_await(
             limit=MUSICBRAINZ_LINK_BATCH_SIZE,
             sort_field=SortField.TIMESTAMP_ADDED,
             sort_direction=SortDirection.DESC,
@@ -573,6 +593,8 @@ async def test_link_run_relinks_for_a_provider_loaded_since_the_previous_run() -
         "relink artists spotify",
         "relink albums tidal",
         "relink artists tidal",
+        "albums performers",
+        "tracks performers",
         "works",
     ]
     relink_calls = [
@@ -797,12 +819,19 @@ async def test_link_item_persists_a_track() -> None:
 async def test_diagnostics_report_the_last_run_and_the_pending_counts() -> None:
     """Diagnostics carry the last run summary and how many items each phase still has."""
     ctrl = _controller()
-    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[4, 3, 2, 1])
+    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[6, 5, 4, 3, 2, 1])
 
     assert await ctrl.get_diagnostics() == {
         "musicbrainz_link": {
             "last_run": None,
-            "pending": {"albums": 4, "artists": 3, "tracks": 2, "works": 1},
+            "pending": {
+                "albums": 6,
+                "artists": 5,
+                "tracks": 4,
+                "album performers": 3,
+                "track performers": 2,
+                "works": 1,
+            },
         }
     }
 
@@ -818,6 +847,7 @@ async def test_classical_link_progress_is_zero_while_nothing_is_looked_up(
 
     assert await ctrl.get_classical_link_progress() == {
         "albums": 0,
+        "recordings": 0,
         "works": 0,
     }
     _mass(ctrl).music.database.get_count_from_query.assert_not_awaited()
@@ -991,7 +1021,14 @@ async def test_link_run_selects_albums_by_their_lookup_marker(mass: MusicAssista
     assert diagnostics is not None
     assert diagnostics["musicbrainz_link"] == {
         "last_run": None,
-        "pending": {"albums": 2, "artists": 0, "tracks": 0, "works": 0},
+        "pending": {
+            "albums": 2,
+            "artists": 0,
+            "tracks": 0,
+            "works": 0,
+            "album performers": 0,
+            "track performers": 0,
+        },
     }
 
     assert await _linked_ids(mass) == {never.item_id, stale_unknown.item_id}
@@ -1008,7 +1045,14 @@ async def test_link_run_selects_the_album_a_library_track_hangs_on(mass: MusicAs
     assert diagnostics is not None
     assert diagnostics["musicbrainz_link"] == {
         "last_run": None,
-        "pending": {"albums": 1, "artists": 0, "tracks": 0, "works": 0},
+        "pending": {
+            "albums": 1,
+            "artists": 0,
+            "tracks": 0,
+            "works": 0,
+            "album performers": 0,
+            "track performers": 0,
+        },
     }
 
     assert await _linked_uris(mass) == {holder.uri}
@@ -1046,7 +1090,14 @@ async def test_link_run_selects_the_artists_and_tracks_the_library_holds(
     assert diagnostics is not None
     assert diagnostics["musicbrainz_link"] == {
         "last_run": None,
-        "pending": {"albums": 0, "artists": 2, "tracks": 1, "works": 0},
+        "pending": {
+            "albums": 0,
+            "artists": 2,
+            "tracks": 1,
+            "works": 0,
+            "album performers": 0,
+            "track performers": 0,
+        },
     }
 
     assert await _linked_uris(mass) == {track_artist.uri, album_artist.uri, library_track.uri}
@@ -1465,3 +1516,88 @@ async def test_link_run_looks_a_musicbrainz_id_up_by_its_item(mass: MusicAssista
     lookups = [row["detail"] for row in plan if DB_TABLE_EXTERNAL_ID_LOOKUP in row["detail"]]
     assert lookups
     assert all(f"{DB_TABLE_EXTERNAL_ID_LOOKUP}_item_id_idx" in detail for detail in lookups)
+
+
+async def _add_composer(mass: MusicAssistant, name: str) -> Artist:
+    """Add a library artist mapped to qobuz that was never looked up on MusicBrainz."""
+    return await mass.music.artists.add_item_to_library(
+        Artist(
+            item_id="0",
+            provider="library",
+            name=name,
+            provider_mappings={
+                ProviderMapping(item_id=name, provider_domain="qobuz", provider_instance="qobuz_1")
+            },
+        )
+    )
+
+
+async def _add_recorded_track(
+    mass: MusicAssistant, name: str, album: Album, composer: Artist, *, classical: bool
+) -> Track:
+    """Add a library track on the album with a MusicBrainz recording id, crediting the composer."""
+    track = await mass.music.tracks.add_item_to_library(
+        Track(
+            item_id="0",
+            provider="library",
+            name=name,
+            provider_mappings={
+                ProviderMapping(item_id=name, provider_domain="qobuz", provider_instance="qobuz_1")
+            },
+            artists=UniqueList([composer]),
+            album=album,
+            credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)],
+            external_ids={(ExternalID.MB_RECORDING, str(uuid4()))},
+        )
+    )
+    # the flags are stored last, as adding a track classifies it and its album again
+    await _set_classical(mass, DB_TABLE_TRACKS, track.item_id, classical)
+    await _set_classical(mass, DB_TABLE_ALBUMS, album.item_id, classical)
+    return track
+
+
+async def _set_classical(mass: MusicAssistant, table: str, item_id: str, classical: bool) -> None:
+    """Store the classical flag of a library row."""
+    await mass.music.database.execute_write(
+        f"UPDATE {table} SET is_classical = :classical WHERE item_id = :item_id",
+        {"classical": int(classical), "item_id": int(item_id)},
+    )
+
+
+async def _ids(mass: MusicAssistant, media_type: MediaType, query: str, stale: int) -> set[str]:
+    """Return the ids of the library rows of a media type a link run query part selects."""
+    controller = mass.music.get_controller(media_type)
+    selected = await controller.get_library_items_by_query(
+        limit=0, extra_query_parts=[query], extra_query_params={"stale": stale}
+    )
+    return {x.item_id for x in selected}
+
+
+@pytest.mark.parametrize("identified", [True, False])
+async def test_link_run_reads_only_the_recordings_of_tracks_in_its_scope(
+    mass: MusicAssistant, identified: bool
+) -> None:
+    """A classical track on a library album is read and counted, one only stored is not."""
+    beethoven = await _add_composer(mass, "Beethoven")
+    held = await _add_album(
+        mass, "Held", looked_up=int(time()), mbid=str(uuid4()) if identified else None
+    )
+    stored = await _add_album(
+        mass,
+        "Stored",
+        looked_up=int(time()),
+        mbid=str(uuid4()) if identified else None,
+        in_library=False,
+    )
+    on_held = await _add_recorded_track(mass, "Eroica", held, beethoven, classical=True)
+    await _add_recorded_track(mass, "Emperor", stored, beethoven, classical=True)
+    stale = int(time() - REFRESH_INTERVAL)
+
+    albums = await _ids(mass, MediaType.ALBUM, _albums_with_recordings_to_read_query(), stale)
+    tracks = await _ids(mass, MediaType.TRACK, _tracks_with_recording_to_read_query(), stale)
+
+    assert (albums, tracks) == (
+        ({held.item_id}, set()) if identified else (set(), {on_held.item_id})
+    )
+    progress = await mass.metadata.get_classical_link_progress()
+    assert progress["recordings"] == 1
