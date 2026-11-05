@@ -13,6 +13,7 @@ from aiohttp import ClientError
 from music_assistant_models.auth import Scope
 from music_assistant_models.enums import (
     ArtistRole,
+    EventType,
     ExternalID,
     ListingType,
     MediaType,
@@ -49,6 +50,7 @@ from music_assistant.constants import (
     DB_TABLE_ALBUM_TRACKS,
     DB_TABLE_ALBUMS,
     DB_TABLE_ARTISTS,
+    DB_TABLE_EXTERNAL_ID_LOOKUP,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACK_CREDITS,
     DB_TABLE_TRACKS,
@@ -720,6 +722,58 @@ class TracksController(MediaControllerBase[Track]):
             return
 
         await self.update_item_in_library(int(track.item_id), track)
+
+    async def set_work(
+        self,
+        track_id: int,
+        work_id: int,
+        movement_number: int | None = None,
+        movement_name: str | None = None,
+        mb_work_id: str | None = None,
+    ) -> None:
+        """
+        Place a library track on a work as one of its movements.
+
+        :param track_id: Library id of the track.
+        :param work_id: Library id of the work.
+        :param movement_number: The number of the movement the track performs, if any.
+        :param movement_name: The name of the movement the track performs, if any.
+        :param mb_work_id: The MusicBrainz id of the work the track performs, added to its ids.
+        """
+        await self.mass.music.database.update(
+            self.db_table,
+            {"item_id": track_id},
+            {
+                "work_id": work_id,
+                "movement_number": movement_number,
+                "movement_name": movement_name,
+            },
+        )
+        if mb_work_id:
+            await self.mass.music.database.upsert(
+                DB_TABLE_EXTERNAL_ID_LOOKUP,
+                {
+                    "media_type": MediaType.TRACK.value,
+                    "external_id_type": ExternalID.MB_WORK.value,
+                    "external_id": mb_work_id,
+                    "item_id": track_id,
+                },
+            )
+        library_item = await self.get_library_item(track_id)
+        self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+
+    async def set_movement_number(self, track_id: int, movement_number: int | None) -> None:
+        """
+        Store the number of the movement of its work a library track performs.
+
+        :param track_id: Library id of the track.
+        :param movement_number: The movement number, None when it performs no single movement.
+        """
+        await self.mass.music.database.update(
+            self.db_table, {"item_id": track_id}, {"movement_number": movement_number}
+        )
+        library_item = await self.get_library_item(track_id)
+        self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
 
     async def credit_work_composers(self, work_id: int) -> None:
         """
@@ -1984,8 +2038,9 @@ class TracksController(MediaControllerBase[Track]):
         """
         Keep a track's work and movement when an update names a part its place already holds.
 
-        Its place holds its stored MusicBrainz work ids. The track keeps the update's work id. An
-        update naming the track's own work is left as it is, so its movement follows the update.
+        Its place holds its work's movement at its number and its stored MusicBrainz work ids,
+        such as a number moved up onto its act. The track keeps the update's work id. An update
+        naming the track's own work is left as it is, so its movement follows the update.
 
         :param update: The track as its source gives it, changed in place to keep the place.
         :param cur_item: The library track.
@@ -2001,9 +2056,20 @@ class TracksController(MediaControllerBase[Track]):
         if work_id.casefold() == (work.mbid or "").casefold():
             return
         held = {
-            value.casefold()
-            for id_type, value in cur_item.external_ids
-            if id_type == ExternalID.MB_WORK and value
+            x.casefold()
+            for x in (
+                *(
+                    m.mbid
+                    for m in work.metadata.movements or []
+                    if m.number == cur_item.movement_number
+                ),
+                *(
+                    value
+                    for id_type, value in cur_item.external_ids
+                    if id_type == ExternalID.MB_WORK
+                ),
+            )
+            if x
         }
         if work_id.casefold() not in held:
             return

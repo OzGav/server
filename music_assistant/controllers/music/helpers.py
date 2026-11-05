@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
     from music_assistant_models.enums import MediaType
+    from music_assistant_models.media_items import WorkMovement
 
     from music_assistant.mass import MusicAssistant
     from music_assistant.providers.musicbrainz.models import MusicBrainzRecording
@@ -66,6 +67,10 @@ IS_CLASSICAL_COMPOSER: Final[str] = (
     f"OR EXISTS (SELECT 1 FROM {DB_TABLE_WORK_ARTISTS} wa WHERE wa.artist_id = "
     f"{DB_TABLE_ARTISTS}.item_id AND wa.role = '{ArtistRole.COMPOSER.value}')))"
 )
+
+# a piece of a group, such as a scene of a number of an act, is listed under the group and numbered
+# past the list it is in: its group's number times this plus its own number in the group
+PIECE_NUMBERS: Final = 1000
 
 
 def search_name_match_clause(
@@ -127,6 +132,16 @@ def life_span_period(artist: Artist) -> Period | None:
     if life_span.ended and not death_year:
         return None  # died in an unknown year, so their working life is unknown too
     return composer_period(birth_year, death_year)
+
+
+def group_piece(group_number: int, piece: WorkMovement) -> WorkMovement:
+    """
+    Return a piece of a group as the list holding the group lists it, right under the group.
+
+    :param group_number: The number of the group in the list holding it.
+    :param piece: The piece, numbered as the group's own movements number it.
+    """
+    return replace(piece, number=group_number * PIECE_NUMBERS + piece.number, parent=group_number)
 
 
 def instrument_label(instrument: str | None, artist_name: str) -> str:
