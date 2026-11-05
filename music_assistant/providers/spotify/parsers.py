@@ -21,8 +21,13 @@ from music_assistant_models.media_items import (
 )
 from music_assistant_models.unique_list import UniqueList
 
-from music_assistant.constants import DEFAULT_AUDIOBOOK_PODCAST_GENRE
+from music_assistant.constants import CLASSICAL_GENRE_NAME, DEFAULT_AUDIOBOOK_PODCAST_GENRE
 from music_assistant.helpers.util import infer_album_type, parse_title_and_version
+from music_assistant.helpers.work_titles import (
+    composers_listed_first,
+    is_work_title,
+    set_listed_composer_work,
+)
 
 if TYPE_CHECKING:
     from .provider import SpotifyProvider
@@ -138,6 +143,11 @@ def parse_album(album_obj: dict[str, Any], provider: SpotifyProvider) -> Album:
         album.metadata.copyright = album_obj["copyrights"][0]["text"]
     if album_obj.get("explicit"):
         album.metadata.explicit = album_obj["explicit"]
+    # a full album comes with (the first page of) its tracks
+    if (album_tracks := (album_obj.get("tracks") or {}).get("items")) and has_work_titles(
+        album_tracks
+    ):
+        album.metadata.genres = {*(album.metadata.genres or ()), CLASSICAL_GENRE_NAME}
     return album
 
 
@@ -145,8 +155,17 @@ def parse_track(
     track_obj: dict[str, Any],
     provider: SpotifyProvider,
     artist: Artist | None = None,
+    composer_first: bool | None = None,
 ) -> Track:
-    """Parse spotify track object to generic layout."""
+    """
+    Parse spotify track object to generic layout.
+
+    :param track_obj: The Spotify track object.
+    :param provider: The Spotify provider instance.
+    :param artist: An artist to list first, such as the artist whose top tracks these are.
+    :param composer_first: True on a classical album that lists each track's composer as its
+        first artist, False on one whose titles name the composers instead, None when unknown.
+    """
     name, version = parse_title_and_version(track_obj["name"])
     track = Track(
         item_id=track_obj["id"],
@@ -172,12 +191,16 @@ def parse_track(
 
     if artist:
         track.artists.append(artist)
+    # Spotify lists the composer of a classical track first
+    composer: Artist | None = None
     for track_artist in track_obj.get("artists", []):
         if not track_artist.get("name") or not track_artist.get("id"):
             continue
         artist_parsed = parse_artist(track_artist, provider)
+        composer = composer or artist_parsed
         if artist_parsed and artist_parsed.item_id not in {x.item_id for x in track.artists}:
             track.artists.append(artist_parsed)
+    set_listed_composer_work(track, name, composer, composer_first)
 
     track.metadata.explicit = track_obj["explicit"]
     if "preview_url" in track_obj:
@@ -194,6 +217,40 @@ def parse_track(
     if track_obj.get("popularity"):
         track.metadata.popularity = track_obj["popularity"]
     return track
+
+
+def has_work_titles(track_objs: list[dict[str, Any]]) -> bool:
+    """
+    Return whether most of the given tracks have a "Work: Piece" title, as classical tracks do.
+
+    :param track_objs: The Spotify track objects of an album.
+    """
+    titles = [x["name"] for x in track_objs if x and x.get("name")]
+    work_titles = [x for x in titles if is_work_title(parse_title_and_version(x)[0])]
+    return len(work_titles) * 2 > len(titles)
+
+
+def lists_composers_first(track_objs: list[dict[str, Any]]) -> bool | None:
+    """
+    Return whether a classical album lists each track's composer as its first artist.
+
+    Returns None for an album that is not classical. Some labels name the composer in the title
+    instead ("Allegri: Miserere - 01. Miserere Mei, Deus") and list only the performers.
+
+    :param track_objs: The Spotify track objects of an album.
+    """
+    if not has_work_titles(track_objs):
+        return None
+    return composers_listed_first(
+        [
+            (
+                parse_title_and_version(x["name"])[0],
+                x["artists"][0].get("name") if x.get("artists") else None,
+            )
+            for x in track_objs
+            if x and x.get("name")
+        ]
+    )
 
 
 def parse_playlist(playlist_obj: dict[str, Any], provider: SpotifyProvider) -> Playlist:
