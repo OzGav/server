@@ -8,8 +8,9 @@ view. Every listing only considers classical library tracks.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import groupby
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -97,6 +98,31 @@ CO_PERFORMER_RANK: Final[dict[ArtistRole, int]] = {
     ArtistRole.PERFORMER: 4,
 }
 
+
+# the words that tell the kind of ensemble a name is, matched on the name without accents,
+# where a word ending in orchester counts too, as in Gewandhausorchester
+_ENSEMBLE_NAME_WORDS: Final[tuple[tuple[ArtistRole, re.Pattern[str]], ...]] = tuple(
+    (role, re.compile(pattern))
+    for role, pattern in (
+        (
+            ArtistRole.ORCHESTRA,
+            r"\b(\w*orchester|orchestr(a|as|e|es)|orquestas?|philharmoni(a|c|e|ker)|symphon(y|iker)"
+            r"|sinfoni(a|etta))\b",
+        ),
+        (
+            ArtistRole.CHOIR,
+            r"\b(choirs?|chor|choeurs?|coro|singers|chorus|kammerchor|domchor|knabenchor"
+            r"|rundfunkchor|kinderchor|opernchor|konzertchor)\b",
+        ),
+        (
+            ArtistRole.ENSEMBLE,
+            r"\b(quartet|quartett|quartetto|quatuor|trio|quintet|octet|octuor|ensemble"
+            r"|consort)s?\b",
+        ),
+    )
+)
+# a name of soloists, such as "Soloists of the Royal Opera House Orchestra", tells no ensemble
+_SOLOISTS_NAME_WORD: Final[re.Pattern[str]] = re.compile(r"\bsoloists?\b")
 
 # the performing credits on classical tracks aliased as t, which callers narrow to the visible
 # ones, where a track without any counts its main artists that did not compose it as performers
@@ -259,7 +285,8 @@ class ClassicalController:
         """
         Get the performers of the classical library, with their roles and counts.
 
-        :param role: Only include performers holding any of these performing roles.
+        :param role: Only include performers holding any of these performing roles, as
+            shown.
         :param search: Filter on the performer's name.
         :param limit: Maximum number of performers to return.
         :param offset: Number of performers to skip.
@@ -273,7 +300,7 @@ class ClassicalController:
             ListingType.CLASSICAL_PERFORMERS, sort_field, sort_direction
         )
         params: dict[str, Any] = {}
-        conditions = [self._listed_performers(params, role or [])]
+        conditions = [self._listed_performers(params)]
         if artist_id:
             params["artist_id"] = int(artist_id)
             conditions.append(f"{DB_TABLE_ARTISTS}.item_id = :artist_id")
@@ -281,8 +308,19 @@ class ClassicalController:
             conditions.append(self.mass.music.artists._favorite_filter_clause(params, favorite))
         if field == SortField.RECORDING_COUNT:
             sort_key = _sort_sql(DB_TABLE_ARTISTS, SortField.NAME, SortDirection.ASC)
+        else:
+            sort_key = _sort_sql(DB_TABLE_ARTISTS, field, direction)
+        # the role filter matches the refined roles, so it pages after reading every credit
+        if role or field == SortField.RECORDING_COUNT:
             ids = await self._ids(DB_TABLE_ARTISTS, conditions, params, search, sort_key)
-            roles, works = await self._performer_credits(None)
+            roles, works = await self._performer_credits(ids)
+            ids = [x for x in ids if not role or any(y in roles[x] for y in role)]
+        else:
+            ids = await self._ids(
+                DB_TABLE_ARTISTS, conditions, params, search, sort_key, limit, offset
+            )
+            roles, works = await self._performer_credits(ids)
+        if field == SortField.RECORDING_COUNT:
             performances = await self._listed_work_performances(None)
             counts = {x: _performer_recording_count(x, works[x], performances) for x in ids}
             ids = _page(
@@ -291,11 +329,8 @@ class ClassicalController:
                 offset,
             )
         else:
-            sort_key = _sort_sql(DB_TABLE_ARTISTS, field, direction)
-            ids = await self._ids(
-                DB_TABLE_ARTISTS, conditions, params, search, sort_key, limit, offset
-            )
-            roles, works = await self._performer_credits(ids)
+            if role:
+                ids = _page(ids, limit, offset)
             performances = await self._listed_work_performances(
                 {x for item_id in ids for x in works[item_id]}
             )
@@ -494,6 +529,7 @@ class ClassicalController:
                 summary=False,
             )
         }
+        refinements = await self._show_refined_roles(tracks.values())
         albums = {
             int(album.item_id): ItemMapping.from_item(album)
             for album in await self._items(
@@ -514,7 +550,9 @@ class ClassicalController:
             if work in works
             for recording in sorted(
                 (
-                    _build_recording(works[work], parent_works.get(work), x, tracks, albums)
+                    _build_recording(
+                        works[work], parent_works.get(work), x, tracks, albums, refinements
+                    )
                     for x in performances[work]
                 ),
                 key=lambda x: _recording_sort_key(x.year, x.credits, x.key),
@@ -601,7 +639,9 @@ class ClassicalController:
         else:
             sort_key = _sort_sql(DB_TABLE_TRACKS, field, direction)
         ids = await self._ids(DB_TABLE_TRACKS, conditions, params, search, sort_key, limit, offset)
-        return await self._items(self.mass.music.tracks, ids, summary=False)
+        tracks = await self._items(self.mass.music.tracks, ids, summary=False)
+        await self._show_refined_roles(tracks)
+        return tracks
 
     async def link_progress(self) -> dict[str, int]:
         """
@@ -648,20 +688,16 @@ class ClassicalController:
             f"(SELECT artist_id FROM ({self._composer_works_query(params)}))"
         )
 
-    def _listed_performers(self, params: dict[str, Any], roles: Sequence[ArtistRole] = ()) -> str:
+    def _listed_performers(self, params: dict[str, Any]) -> str:
         """
         Return the condition matching the performers the performers list shows the calling user.
 
         :param params: Query params dict; the condition's bound params are added to it.
-        :param roles: Only match the performers holding any of these performing roles.
         """
-        role_filter = ""
-        if roles:
-            role_filter = " AND ta.role IN :roles"
-            params["roles"] = [x.value for x in roles]
+        # only performers of a work are listed, so each row counts at least one recording
         return (
             f"{DB_TABLE_ARTISTS}.item_id IN (SELECT ta.artist_id {PERFORMER_CREDITS} "
-            f"AND t.item_id IN ({self._classical_tracks(params)}){role_filter})"
+            f"AND t.work_id IS NOT NULL AND t.item_id IN ({self._classical_tracks(params)}))"
         )
 
     async def _work_ids(
@@ -852,7 +888,7 @@ class ClassicalController:
         self, artist_ids: Sequence[int] | None
     ) -> tuple[dict[int, Counter[ArtistRole]], dict[int, set[int]]]:
         """
-        Return the credit count per performing role and the listed works of performers.
+        Return the credit count per shown performing role and the listed works of performers.
 
         :param artist_ids: The performers to return, or None for every performer.
         """
@@ -865,13 +901,9 @@ class ClassicalController:
         if artist_ids is not None:
             scope += " AND ta.artist_id IN :artist_ids"
             params["artist_ids"] = list(artist_ids)
-        for row in await self.mass.music.database.get_rows_from_query(
-            f"SELECT ta.artist_id, ta.role, COUNT(DISTINCT ta.track_id) AS credit_count "
-            f"{PERFORMER_CREDITS}{scope} GROUP BY ta.artist_id, ta.role",
-            params,
-            limit=0,
-        ):
-            roles[int(row["artist_id"])][ArtistRole(row["role"])] = int(row["credit_count"])
+        names, stored = await self._stored_roles(artist_ids)
+        for artist_id, role_counts in stored.items():
+            roles[artist_id] = _refined_roles(names[artist_id], role_counts)
         for row in await self.mass.music.database.get_rows_from_query(
             f"SELECT DISTINCT c.artist_id, r.root_id AS work_id "
             f"FROM (SELECT ta.artist_id, t.work_id {PERFORMER_CREDITS}{scope}) c "
@@ -881,6 +913,63 @@ class ClassicalController:
         ):
             works[int(row["artist_id"])].add(int(row["work_id"]))
         return roles, works
+
+    async def _stored_roles(
+        self, artist_ids: Sequence[int] | None
+    ) -> tuple[dict[int, str], dict[int, Counter[ArtistRole]]]:
+        """
+        Return the names and the credit count per stored performing role of performers.
+
+        :param artist_ids: The performers to return, or None for every performer.
+        """
+        names: dict[int, str] = {}
+        roles: dict[int, Counter[ArtistRole]] = defaultdict(Counter)
+        if artist_ids is not None and not artist_ids:
+            return names, roles
+        params: dict[str, Any] = {}
+        scope = f" AND t.item_id IN ({self._classical_tracks(params)})"
+        if artist_ids is not None:
+            scope += " AND ta.artist_id IN :artist_ids"
+            params["artist_ids"] = list(artist_ids)
+        for row in await self.mass.music.database.get_rows_from_query(
+            f"SELECT ta.artist_id, ta.role, COUNT(DISTINCT ta.track_id) AS credit_count, "
+            f"(SELECT name FROM {DB_TABLE_ARTISTS} WHERE item_id = ta.artist_id) AS name "
+            f"{PERFORMER_CREDITS}{scope} GROUP BY ta.artist_id, ta.role",
+            params,
+            limit=0,
+        ):
+            names[int(row["artist_id"])] = row["name"] or ""
+            roles[int(row["artist_id"])][ArtistRole(row["role"])] = int(row["credit_count"])
+        return names, roles
+
+    async def _show_refined_roles(
+        self, tracks: Iterable[Track]
+    ) -> dict[int, dict[ArtistRole, ArtistRole]]:
+        """
+        Show the refined performing roles in the credits of tracks, as the performers listing does.
+
+        Returns the shown role of each refined stored role, by performer.
+
+        :param tracks: The library tracks to update.
+        """
+        tracks = list(tracks)
+        names, stored = await self._stored_roles(
+            list(
+                {
+                    *(
+                        int(x.artist.item_id)
+                        for track in tracks
+                        for x in track.credits
+                        if x.role in PERFORMING_ROLES
+                    ),
+                    *(int(x.item_id) for track in tracks for x in track.artists),
+                }
+            )
+        )
+        refinements = {x: _role_refinements(names[x], stored[x]) for x in stored}
+        for track in tracks:
+            track.credits = _shown_credits(track.credits, refinements)
+        return refinements
 
     async def _work_parts(self, listed_ids: Iterable[int] | None) -> dict[int, list[int]]:
         """Return the given listed works, or all of them, each with itself and then its parts."""
@@ -955,8 +1044,9 @@ class ClassicalController:
         tracks = await self.mass.music.tracks.get_library_tracks_with_credits(
             [track_id for value in own.values() for x in value for track_id, _ in x.tracks]
         )
+        refinements = await self._show_refined_roles(tracks.values())
         for entry in entries:
-            recordings = _performer_recordings(own[int(entry.work.item_id)], tracks)
+            recordings = _performer_recordings(own[int(entry.work.item_id)], tracks, refinements)
             entry.co_performers = _co_performer_names(
                 (x for shown, _ in recordings for x in shown), performer_id
             )
@@ -1155,6 +1245,7 @@ def _build_recording(
     performance: _Performance,
     tracks: dict[int, Track],
     albums: dict[int, ItemMapping],
+    refinements: dict[int, dict[ArtistRole, ArtistRole]],
 ) -> Recording:
     """
     Build a Recording from a performance and its library tracks and albums.
@@ -1164,6 +1255,7 @@ def _build_recording(
     :param performance: The performance to build the recording of.
     :param tracks: The library tracks of the performance, by track id.
     :param albums: The albums of the performance, by album id.
+    :param refinements: The shown role of each refined stored performing role, by performer.
     """
     movement_tracks: list[Track] = []
     for track_id, appearance in performance.tracks:
@@ -1175,7 +1267,7 @@ def _build_recording(
             track.disc_number = appearance.disc_number
             track.track_number = appearance.track_number
         movement_tracks.append(track)
-    performing_credits = _recording_credits(movement_tracks)
+    performing_credits = _recording_credits(movement_tracks, refinements)
     return Recording(
         key=performance.key,
         work=work,
@@ -1243,20 +1335,25 @@ def _track_performing_credits(track: Track) -> list[Credit]:
     ]
 
 
-def _recording_credits(tracks: Iterable[Track]) -> list[Credit]:
-    """Return the performing credits of a recording of the given tracks, in role order."""
-    performing_credits: dict[tuple[str, ArtistRole, str | None], Credit] = {}
-    for track in tracks:
-        for credit in _track_performing_credits(track):
-            performing_credits.setdefault(
-                (credit.artist.item_id, credit.role, credit.instrument), credit
-            )
-    return sorted(performing_credits.values(), key=lambda x: PERFORMING_ROLES.index(x.role))
+def _recording_credits(
+    tracks: Iterable[Track], refinements: dict[int, dict[ArtistRole, ArtistRole]]
+) -> list[Credit]:
+    """
+    Return the performing credits a recording of the given tracks shows, in role order.
+
+    :param tracks: The library tracks of the recording.
+    :param refinements: The shown role of each refined stored performing role, by performer.
+    """
+    performing_credits = _shown_credits(
+        (x for track in tracks for x in _track_performing_credits(track)), refinements
+    )
+    return sorted(performing_credits, key=lambda x: PERFORMING_ROLES.index(x.role))
 
 
 def _performer_recordings(
     performances: Iterable[_Performance],
     tracks: dict[int, Track],
+    refinements: dict[int, dict[ArtistRole, ArtistRole]],
 ) -> list[tuple[list[Credit], list[Track]]]:
     """
     Return the credits and tracks of performances, in the order the recordings command lists them.
@@ -1264,13 +1361,20 @@ def _performer_recordings(
     :param performances: The performances of a listed work and of its parts, per work in the
         order the recordings command lists the works.
     :param tracks: The library tracks of the performances, by track id.
+    :param refinements: The shown role of each refined stored performing role, by performer.
     """
     recordings: list[tuple[list[Credit], list[Track]]] = []
     for _, work_performances in groupby(performances, key=lambda x: x.work_id):
         built: list[tuple[_Performance, list[Credit], list[Track]]] = []
         for performance in work_performances:
             performance_tracks = [tracks[x] for x, _ in performance.tracks if x in tracks]
-            built.append((performance, _recording_credits(performance_tracks), performance_tracks))
+            built.append(
+                (
+                    performance,
+                    _recording_credits(performance_tracks, refinements),
+                    performance_tracks,
+                )
+            )
         built.sort(key=lambda x: _recording_sort_key(x[0].year, x[1], x[0].key))
         recordings.extend((shown, performance_tracks) for _, shown, performance_tracks in built)
     return recordings
@@ -1339,6 +1443,90 @@ def _performer_row(
         work_count=len(works[artist_id]),
         recording_count=_performer_recording_count(artist_id, works[artist_id], performances),
     )
+
+
+def _refined_roles(name: str, role_counts: Counter[ArtistRole]) -> Counter[ArtistRole]:
+    """
+    Return the credit count per shown performing role of a performer.
+
+    :param name: The name of the performer.
+    :param role_counts: The credit count per stored performing role.
+    """
+    refinements = _role_refinements(name, role_counts)
+    refined: Counter[ArtistRole] = Counter()
+    for role, count in role_counts.items():
+        refined[refinements.get(role, role)] += count
+    return refined
+
+
+def _role_refinements(name: str, roles: Iterable[ArtistRole]) -> dict[ArtistRole, ArtistRole]:
+    """
+    Return the shown role of each stored performing role of a performer that is refined.
+
+    The performer role takes the one specific role the performer holds elsewhere, or else the
+    ensemble role their name tells. The orchestra role gives way to a choir or ensemble role
+    their name tells, the ensemble role to a choir role.
+
+    :param name: The name of the performer.
+    :param roles: The stored performing roles of the performer on the classical tracks.
+    """
+    roles = set(roles)
+    named = _name_ensemble_role(name)
+    refinements: dict[ArtistRole, ArtistRole] = {}
+    if named in (ArtistRole.CHOIR, ArtistRole.ENSEMBLE) and ArtistRole.ORCHESTRA in roles:
+        refinements[ArtistRole.ORCHESTRA] = named
+    if named == ArtistRole.CHOIR and ArtistRole.ENSEMBLE in roles:
+        refinements[ArtistRole.ENSEMBLE] = named
+    if ArtistRole.PERFORMER in roles:
+        specific = {refinements.get(x, x) for x in roles if x != ArtistRole.PERFORMER}
+        if target := (specific.pop() if len(specific) == 1 else named):
+            refinements[ArtistRole.PERFORMER] = target
+    return refinements
+
+
+def _shown_credits(
+    track_credits: Iterable[Credit], refinements: dict[int, dict[ArtistRole, ArtistRole]]
+) -> list[Credit]:
+    """
+    Return credits with their refined roles, each credit once.
+
+    A performing credit without an instrument gives way to a more specific one of the same
+    performer, which is the same role with an instrument or, for the general performer role,
+    any other performing role.
+
+    :param track_credits: The credits to show.
+    :param refinements: The shown role of each refined stored performing role, by performer.
+    """
+    shown: dict[tuple[str, ArtistRole, str | None], Credit] = {}
+    for x in track_credits:
+        role = x.role
+        # a chorus master who conducts elsewhere would otherwise show as conductor
+        if not x.instrument:
+            role = refinements.get(int(x.artist.item_id), {}).get(x.role, x.role)
+        credit = x if role == x.role else replace(x, role=role)
+        shown.setdefault((credit.artist.item_id, credit.role, credit.instrument), credit)
+
+    def outranked(artist_id: str, role: ArtistRole, instrument: str | None) -> bool:
+        return not instrument and any(
+            other_id == artist_id
+            and (
+                (other_role == role and other_instrument)
+                or (role == ArtistRole.PERFORMER and other_role != role)
+            )
+            for other_id, other_role, other_instrument in shown
+            if other_role in PERFORMING_ROLES
+        )
+
+    return [x for key, x in shown.items() if key[1] not in PERFORMING_ROLES or not outranked(*key)]
+
+
+def _name_ensemble_role(name: str) -> ArtistRole | None:
+    """Return the ensemble role the words of a name tell, None when they tell none or several."""
+    words = create_safe_string(re.sub(r"\W", " ", name))
+    if _SOLOISTS_NAME_WORD.search(words):
+        return None
+    named = {role for role, pattern in _ENSEMBLE_NAME_WORDS if pattern.search(words)}
+    return named.pop() if len(named) == 1 else None
 
 
 def _recording_count(performances: list[_Performance], performer_id: int | None) -> int:
