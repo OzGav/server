@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from music_assistant_models.enums import ImageType, MediaType
 from music_assistant_models.helpers import set_global_cache_values
 from music_assistant_models.media_items import (
@@ -18,6 +19,7 @@ from music_assistant_models.media_items.metadata import LifeSpan
 from music_assistant_models.unique_list import UniqueList
 
 from music_assistant.controllers.music.helpers import (
+    instrument_label,
     merge_metadata,
     metadata_for_update,
     preferred_thumb,
@@ -241,3 +243,33 @@ def test_metadata_for_update_drops_unlinked_sources_images() -> None:
         update_mappings=[_source("subsonic_b")],
     )
     assert [image.path for image in result.images or ()] == ["b.jpg"]
+
+
+@pytest.mark.parametrize(
+    ("instrument", "artist_name", "expected"),
+    [
+        ("harpsichord", "Pinnock", "harpsichord"),
+        ("piano", "Pianist", "piano"),
+        ("harpsichord", "Pianist", "harpsichord"),
+        ("violin", "Soloist", "violin"),
+        ("string quartet", "Brodsky Quartet", ""),
+        ("String Quartet", "brodsky quartet", ""),
+        ("quartet", "Hagen-Quartett", "quartet"),
+        ("quartet", "Hagen-Quartet", ""),
+        ("tenor vocals", "Luciano Pavarotti", "tenor"),
+        ("Tenor  Vocals", "Luciano Pavarotti", "Tenor"),
+        ("vocals", "Cecilia Bartoli", ""),
+        ("VOCALS", "Cecilia Bartoli", ""),
+        ("tenorvocals", "Luciano Pavarotti", "tenorvocals"),
+        ("vocals ensemble", "The Sixteen", "vocals ensemble"),
+        ("piano trío", "Beaux Arts Trio", ""),
+        ("piano trio", "Trío Wanderer", ""),
+        ("guitar", "Los Ángeles Guitar Quartet", ""),
+        ("orchestra", "Orchestre Révolutionnaire et Romantique", "orchestra"),
+        (None, "Pinnock", ""),
+        ("", "Pinnock", ""),
+    ],
+)
+def test_instrument_label(instrument: str | None, artist_name: str, expected: str) -> None:
+    """A voice shows alone and an instrument the artist's name already says shows nothing."""
+    assert instrument_label(instrument, artist_name) == expected

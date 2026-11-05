@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any, Final
 
@@ -36,6 +38,8 @@ if TYPE_CHECKING:
 # search terms shorter than 3 characters
 MIN_FTS_TERM_LENGTH: Final[int] = 3
 
+TRAILING_VOCALS: Final = re.compile(r"\s*\bvocals\Z", re.IGNORECASE | re.ASCII)
+
 
 def search_name_match_clause(
     db_table: str, search_term: str, param_name: str, query_params: dict[str, Any]
@@ -60,6 +64,21 @@ def search_name_match_clause(
         f"{db_table}.item_id IN "
         f"(SELECT rowid FROM {db_table}_fts WHERE {db_table}_fts MATCH :{param_name})"
     )
+
+
+def instrument_label(instrument: str | None, artist_name: str) -> str:
+    """
+    Return the instrument of a credit as shown after the name of its artist.
+
+    A voice shows alone, such as "tenor" for "tenor vocals". Empty for plain vocals and when
+    the name already says it, such as "string quartet" for the Brodsky Quartet.
+
+    :param instrument: The instrument of the credit.
+    :param artist_name: The name of the credited artist.
+    """
+    label = TRAILING_VOCALS.sub("", instrument or "").strip()
+    words = _words(label)
+    return "" if words and words[-1] in _words(artist_name) else label
 
 
 def sort_search_result[SortItemT: MediaItemType | ItemMapping](
@@ -378,3 +397,15 @@ def fill_track_from_recording(track: Track, recording: MusicBrainzRecording) -> 
         if is_valid_isrc(isrc):
             track.add_external_id(ExternalID.ISRC, isrc)
     return track.external_ids != known_ids
+
+
+def _words(text: str) -> list[str]:
+    """
+    Return the words of a text, lowercased and without accents.
+
+    Punctuation splits words, as in the frontend, where create_safe_string drops it.
+    """
+    folded = "".join(
+        x for x in unicodedata.normalize("NFD", text) if not unicodedata.combining(x)
+    ).lower()
+    return re.findall(r"[^\W_]+", folded)
