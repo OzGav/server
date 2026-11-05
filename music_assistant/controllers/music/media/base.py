@@ -794,6 +794,38 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             )
         return sort_field, sort_direction
 
+    @final
+    def visible_library_clause(self, query_params: dict[str, Any]) -> str:
+        """
+        Return the SQL condition that keeps the library items the calling user sees in listings.
+
+        These are the items in the library of a music source the user may see, as listed by
+        `library_items`. For callers that build their own query on this media type's table.
+
+        :param query_params: Query params dict; the condition's bound params are added to it.
+        """
+        return self._provider_filter_clause(
+            query_params, self._ensure_provider_filter(None), in_library_only=True
+        )
+
+    @final
+    def favorite_filter_clause(self, query_params: dict[str, Any], favorite: bool) -> str:
+        """
+        Return the SQL clause that restricts items to the calling user's likes or dislikes.
+
+        :param query_params: Query params dict; the clause's bound params are added to it.
+        :param favorite: True to match the user's likes, False to match their dislikes.
+        """
+        query_params["favorite_user_id"] = self._favorite_user_id()
+        query_params["favorite_media_type"] = self.media_type.value
+        query_params["favorite"] = favorite
+        # the user's set is small next to the table, so drive the query from it
+        return (
+            f"{self.db_table}.item_id IN (SELECT item_id FROM {DB_TABLE_FAVORITES} "
+            "WHERE user_id = :favorite_user_id AND media_type = :favorite_media_type "
+            "AND favorite = :favorite)"
+        )
+
     async def iter_library_items(
         self,
         favorite: bool | None = None,
@@ -2867,24 +2899,6 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         )
 
     @final
-    def _favorite_filter_clause(self, query_params: dict[str, Any], favorite: bool) -> str:
-        """
-        Return the SQL clause that restricts items to the calling user's likes or dislikes.
-
-        :param query_params: Query params dict; the clause's bound params are added to it.
-        :param favorite: True to match the user's likes, False to match their dislikes.
-        """
-        query_params["favorite_user_id"] = self._favorite_user_id()
-        query_params["favorite_media_type"] = self.media_type.value
-        query_params["favorite"] = favorite
-        # the user's set is small next to the table, so drive the query from it
-        return (
-            f"{self.db_table}.item_id IN (SELECT item_id FROM {DB_TABLE_FAVORITES} "
-            "WHERE user_id = :favorite_user_id AND media_type = :favorite_media_type "
-            "AND favorite = :favorite)"
-        )
-
-    @final
     def _favorite_sort_sql(self, direction: SortDirection | None) -> str:
         """Return the ORDER BY clause for a sort on the calling user's favorite moment."""
         timestamp = (
@@ -3154,7 +3168,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             query_parts.append(self._search_filter_clause(search, query_params))
         # handle favorite filter
         if favorite is not None:
-            query_parts.append(self._favorite_filter_clause(query_params, favorite))
+            query_parts.append(self.favorite_filter_clause(query_params, favorite))
         # handle played_only filter
         if played_only:
             query_parts.append(f"{self.db_table}.last_played > 0")
