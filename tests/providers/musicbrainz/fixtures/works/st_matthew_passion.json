@@ -1,0 +1,170 @@
+{
+  "disambiguation": "",
+  "attributes": [],
+  "title": "Matthäus-Passion, BWV 244",
+  "type": "Oratorio",
+  "type-id": "308d1000-e97c-3629-b954-68505cf0aa30",
+  "languages": [
+    "deu"
+  ],
+  "relations": [
+    {
+      "type": "composer",
+      "target-type": "artist",
+      "source-credit": "",
+      "begin": null,
+      "target-credit": "",
+      "direction": "backward",
+      "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+      "attribute-values": {},
+      "ended": true,
+      "attribute-ids": {},
+      "attributes": [],
+      "end": "1727",
+      "artist": {
+        "sort-name": "Bach, Johann Sebastian",
+        "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c",
+        "type": "Person",
+        "name": "Johann Sebastian Bach",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+        "country": "DE",
+        "disambiguation": "German Baroque period composer & musician"
+      }
+    },
+    {
+      "target-type": "artist",
+      "source-credit": "",
+      "begin": null,
+      "type": "librettist",
+      "attributes": [],
+      "end": null,
+      "artist": {
+        "country": "DE",
+        "disambiguation": "",
+        "sort-name": "Henrici, Christian Friedrich",
+        "id": "3c5cad3e-4f4c-4e86-8139-a49aac363f95",
+        "type": "Person",
+        "name": "Christian Friedrich Henrici",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "direction": "backward",
+      "target-credit": "Picander",
+      "ended": false,
+      "attribute-values": {},
+      "type-id": "7474ab81-486f-40b5-8685-3a4f8ea624cb",
+      "attribute-ids": {}
+    },
+    {
+      "target-type": "series",
+      "begin": null,
+      "source-credit": "",
+      "type": "part of",
+      "attributes": [
+        "number"
+      ],
+      "end": null,
+      "attribute-values": {
+        "number": "BWV 244"
+      },
+      "ended": false,
+      "type-id": "b0d44366-cdf0-3acb-bee6-0f65a77a6ef0",
+      "direction": "backward",
+      "target-credit": "",
+      "ordering-key": 139,
+      "series": {
+        "type": "Catalogue",
+        "name": "Bach-Werke-Verzeichnis",
+        "disambiguation": "",
+        "type-id": "49482ff0-fc9e-3b8c-a2d0-30e84d9df002",
+        "id": "d977f7fd-96c9-4e3e-83b5-eb484a9e6582"
+      },
+      "attribute-ids": {
+        "number": "a59c5830-5ec7-38fe-9a21-c7ea54f6650a"
+      }
+    },
+    {
+      "type": "arrangement",
+      "target-type": "work",
+      "source-credit": "",
+      "begin": null,
+      "direction": "forward",
+      "target-credit": "",
+      "ended": false,
+      "attribute-values": {},
+      "type-id": "51975ed8-bbfa-486b-9f28-5947f4370299",
+      "attribute-ids": {},
+      "attributes": [],
+      "end": null,
+      "work": {
+        "title": "St Matthew Passion, BWV 244",
+        "disambiguation": "1841 arrangement by Mendelssohn",
+        "attributes": [],
+        "languages": [],
+        "language": null,
+        "iswcs": [],
+        "id": "f7fbd2e9-dbb1-463a-b624-fbb31ddb7002",
+        "type": "Oratorio",
+        "type-id": "308d1000-e97c-3629-b954-68505cf0aa30"
+      }
+    },
+    {
+      "type": "parts",
+      "source-credit": "",
+      "begin": null,
+      "target-type": "work",
+      "attribute-ids": {},
+      "ordering-key": 1,
+      "target-credit": "",
+      "direction": "forward",
+      "attribute-values": {},
+      "ended": false,
+      "type-id": "ca8d3642-ce5f-49f8-91f2-125d72524e6a",
+      "end": null,
+      "work": {
+        "title": "Matthäus-Passion, BWV 244: Teil I",
+        "attributes": [],
+        "disambiguation": "",
+        "iswcs": [],
+        "id": "f04b42df-7251-4d86-a5ee-67cfa49580d1",
+        "language": "deu",
+        "languages": [
+          "deu"
+        ],
+        "type-id": null,
+        "type": null
+      },
+      "attributes": []
+    },
+    {
+      "type": "parts",
+      "source-credit": "",
+      "begin": null,
+      "target-type": "work",
+      "attribute-ids": {},
+      "ordering-key": 2,
+      "target-credit": "",
+      "direction": "forward",
+      "attribute-values": {},
+      "type-id": "ca8d3642-ce5f-49f8-91f2-125d72524e6a",
+      "ended": false,
+      "work": {
+        "type": null,
+        "type-id": null,
+        "languages": [
+          "deu"
+        ],
+        "language": "deu",
+        "id": "8d3c81cf-ea5e-4189-8a98-1551ddaa7bfe",
+        "iswcs": [],
+        "disambiguation": "",
+        "attributes": [],
+        "title": "Matthäus-Passion, BWV 244: Teil II"
+      },
+      "end": null,
+      "attributes": []
+    }
+  ],
+  "id": "45afb3b2-18ac-4187-bc72-beb1b1c194ba",
+  "iswcs": [],
+  "language": "deu"
+}

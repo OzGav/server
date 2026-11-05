@@ -110,6 +110,9 @@ MUSICBRAINZ_LINK_ITEM_TIMEOUT = 60
 # by the hosts in helpers/uri.py
 MUSICBRAINZ_LINK_DOMAINS = ("spotify", "deezer", "apple_music", "tidal", "qobuz", "ytmusic")
 
+# how many levels of parent works are followed up to a work's top-level work on MusicBrainz
+MAX_MUSICBRAINZ_WORK_DEPTH = 4
+
 CONF_THUMB_CACHE_MAX_SIZE = "thumb_cache_max_size"
 
 DEFAULT_THUMB_CACHE_MAX_SIZE_MB = 500

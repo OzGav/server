@@ -43,6 +43,7 @@ from music_assistant.controllers.metadata.controller import (
     _artists_to_identify_query,
     _relink_query,
     _tracks_to_identify_query,
+    _works_to_enrich_query,
 )
 from music_assistant.controllers.tasks import TasksController
 from music_assistant.controllers.tasks.constants import TASK_UPDATE_TIMER_ID
@@ -60,6 +61,8 @@ NOW = 1_700_000_000
 RELEASE_ID = "5d9c6e8a-1c3b-4f2e-9a7d-2b8c4e6f0a11"
 ARTIST_ID = "a74b1b7f-71a5-4011-9441-d0b5e4122711"
 OLD_ARTIST_ID = "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c33"
+WORK_ID = "3c4b2a1e-8f6d-4e5c-9b7a-1d2e3f4a5b6c"
+PROGRESS = {"albums": 3, "recordings": 2, "works": 1, "composers": 0}
 
 
 @pytest.fixture(autouse=True)
@@ -103,6 +106,7 @@ def _controller(
     loaded_domains: Sequence[str] = (),
     unavailable_domains: Sequence[str] = (),
     stub_link: bool = True,
+    stub_progress: bool = True,
 ) -> MetaDataController:
     """
     Return a bare MetaDataController with its library, config and providers stubbed.
@@ -114,6 +118,7 @@ def _controller(
     :param loaded_domains: Domains with an available music provider instance.
     :param unavailable_domains: Domains whose only music provider instance is unavailable.
     :param stub_link: Whether to replace the per-item link step by a stub.
+    :param stub_progress: Whether to replace the classical link progress counts by a stub.
     """
     ctrl = MetaDataController.__new__(MetaDataController)
     ctrl._corrupt_metadata_rows = {}
@@ -124,7 +129,7 @@ def _controller(
         linking if key == CONF_LINK_PROVIDERS_VIA_MUSICBRAINZ else default
     )
     mass = Mock()
-    for controller in (mass.music.albums, mass.music.artists, mass.music.tracks):
+    for controller in (mass.music.albums, mass.music.artists, mass.music.tracks, mass.music.works):
         controller.get_library_items_by_query = AsyncMock(return_value=[])
         controller.update_item_in_library = AsyncMock()
     mass.music.active_sync_tasks = []
@@ -139,6 +144,10 @@ def _controller(
     mass.music.get_provider_instances = _provider_instances(loaded_domains, unavailable_domains)
     mass.get_provider = Mock(return_value=musicbrainz or _musicbrainz())
     ctrl.mass = mass
+    if stub_progress:
+        ctrl.get_classical_link_progress = AsyncMock(  # type: ignore[method-assign]
+            return_value=PROGRESS
+        )
     if stub_link:
         ctrl.link_item_to_musicbrainz = AsyncMock()  # type: ignore[method-assign]
     return ctrl
@@ -170,6 +179,7 @@ def _queue(
     albums: Sequence[Mock] = (),
     artists: Sequence[Mock] = (),
     tracks: Sequence[Mock] = (),
+    works: Sequence[Mock] = (),
     relink_albums: Sequence[Mock] = (),
     relink_artists: Sequence[Mock] = (),
 ) -> list[str]:
@@ -195,6 +205,7 @@ def _queue(
     music.albums.get_library_items_by_query = _answer("albums", albums, relink_albums)
     music.artists.get_library_items_by_query = _answer("artists", artists, relink_artists)
     music.tracks.get_library_items_by_query = _answer("tracks", tracks, ())
+    music.works.get_library_items_by_query = _answer("works", works, ())
     return queried
 
 
@@ -239,19 +250,20 @@ def _provider_instances(loaded: Sequence[str] = (), unavailable: Sequence[str] =
 
 
 async def test_link_run_queries_the_phases_in_order_newest_first() -> None:
-    """Albums, then artists, then tracks are selected by their queries, newest first."""
+    """Each phase selects its items by its own query, newest first."""
     ctrl = _controller()
     queried = _queue(ctrl)
 
     with patch(f"{_CONTROLLER}.time", return_value=float(NOW)):
         await ctrl._link_library_to_musicbrainz()
 
-    assert queried == ["albums", "artists", "tracks"]
+    assert queried == ["albums", "artists", "tracks", "works"]
     music = _mass(ctrl).music
     for controller, query, params in (
         (music.albums, _albums_to_identify_query(), {"stale": NOW - REFRESH_INTERVAL}),
         (music.artists, _artists_to_identify_query(), {}),
         (music.tracks, _tracks_to_identify_query(), {}),
+        (music.works, _works_to_enrich_query(), {}),
     ):
         controller.get_library_items_by_query.assert_awaited_once_with(
             limit=MUSICBRAINZ_LINK_BATCH_SIZE,
@@ -288,6 +300,58 @@ async def test_link_run_with_an_empty_queue_is_a_noop() -> None:
     progress.assert_called_once_with(100, "Processed 0 item(s)")
     assert ctrl._musicbrainz_link_summary is not None
     assert ctrl._musicbrainz_link_summary["processed"] == {}
+
+
+async def test_link_run_signals_the_classical_link_progress_once_when_it_ends() -> None:
+    """The counts are read and sent once, after the last item of the run."""
+    ctrl = _controller()
+    _queue(ctrl, albums=_albums(3))
+
+    await ctrl._link_library_to_musicbrainz()
+
+    _mass(ctrl).signal_event.assert_called_once_with(
+        EventType.CLASSICAL_LINK_PROGRESS, data=PROGRESS
+    )
+    cast("AsyncMock", ctrl.get_classical_link_progress).assert_awaited_once()
+    assert _linked(ctrl).await_count == 3
+
+
+async def test_link_run_signals_the_classical_link_progress_when_a_run_is_empty() -> None:
+    """A run with nothing to identify still ends with the current counts."""
+    ctrl = _controller()
+
+    await ctrl._link_library_to_musicbrainz()
+
+    _mass(ctrl).signal_event.assert_called_once_with(
+        EventType.CLASSICAL_LINK_PROGRESS, data=PROGRESS
+    )
+
+
+async def test_link_run_signals_the_classical_link_progress_after_a_rate_limit_stop() -> None:
+    """A run that stops on the MusicBrainz rate limit still sends the counts, once."""
+    ctrl = _controller(musicbrainz=_musicbrainz(rate_limited=True))
+    _queue(ctrl, albums=_albums(2))
+
+    await ctrl._link_library_to_musicbrainz()
+
+    _linked(ctrl).assert_not_awaited()
+    _mass(ctrl).signal_event.assert_called_once_with(
+        EventType.CLASSICAL_LINK_PROGRESS, data=PROGRESS
+    )
+
+
+async def test_link_run_that_is_skipped_does_not_signal_the_classical_link_progress() -> None:
+    """Without the provider, with linking off or during a sync, no event is sent."""
+    missing_provider = _controller()
+    _mass(missing_provider).get_provider = Mock(return_value=None)
+    linking_off = _controller(linking=False)
+    syncing = _controller()
+    _mass(syncing).music.active_sync_tasks = [Mock()]
+
+    for ctrl in (missing_provider, linking_off, syncing):
+        await ctrl._link_library_to_musicbrainz()
+        _mass(ctrl).signal_event.assert_not_called()
+        cast("AsyncMock", ctrl.get_classical_link_progress).assert_not_awaited()
 
 
 async def test_link_run_summarizes_what_it_found_and_linked() -> None:
@@ -496,6 +560,7 @@ async def test_link_run_relinks_for_a_provider_loaded_since_the_previous_run() -
         "relink artists spotify",
         "relink albums tidal",
         "relink artists tidal",
+        "works",
     ]
     relink_calls = [
         call.kwargs
@@ -719,14 +784,30 @@ async def test_link_item_persists_a_track() -> None:
 async def test_diagnostics_report_the_last_run_and_the_pending_counts() -> None:
     """Diagnostics carry the last run summary and how many items each phase still has."""
     ctrl = _controller()
-    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[3, 2, 1])
+    _mass(ctrl).music.database.get_count_from_query = AsyncMock(side_effect=[4, 3, 2, 1])
 
     assert await ctrl.get_diagnostics() == {
         "musicbrainz_link": {
             "last_run": None,
-            "pending": {"albums": 3, "artists": 2, "tracks": 1},
+            "pending": {"albums": 4, "artists": 3, "tracks": 2, "works": 1},
         }
     }
+
+
+@pytest.mark.parametrize(("linking", "musicbrainz"), [(True, None), (False, _musicbrainz())])
+async def test_classical_link_progress_is_zero_while_nothing_is_looked_up(
+    linking: bool, musicbrainz: Mock | None
+) -> None:
+    """Without the MusicBrainz provider or with linking disabled, nothing is left to look up."""
+    ctrl = _controller(linking=linking, stub_progress=False)
+    _mass(ctrl).get_provider = Mock(return_value=musicbrainz)
+    _mass(ctrl).music.database.get_count_from_query = AsyncMock(return_value=5)
+
+    assert await ctrl.get_classical_link_progress() == {
+        "albums": 0,
+        "works": 0,
+    }
+    _mass(ctrl).music.database.get_count_from_query.assert_not_awaited()
 
 
 # --------------------------------------------------------------------------- #
@@ -834,7 +915,7 @@ async def test_link_run_selects_albums_by_their_lookup_marker(mass: MusicAssista
     assert diagnostics is not None
     assert diagnostics["musicbrainz_link"] == {
         "last_run": None,
-        "pending": {"albums": 2, "artists": 0, "tracks": 0},
+        "pending": {"albums": 2, "artists": 0, "tracks": 0, "works": 0},
     }
 
     assert await _linked_ids(mass) == {never.item_id, stale_unknown.item_id}

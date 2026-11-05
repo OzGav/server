@@ -13,6 +13,7 @@ from music_assistant_models.enums import (
     ExternalID,
     ImageType,
     MediaType,
+    Period,
     ProviderFeature,
 )
 from music_assistant_models.errors import (
@@ -44,6 +45,7 @@ from music_assistant.controllers.music.helpers import fill_track_from_recording
 from music_assistant.controllers.music.listing_cache import Listing
 from music_assistant.providers.musicbrainz.models import (
     MusicBrainzArtist,
+    MusicBrainzLifeSpan,
     MusicBrainzRecording,
     MusicBrainzRelation,
     MusicBrainzRelease,
@@ -1877,3 +1879,119 @@ async def test_track_identity_with_linking_disabled_fills_ids_but_links_nothing(
     assert (ExternalID.ISRC, "GBSTK0700001") in track.external_ids
     assert track.metadata.last_musicbrainz_lookup is not None
     _mass(enrichment).music.tracks.link_musicbrainz_mappings.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("is_composer", "period"), [(True, Period.MODERN), (False, None)])
+async def test_artist_identity_gives_an_artist_their_life_span_and_a_composer_their_period(
+    is_composer: bool, period: Period | None
+) -> None:
+    """
+    An artist whose id came from the tags takes their life span from the link.
+
+    A classical composer also takes the period of their life span.
+    """
+    musicbrainz = _musicbrainz(
+        artist=MusicBrainzArtist(
+            id=OTHER_MBID,
+            name="Dmitri Shostakovich",
+            sort_name="Shostakovich, Dmitri",
+            type="Person",
+            life_span=MusicBrainzLifeSpan(begin="1906-09-25", end="1975-08-09", ended=True),
+        )
+    )
+    enrichment = _enrichment(musicbrainz)
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": int(is_composer)}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Dmitri Shostakovich",
+        sort_name="Shostakovich, Dmitri",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        is_classical=is_composer,
+    )
+
+    await enrichment._link_artist_to_musicbrainz(artist)
+
+    musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
+    assert artist.metadata.life_span == LifeSpan(begin="1906-09-25", end="1975-08-09", ended=True)
+    assert artist.period == period
+
+
+# --------------------------------------------------------------------------- #
+#  composer periods                                                            #
+# --------------------------------------------------------------------------- #
+
+
+async def _refresh_composer(
+    life_span: LifeSpan,
+    *,
+    entity_type: ArtistEntityType = ArtistEntityType.PERSON,
+    is_classical_composer: bool = True,
+    period: Period | None = None,
+) -> Artist:
+    """Refresh an artist whose metadata provider reports the given life span and return it."""
+    # is_classical_composer is whether the library holds the artist as a classical composer
+    enrichment = _enrichment()
+    provider = _metadata_provider("musicbrainz", ProviderFeature.ARTIST_METADATA)
+    provider.get_artist_metadata = AsyncMock(
+        return_value=MediaItemMetadata(artist_entity_type=entity_type, life_span=life_span)
+    )
+    enrichment.providers = [provider]  # type: ignore[misc]
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": int(is_classical_composer)}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Johann Sebastian Bach",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, "24f1766e-9635-4d58-a4d4-9413f9f98a4c")},
+        period=period,
+    )
+    await enrichment._update_artist_metadata(artist, force_refresh=True)
+    _mass(enrichment).music.artists.update_item_in_library.assert_awaited_once_with("1", artist)
+    return artist
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("life_span", "expected"),
+    [
+        (LifeSpan(begin="1685-03-21", end="1750-07-28", ended=True), Period.BAROQUE),
+        (LifeSpan(begin="1450", ended=True), None),
+        (LifeSpan(end="1750", ended=True), None),
+    ],
+)
+async def test_artist_refresh_gives_a_composer_the_period_of_their_life_span(
+    life_span: LifeSpan, expected: Period | None
+) -> None:
+    """A composer gets a period from their dates; without a birth or known death year, none."""
+    artist = await _refresh_composer(life_span)
+
+    assert artist.period == expected
+
+
+@pytest.mark.asyncio
+async def test_artist_refresh_keeps_the_period_of_the_tags() -> None:
+    """A period the artist already has, such as one from the genre tags, is kept."""
+    artist = await _refresh_composer(
+        LifeSpan(begin="1685", end="1750", ended=True), period=Period.ROMANTIC
+    )
+
+    assert artist.period == Period.ROMANTIC
+
+
+@pytest.mark.asyncio
+async def test_artist_refresh_gives_no_period_to_other_artists() -> None:
+    """A group gets no period, even one the library holds as a classical composer."""
+    artist = await _refresh_composer(
+        LifeSpan(begin="1685", end="1750", ended=True),
+        entity_type=ArtistEntityType.GROUP,
+        is_classical_composer=True,
+    )
+
+    assert artist.period is None

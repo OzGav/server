@@ -127,6 +127,7 @@ async def test_commands_are_registered(library: _Library) -> None:
         "work_filters",
         "recordings",
         "other_tracks",
+        "link_progress",
     ):
         handler = library.mass.command_handlers[f"music/classical/{command}"]
         assert handler.required_scope == Scope.LIBRARY_READ

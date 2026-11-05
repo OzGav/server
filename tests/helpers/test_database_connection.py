@@ -350,6 +350,14 @@ async def test_update_returns_none(db_with_table: DatabaseConnection) -> None:
     assert row["name"] == "new"
 
 
+async def test_execute_write_returns_changed_row_count(db_with_table: DatabaseConnection) -> None:
+    """Test that execute_write returns the number of rows the statement changed."""
+    await db_with_table.insert("items", {"name": "a", "plays": 1})
+    await db_with_table.insert("items", {"name": "b", "plays": 1})
+    assert await db_with_table.execute_write("UPDATE items SET plays = 2 WHERE plays = 1") == 2
+    assert await db_with_table.execute_write("DELETE FROM items WHERE name = 'missing'") == 0
+
+
 async def test_upsert_many(db_with_table: DatabaseConnection) -> None:
     """Test that upsert_many inserts/updates multiple rows with a single commit."""
     commits = _count_commits(db_with_table)

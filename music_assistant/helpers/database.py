@@ -477,7 +477,7 @@ class DatabaseConnection:
         """Execute command on the database."""
         return await self._db.execute(query, values)
 
-    async def execute_write(self, query: str, values: dict[str, Any] | None = None) -> None:
+    async def execute_write(self, query: str, values: dict[str, Any] | None = None) -> int:
         """
         Execute a hand-written write statement and commit it.
 
@@ -487,9 +487,11 @@ class DatabaseConnection:
 
         :param query: The statement to execute.
         :param values: The values to bind to the statement's named parameters.
+        :return: The number of rows the statement changed.
         """
-        await self._db.execute(query, values)
+        cursor = await self._db.execute(query, values)
         await self._maybe_commit()
+        return int(cursor.rowcount)
 
     async def commit(self) -> None:
         """Commit the current transaction."""
