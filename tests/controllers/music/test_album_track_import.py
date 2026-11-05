@@ -169,6 +169,7 @@ async def test_missing_album_link_is_backfilled() -> None:
         provider_mappings=set(),
         has_album=False,
         has_artists=True,
+        external_ids=set(),
     )
     mass = _build_mass(sync_details)
     provider = _build_provider(mass)

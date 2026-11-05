@@ -747,6 +747,11 @@ def compare_track_title(base_title: str, compare_title: str) -> bool:
     return compare_strings(base_search_title, compare_search_title, strict=True)
 
 
+def track_durations_agree(base_track: Track, compare_track: Track) -> bool:
+    """Return whether two tracks may be one recording by duration, an unknown duration passing."""
+    return not _track_durations_conflict(base_track, compare_track, _ISRC_DURATION_TOLERANCE)
+
+
 def compare_playlist(
     base_item: Playlist | ItemMapping,
     compare_item: Playlist | ItemMapping,

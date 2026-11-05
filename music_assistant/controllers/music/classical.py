@@ -21,6 +21,7 @@ from music_assistant_models.enums import (
     ImageType,
     ListingType,
     MediaType,
+    Period,
     SortDirection,
     SortField,
 )
@@ -168,7 +169,8 @@ _SECTION_LABEL: Final[re.Pattern[str]] = re.compile(r"\b[^\W\d_]+\s(?:[IVXLC]+|\
 # the work tracks with the albums they are on, one row per album
 WORK_TRACKS_QUERY: Final[str] = f"""
     SELECT t.item_id AS track_id, t.work_id, t.movement_number, t.movement_name,
-        t.search_name,
+        t.search_name, CASE WHEN json_valid(t.metadata)
+            THEN json_extract(t.metadata, '$.recording_year') END AS recording_year,
         (SELECT MIN(e.external_id) FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} e
             WHERE e.media_type = '{MediaType.TRACK.value}' AND e.item_id = t.item_id
             AND e.external_id_type = '{ExternalID.MB_RECORDING.value}') AS mb_recording,
@@ -395,13 +397,16 @@ class ClassicalController:
             ids = await self._work_ids(sort_key, limit=limit, offset=offset, **filters)
             performances = await self._listed_work_performances(ids)
         part_names = await self._part_names(ids)
+        works = await self._items(self.mass.music.works, ids)
+        periods = await self._composer_periods(works)
         return [
             ClassicalWorkEntry(
                 work=_with_title_work_type(cast("WorkSummary", work)),
                 recording_count=_recording_count(performances[int(work.item_id)], performer),
                 part_names=part_names[int(work.item_id)],
+                period=periods.get(int(work.item_id)),
             )
-            for work in await self._items(self.mass.music.works, ids)
+            for work in works
         ]
 
     async def work(self, item_id: str) -> Work:
@@ -632,8 +637,9 @@ class ClassicalController:
         Get how many classical items MusicBrainz linking still has to check.
 
         While any count is above zero, tracks under Other tracks may still move into their works.
-        ``albums`` counts the albums still to identify, ``works`` the works still to look up.
-        All zero means linking is done, or is not running.
+        ``albums`` counts the albums still to identify, ``recordings`` the tracks whose
+        recording is still to read, ``works`` the works still to look up. All zero means
+        linking is done, or is not running.
         """
         return await self.mass.metadata.get_classical_link_progress()
 
@@ -915,6 +921,24 @@ class ClassicalController:
         ):
             names[int(row["parent_work_id"])].append(row["name"])
         return names
+
+    async def _composer_periods(self, works: Sequence[Work]) -> dict[int, Period]:
+        """Return the period of the first composer of the given works, for those with one."""
+        composer_ids = {int(x.item_id): int(x.composers[0].item_id) for x in works if x.composers}
+        if not composer_ids:
+            return {}
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"SELECT item_id, period FROM {DB_TABLE_ARTISTS} "
+            "WHERE item_id IN :artist_ids AND period IS NOT NULL",
+            {"artist_ids": list(set(composer_ids.values()))},
+            limit=0,
+        )
+        periods = {int(row["item_id"]): Period(row["period"]) for row in rows}
+        return {
+            work_id: periods[artist_id]
+            for work_id, artist_id in composer_ids.items()
+            if artist_id in periods
+        }
 
     async def _movements(self, work_ids: Sequence[int]) -> dict[int, _Movements]:
         """
@@ -1214,6 +1238,7 @@ class ClassicalController:
                     or create_safe_string(row["movement_name"] or "", True, True)
                     or row["search_name"],
                     mb_recording=(row["mb_recording"] or "").casefold() or None,
+                    recording_year=row["recording_year"],
                 )
                 work_tracks[int(row["work_id"])].append(track)
             if row["album_id"] is not None:
@@ -1268,6 +1293,7 @@ class _WorkTrack:
     track_id: int
     movement: int | str
     mb_recording: str | None
+    recording_year: int | None = None
     performers: set[int] = field(default_factory=set)
     leaders: set[int] = field(default_factory=set)
     directors: set[int] = field(default_factory=set)
@@ -1275,8 +1301,10 @@ class _WorkTrack:
 
     @property
     def year(self) -> int | None:
-        """Return the earliest year of the albums the track is on."""
-        return min((x.year for x in self.appearances if x.year), default=None)
+        """Return the year the track was recorded, else the earliest year of its albums."""
+        return self.recording_year or min(
+            (x.year for x in self.appearances if x.year), default=None
+        )
 
     @property
     def performance_key(self) -> str:
