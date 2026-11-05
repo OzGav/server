@@ -4,10 +4,12 @@ Composer credit clean-up of classical tracks for the Music controller.
 A composer credited joined with others, as in "Chopin & X", is credited on its own when the
 joined name starts with the name of one confirmed library composer. A composer a label credits
 as artist next to a placeholder composer, as in "Dr, Composer", becomes the composer of its track.
+The library tracks stored before a composer was confirmed are split once it is.
 """
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -15,11 +17,13 @@ from music_assistant_models.enums import ArtistRole
 from music_assistant_models.media_items import Credit, UniqueList, Work
 
 from music_assistant.constants import (
+    DB_TABLE_ARTISTS,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACK_CREDITS,
+    DB_TABLE_TRACKS,
     DB_TABLE_WORK_ARTISTS,
 )
-from music_assistant.helpers.compare import is_named_by
+from music_assistant.helpers.compare import compare_strings, is_named_by
 from music_assistant.helpers.credit_roles import PERFORMING_ROLES, role_word
 from music_assistant.helpers.util import is_placeholder_artist
 from music_assistant.helpers.work_titles import joined_composer_name
@@ -147,6 +151,70 @@ async def remove_joined_artists(
         )
         if work_id:
             await mass.music.database.delete(DB_TABLE_WORK_ARTISTS, {"work_id": work_id, **match})
+
+
+async def split_joined_composer_credits(
+    mass: MusicAssistant, composer: Artist, names: set[str]
+) -> None:
+    """
+    Credit a confirmed composer on the library tracks crediting it joined with others.
+
+    A track crediting a joined composer name such as "Frédéric Chopin & Sarah Ainsworth" is
+    split when the name starts with one of the composer's names, its main artist included.
+    A name another confirmed composer also has stays as it is.
+
+    :param mass: The MusicAssistant instance.
+    :param composer: The library composer, with its MusicBrainz id.
+    :param names: The composer's MusicBrainz names, such as "Frédéric Chopin".
+    """
+
+    def names_composer(candidate: str) -> bool:
+        return is_named_by(candidate, composer) or any(compare_strings(candidate, x) for x in names)
+
+    rows = await mass.music.database.get_rows_from_query(
+        "SELECT DISTINCT ta.track_id, t.name AS track_name, a.name AS artist_name "
+        f"FROM {DB_TABLE_TRACK_CREDITS} ta "
+        f"JOIN {DB_TABLE_ARTISTS} a ON a.item_id = ta.artist_id "
+        f"JOIN {DB_TABLE_TRACKS} t ON t.item_id = ta.track_id "
+        "WHERE ta.role = :composer AND a.name LIKE '% & %'",
+        {"composer": ArtistRole.COMPOSER.value},
+        limit=0,
+    )
+    track_ids = {
+        row["track_id"]
+        for row in rows
+        if (name := joined_composer_name(row["artist_name"], row["track_name"]))
+        and names_composer(name)
+    }
+    if not track_ids:
+        return
+    others = [
+        x
+        for x in await mass.music.artists.get_library_composers(with_mbid=True)
+        if x.mbid != composer.mbid
+    ]
+    for track_id in track_ids:
+        stored = await mass.music.tracks.get_library_item(track_id)
+        track = deepcopy(stored)
+        joined_names = _replace_joined_composers(
+            track,
+            {
+                name: composer
+                for name, candidate in _joined_composer_candidates(track).items()
+                if names_composer(candidate) and not any(is_named_by(candidate, x) for x in others)
+            },
+        )
+        if not joined_names:
+            continue
+        # removed first, so the re-save sets the composer of its tracks on the work
+        await remove_joined_artists(
+            mass,
+            stored,
+            int(stored.work.item_id) if stored.work else None,
+            joined_names,
+            main_artists=any(x.name not in joined_names for x in [*stored.artists, *track.artists]),
+        )
+        await mass.music.tracks.update_item_in_library(track_id, track)
 
 
 def _names_placeholder_composer(track: Track) -> bool:

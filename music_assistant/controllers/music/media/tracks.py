@@ -1002,33 +1002,36 @@ class TracksController(MediaControllerBase[Track]):
             merged.add(other.item_id)
         return merged
 
-    async def mark_recording_read(self, track_id: int, recording_year: int | None) -> None:
+    async def mark_recording_read(
+        self, track_id: int, recording_year: int | None, keep_year: bool = False
+    ) -> None:
         """
         Store when a library track's MusicBrainz recording was read, with its recording year.
 
         :param track_id: Library id of the track.
         :param recording_year: The year its recording was made, None when not known.
+        :param keep_year: Keep the stored recording year instead, as no usable recording was found.
         """
+        year = "" if keep_year else ", '$.recording_year', :year"
         await self.mass.music.database.execute_write(
             f"UPDATE {DB_TABLE_TRACKS} SET metadata = json_set(COALESCE(metadata, '{{}}'), "
-            "'$.last_musicbrainz_recording_lookup', :now, '$.recording_year', :year) "
-            "WHERE item_id = :track_id",
+            f"'$.last_musicbrainz_recording_lookup', :now{year}) WHERE item_id = :track_id",
             {"now": int(time.time()), "year": recording_year, "track_id": track_id},
         )
 
     async def set_work(
         self,
         track_id: int,
-        work_id: int,
+        work_id: int | None,
         movement_number: int | None = None,
         movement_name: str | None = None,
         mb_work_id: str | None = None,
     ) -> None:
         """
-        Place a library track on a work as one of its movements.
+        Place a library track on a work as one of its movements, or take it off its work.
 
         :param track_id: Library id of the track.
-        :param work_id: Library id of the work.
+        :param work_id: Library id of the work, None to take the track off its work.
         :param movement_number: The number of the movement the track performs, if any.
         :param movement_name: The name of the movement the track performs, if any.
         :param mb_work_id: The MusicBrainz id of the work the track performs, added to its ids.
@@ -2196,10 +2199,15 @@ class TracksController(MediaControllerBase[Track]):
                 "movement_name": preferred.movement_name or fallback.movement_name,
             },
         )
+        external_ids = update.external_ids if overwrite else cur_item.external_ids
+        if overwrite and from_streaming:
+            # stored work ids came from MusicBrainz, whose recording read again compares them
+            external_ids = {
+                *external_ids,
+                *(x for x in cur_item.external_ids if x[0] == ExternalID.MB_WORK),
+            }
         # update/set external id lookup table
-        await self.set_external_ids(
-            db_id, update.external_ids if overwrite else cur_item.external_ids
-        )
+        await self.set_external_ids(db_id, external_ids)
         # update/set provider_mappings table
         provider_mappings = provider_mappings_for_update(
             cur_item.provider_mappings, update.provider_mappings, overwrite
