@@ -109,6 +109,24 @@ SORT_FIELD_DEFINITIONS: Final[dict[SortField, SortOptionInfo]] = {
         supports_direction=False,
         label_key="original",
     ),
+    SortField.COMPOSER: SortOptionInfo(
+        field=SortField.COMPOSER,
+        supports_direction=True,
+        default_direction=SortDirection.ASC,
+        label_key="composer",
+    ),
+    SortField.RECORDING_COUNT: SortOptionInfo(
+        field=SortField.RECORDING_COUNT,
+        supports_direction=True,
+        default_direction=SortDirection.DESC,
+        label_key="recording_count",
+    ),
+    SortField.WORK_COUNT: SortOptionInfo(
+        field=SortField.WORK_COUNT,
+        supports_direction=True,
+        default_direction=SortDirection.DESC,
+        label_key="work_count",
+    ),
 }
 
 # the sort fields every library listing offers, the listing default first
@@ -138,6 +156,11 @@ def _library_sort_options(*own_fields: SortField) -> tuple[SortOptionInfo, ...]:
     )
 
 
+# classical listings keep their years in chronological order
+_OLDEST_YEAR_FIRST: Final[SortOptionInfo] = replace(
+    SORT_FIELD_DEFINITIONS[SortField.YEAR], default_direction=SortDirection.ASC
+)
+
 # the sort options of the library listings, the first one being the listing's default
 _LIBRARY_LISTING_SORT_OPTIONS: Final[dict[ListingType, tuple[SortOptionInfo, ...]]] = {
     ListingType.LIBRARY_ARTISTS: _library_sort_options(),
@@ -148,6 +171,10 @@ _LIBRARY_LISTING_SORT_OPTIONS: Final[dict[ListingType, tuple[SortOptionInfo, ...
     ListingType.LIBRARY_AUDIOBOOKS: _library_sort_options(SortField.DURATION),
     ListingType.LIBRARY_PODCASTS: _library_sort_options(),
     ListingType.LIBRARY_GENRES: _library_sort_options(),
+    # works are not played themselves, so they leave out the shared library fields
+    ListingType.LIBRARY_WORKS: _sort_options(
+        SortField.COMPOSER, SortField.NAME, _OLDEST_YEAR_FIRST
+    ),
 }
 
 # the sort options each listing offers, the first one being the listing's default
@@ -207,6 +234,17 @@ LISTING_SORT_OPTIONS: Final[dict[ListingType, tuple[SortOptionInfo, ...]]] = {
     ListingType.GENRE_ALBUMS: _LIBRARY_LISTING_SORT_OPTIONS[ListingType.LIBRARY_ALBUMS],
     # the order of the folder
     ListingType.BROWSE: _sort_options(SortField.ORIGINAL, SortField.NAME),
+    ListingType.CLASSICAL_COMPOSERS: _sort_options(
+        SortField.SORT_NAME, SortField.NAME, SortField.WORK_COUNT
+    ),
+    ListingType.CLASSICAL_PERFORMERS: _sort_options(SortField.NAME, SortField.RECORDING_COUNT),
+    ListingType.CLASSICAL_WORKS: _sort_options(
+        SortField.COMPOSER, SortField.NAME, _OLDEST_YEAR_FIRST, SortField.RECORDING_COUNT
+    ),
+    # the year of the album a track is listed with
+    ListingType.CLASSICAL_OTHER_TRACKS: _sort_options(
+        SortField.NAME, _OLDEST_YEAR_FIRST, SortField.TIMESTAMP_ADDED
+    ),
 }
 
 # the library listing of each media type

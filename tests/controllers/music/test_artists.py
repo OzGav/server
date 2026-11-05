@@ -6,9 +6,16 @@ import logging
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
-from music_assistant_models.enums import AlbumType, ExternalID, ImageType, ProviderFeature
+from music_assistant_models.enums import (
+    AlbumType,
+    ExternalID,
+    ImageType,
+    Period,
+    ProviderFeature,
+)
 from music_assistant_models.media_items import (
     Album,
     AlbumSummary,
@@ -515,3 +522,32 @@ async def test_library_artist_listings_query_one_instance_per_streaming_domain(
     queried = {call.args[1] for call in provider_listing.await_args_list}
     # one Spotify instance, and both (non-streaming) filesystem instances
     assert queried == {"spotify_1", "filesystem_local_1", "filesystem_local_2"}
+
+
+async def test_artist_overwrite_without_a_period_keeps_it(mass: MusicAssistant) -> None:
+    """A source that has no period for an artist leaves the stored period in place."""
+    name = f"Composer {uuid4().hex[:8]}"
+
+    def _artist(period: Period | None) -> Artist:
+        return Artist(
+            item_id=name,
+            provider="filesystem_local--test",
+            name=name,
+            period=period,
+            provider_mappings={
+                ProviderMapping(
+                    item_id=name,
+                    provider_domain="filesystem_local",
+                    provider_instance="filesystem_local--test",
+                )
+            },
+        )
+
+    await mass.music.artists.add_item_to_library(_artist(Period.BAROQUE))
+    kept = await mass.music.artists.add_item_to_library(_artist(None), overwrite_existing=True)
+    replaced = await mass.music.artists.add_item_to_library(
+        _artist(Period.ROMANTIC), overwrite_existing=True
+    )
+
+    assert kept.period == Period.BAROQUE
+    assert replaced.period == Period.ROMANTIC
