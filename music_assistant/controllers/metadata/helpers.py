@@ -29,7 +29,7 @@ def fill_artist_from_musicbrainz(
     artist: Artist, mb_artist: MusicBrainzArtist, replace: bool = False
 ) -> None:
     """
-    Fill an artist's empty entity type and life span in from its MusicBrainz artist.
+    Fill an artist's empty entity type, life span and country in from its MusicBrainz artist.
 
     A partly known life span is completed with the dates MusicBrainz has.
 
@@ -43,6 +43,8 @@ def fill_artist_from_musicbrainz(
     merge_metadata(
         artist.metadata, MediaItemMetadata(artist_entity_type=entity_type, life_span=life_span)
     )
+    if not artist.metadata.country:
+        artist.metadata.country = mb_artist.country_code
 
 
 def musicbrainz_work_name(mb_work: MusicBrainzWork, language: str) -> str:
