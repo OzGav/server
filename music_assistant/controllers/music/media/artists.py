@@ -45,6 +45,7 @@ from music_assistant.constants import (
     DB_TABLE_ALBUM_TRACKS,
     DB_TABLE_ARTISTS,
     DB_TABLE_AUDIOBOOK_ARTISTS,
+    DB_TABLE_EXTERNAL_ID_LOOKUP,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACK_CREDITS,
@@ -70,6 +71,7 @@ from music_assistant.helpers.compare import (
     compare_track,
 )
 from music_assistant.helpers.database import UNSET
+from music_assistant.helpers.external_ids import external_id_lookup_values
 from music_assistant.helpers.json import serialize_to_json
 from music_assistant.helpers.provider_access import visible_items
 from music_assistant.models.music_provider import (
@@ -1693,6 +1695,19 @@ class ArtistsController(MediaControllerBase[Artist]):
         :param mbid: The MusicBrainz artist id.
         :return: The library id the given artist is found under after the merge.
         """
+        if not await self.mass.music.database.get_rows_from_query(
+            f"SELECT 1 FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} WHERE media_type = :media_type "
+            "AND external_id_type = :external_id_type AND external_id IN :external_ids "
+            "AND item_id != :artist_id",
+            {
+                "media_type": self.media_type.value,
+                "external_id_type": str(ExternalID.MB_ARTIST),
+                "external_ids": external_id_lookup_values(ExternalID.MB_ARTIST, mbid),
+                "artist_id": artist_id,
+            },
+            limit=1,
+        ):
+            return artist_id
         artist_types = {
             int(item.item_id): item.artist_type
             for item in await self.get_library_items_by_external_id(

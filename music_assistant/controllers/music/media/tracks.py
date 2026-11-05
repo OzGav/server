@@ -1613,7 +1613,7 @@ class TracksController(MediaControllerBase[Track]):
                 "search_sort_name": create_safe_string(item.sort_name or "", True, True),
                 "timestamp_added": int(item.date_added.timestamp()) if item.date_added else UNSET,
                 "classical_tag": bool(item.metadata.classical_tag),
-                "work_id": await self.mass.music.works.get_library_work_id(item.work)
+                "work_id": await self.mass.music.works.get_or_add_library_work_id(item.work)
                 if item.work
                 else None,
                 "movement_number": item.movement_number,
@@ -1662,12 +1662,19 @@ class TracksController(MediaControllerBase[Track]):
             and prov.is_streaming_provider
             for x in update_instances
         )
+        # an update from the only provider instance the track is known on (e.g. a renamed
+        # file) carries its complete credits, so they replace the stored ones
+        replace_credits = bool(update_instances) and all(
+            x.provider_instance in update_instances for x in cur_item.provider_mappings
+        )
         cur_item.external_ids.update(update.external_ids)
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
         cur_work_id = int(cur_item.work.item_id) if cur_item.work else None
         new_work_id = (
-            await self.mass.music.works.get_library_work_id(update.work) if update.work else None
+            await self.mass.music.works.get_or_add_library_work_id(update.work)
+            if update.work
+            else None
         )
         # like the artists, a source without a work or movement keeps the stored one
         preferred, fallback = (update, cur_item) if overwrite else (cur_item, update)
@@ -1715,7 +1722,11 @@ class TracksController(MediaControllerBase[Track]):
             db_id, artists, overwrite=overwrite, resolved_artists=resolved_artists
         )
         await self._set_credits(
-            db_id, update.credits, overwrite=overwrite, resolved_artists=resolved_artists
+            db_id,
+            update.credits,
+            overwrite=overwrite,
+            replace=replace_credits,
+            resolved_artists=resolved_artists,
         )
         # update/set track album
         if update.album and set_album:
@@ -1850,14 +1861,16 @@ class TracksController(MediaControllerBase[Track]):
         db_id: int,
         item_credits: Iterable[Credit],
         overwrite: bool = False,
+        replace: bool = False,
         resolved_artists: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """
-        Store the credits of a track other than its main artists, replaced on overwrite.
+        Store the credits of a track other than its main artists, replacing them on request.
 
         :param db_id: Library id of the track.
         :param item_credits: The track's credits; main artist credits are left out.
         :param overwrite: Replace the stored credits, as a refresh from the source does.
+        :param replace: Replace the stored credits, as an update from the only source does.
         :param resolved_artists: Library ids of the artists resolved so far, by provider and item id.
         """
         resolved = {} if resolved_artists is None else resolved_artists
@@ -1869,7 +1882,7 @@ class TracksController(MediaControllerBase[Track]):
         if not rows:
             # a source without credits keeps the stored ones, like an empty artists list does
             return
-        if overwrite:
+        if overwrite or replace:
             await self.mass.music.database.execute_write(
                 f"DELETE FROM {DB_TABLE_TRACK_CREDITS} WHERE track_id = :db_id",
                 {"db_id": db_id},
@@ -1891,9 +1904,11 @@ class TracksController(MediaControllerBase[Track]):
     async def _get_credit_artist_id(
         self, artist: Artist | ItemMapping, resolved_artists: dict[tuple[str, str], int]
     ) -> int:
-        """Return the library ID of a credited artist."""
+        """Return the library ID of a credited artist, merging library artists with its MBID."""
         key = (artist.provider, artist.item_id)
         artist_id = resolved_artists.get(key) or await self._get_library_artist_id(artist)
+        if mbid := artist.mbid:
+            artist_id = await self.mass.music.artists.merge_library_artists_by_mbid(artist_id, mbid)
         resolved_artists[key] = artist_id
         return artist_id
 

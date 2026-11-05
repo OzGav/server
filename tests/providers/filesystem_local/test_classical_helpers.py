@@ -1,0 +1,204 @@
+"""Tests for the helpers that turn classical tags into credits, works and periods."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from music_assistant_models.enums import ArtistRole, Period
+
+from music_assistant.helpers.tags import AudioTags
+from music_assistant.helpers.work_titles import TrackWork
+from music_assistant.providers.filesystem_local.helpers import (
+    parse_track_work,
+    performer_credit_role,
+    period_from_genres,
+)
+
+WORK_ID = "a1b2c3d4-0000-4000-8000-000000000001"
+MOVEMENT_WORK_ID = "a1b2c3d4-0000-4000-8000-000000000002"
+
+
+def _tags(**tags: Any) -> AudioTags:
+    """Create the tags of a track file holding the given tags."""
+    return AudioTags(
+        raw={},
+        sample_rate=44100,
+        channels=2,
+        bits_per_sample=16,
+        format="flac",
+        bit_rate=1411,
+        duration=300.0,
+        tags=tags,
+        has_cover_image=False,
+        filename="track.flac",
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        (None, (ArtistRole.PERFORMER, None)),
+        ("Performer", (ArtistRole.PERFORMER, None)),
+        ("orchestra", (ArtistRole.ORCHESTRA, None)),
+        ("Philharmoniker", (ArtistRole.ORCHESTRA, None)),
+        ("choir vocals", (ArtistRole.CHOIR, None)),
+        ("Chor", (ArtistRole.CHOIR, None)),
+        ("ensemble", (ArtistRole.ENSEMBLE, None)),
+        ("string quartet", (ArtistRole.ENSEMBLE, None)),
+        ("brass band", (ArtistRole.ENSEMBLE, None)),
+        ("conductor", (ArtistRole.CONDUCTOR, None)),
+        # a person leading a choir is not a choir
+        ("chorus master", (ArtistRole.PERFORMER, "chorus master")),
+        ("Choirmaster", (ArtistRole.PERFORMER, "Choirmaster")),
+        ("piano", (ArtistRole.SOLOIST, "piano")),
+        ("vocals", (ArtistRole.SOLOIST, "vocals")),
+        # whole words only, so these instruments are not mistaken for a choir or a band
+        ("harpsichord", (ArtistRole.SOLOIST, "harpsichord")),
+        ("bandoneon", (ArtistRole.SOLOIST, "bandoneon")),
+    ],
+)
+def test_performer_credit_role(role: str | None, expected: tuple[ArtistRole, str | None]) -> None:
+    """A performer's role or instrument text maps to a credit role and instrument."""
+    assert performer_credit_role(role) == expected
+
+
+@pytest.mark.parametrize(
+    ("genres", "expected"),
+    [
+        (["Medieval"], Period.MEDIEVAL),
+        (["Renaissance"], Period.RENAISSANCE),
+        (["Classical", "Baroque"], Period.BAROQUE),
+        (["Classical Period"], Period.CLASSICAL),
+        (["classical era"], Period.CLASSICAL),
+        (["Romantic"], Period.ROMANTIC),
+        (["Modern"], Period.MODERN),
+        (["20th Century"], Period.MODERN),
+        (["Contemporary"], Period.CONTEMPORARY),
+        (["21st Century"], Period.CONTEMPORARY),
+        (["Classical"], None),
+        (["Rock", "Pop"], None),
+        ([], None),
+        (["Romantic", "Classical Period", "Romantic"], Period.ROMANTIC),
+    ],
+)
+def test_period_from_genres(genres: list[str], expected: Period | None) -> None:
+    """Period names among the genres set the period, the plain genre Classical never does."""
+    assert period_from_genres(genres) == expected
+
+
+@pytest.mark.parametrize(
+    ("tags", "expected"),
+    [
+        ({"musicbrainzworkid": [WORK_ID]}, None),
+        (
+            {"work": ["Symphony No. 5"], "musicbrainzworkid": [WORK_ID]},
+            TrackWork("Symphony No. 5", WORK_ID),
+        ),
+        (
+            {
+                "work": ["Symphony No. 5", "Symphony No. 5: I. Allegro con brio"],
+                "movementname": "Allegro con brio",
+            },
+            TrackWork("Symphony No. 5"),
+        ),
+        (
+            {
+                "work": ["Symphony No. 5"],
+                "musicbrainzworkid": [WORK_ID, MOVEMENT_WORK_ID],
+                "movement": "1",
+            },
+            TrackWork("Symphony No. 5"),
+        ),
+        (
+            {
+                "work": ["Pictures at an Exhibition", "Pictures at an Exhibition (orch. Ravel)"],
+                "musicbrainzworkid": [WORK_ID, MOVEMENT_WORK_ID],
+            },
+            TrackWork("Pictures at an Exhibition (orch. Ravel)", MOVEMENT_WORK_ID),
+        ),
+        (
+            {"title": "Symphony No. 9: 4. Presto", "work": ["Symphony No. 5"]},
+            TrackWork("Symphony No. 5"),
+        ),
+    ],
+    ids=[
+        "no work tag",
+        "single work",
+        "movement tags pick the first work",
+        "id left off when the counts differ",
+        "no movement tags pick the last work",
+        "work tag wins over the title",
+    ],
+)
+def test_work_tag_gives_the_work(tags: dict[str, Any], expected: TrackWork | None) -> None:
+    """
+    The work tag gives the work, with its MusicBrainz id when the ids pair up with the works.
+
+    Without a work tag there is no work, even with a work id. With movement tags the track
+    belongs to the first (most general) work, without them to the last (most specific) one.
+    The track title never names the work when there is a work tag.
+    """
+    assert parse_track_work(_tags(**tags)) == expected
+
+
+@pytest.mark.parametrize(
+    ("tags", "expected"),
+    [
+        (
+            {"work": ["Orchestersuite Nr. 3 D-Dur, BWV 1068: II. Air"]},
+            TrackWork("Orchestersuite Nr. 3 D-Dur, BWV 1068", None, "II. Air", 2),
+        ),
+        (
+            {"work": ["Water Music, Suite no. 1 in F major, HWV 348: V. Air. Presto"]},
+            TrackWork("Water Music, Suite no. 1 in F major, HWV 348", None, "V. Air. Presto", 5),
+        ),
+        (
+            {"work": ["Symphony No. 9: 4. Presto"]},
+            TrackWork("Symphony No. 9", None, "4. Presto", 4),
+        ),
+        (
+            {"work": ["Five Mystical Songs: No. 4. The Call"]},
+            TrackWork("Five Mystical Songs", None, "No. 4. The Call", 4),
+        ),
+        (
+            {"work": ["Work: Mvt. 3 Andantino"]},
+            TrackWork("Work", None, "Mvt. 3 Andantino", 3),
+        ),
+        (
+            {"title": "Symphony No. 5 in C minor, Op. 67: I. Allegro con brio"},
+            TrackWork("Symphony No. 5 in C minor, Op. 67", None, "I. Allegro con brio", 1),
+        ),
+        ({"title": "Adagio for Strings"}, None),
+        ({"title": "Messiah: Hallelujah"}, None),
+    ],
+)
+def test_numbered_movement_title_links_the_parent_work(
+    tags: dict[str, Any], expected: TrackWork | None
+) -> None:
+    """
+    A work tag, or without one the track title, naming a numbered movement links the parent work.
+
+    Without a work tag, a title that names no numbered movement gives no work.
+    """
+    assert parse_track_work(_tags(**tags, musicbrainzworkid=[WORK_ID])) == expected
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Te Deum, H. 146: Prélude",  # codespell:ignore
+        "Piano Sonata No. 32 in C minor, op. 111: Maestoso",
+        'Kantate, BWV 147 "Herz und Mund und Tat und Leben": Teil II, X. Choral '
+        '"Jesus bleibet meine Freude"',
+        'Lohengrin, WWV 75: Akt III, Szene I. "Treulich geführt ziehet dahin" (Chor)',  # codespell:ignore
+        "Le nozze di Figaro, K. 492: Act II, No. 14 Terzetto",
+        # Roman numerals beyond XX are not taken for a movement number
+        "Suite: XXI. Finale",
+    ],
+)
+def test_unnumbered_movement_title_stays_as_tagged(title: str) -> None:
+    """A work title that does not name a numbered movement is the work, with its id."""
+    assert parse_track_work(_tags(work=[title], musicbrainzworkid=[WORK_ID])) == TrackWork(
+        title, WORK_ID
+    )
