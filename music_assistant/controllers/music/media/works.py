@@ -35,12 +35,15 @@ from music_assistant.constants import (
 from music_assistant.controllers.music.helpers import search_name_match_clause
 from music_assistant.controllers.music.sorting import get_listing_default_direction
 from music_assistant.helpers.database import UNSET
-from music_assistant.helpers.json import json_loads, serialize_to_json
+from music_assistant.helpers.json import json_dumps, json_loads, serialize_to_json
 
 from .base import SUPPRESS_MEDIA_ITEM_UPDATES, MediaControllerBase
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
+
+    from music_assistant_models.media_items import WorkMovement
+
 
 # the first composer of a work, for sorting works by composer
 FIRST_COMPOSER_SORT_NAME = f"""(SELECT artists.search_sort_name FROM {DB_TABLE_WORK_ARTISTS}
@@ -412,7 +415,7 @@ class WorksController(MediaControllerBase[Work]):
         )
 
     async def update_from_musicbrainz(
-        self, work: Work, replace: bool = False, parent: bool = False
+        self, work: Work, replace: bool = False, parent: bool = False, movements: bool = False
     ) -> None:
         """
         Store a library work filled in from MusicBrainz.
@@ -423,6 +426,7 @@ class WorksController(MediaControllerBase[Work]):
         :param work: The library work, filled in from MusicBrainz.
         :param replace: Replace the stored type, year, language and key by the work's as well.
         :param parent: Replace the stored parent work by the work's as well, also when it has none.
+        :param movements: Replace the stored movements by the work's as well, also when it has none.
         """
         db_id = int(work.item_id)
         stored_type = (await self.get_library_item(db_id)).work_type if replace else None
@@ -438,6 +442,12 @@ class WorksController(MediaControllerBase[Work]):
         if parent:
             values["parent_work_id"] = int(work.parent_work.item_id) if work.parent_work else None
         await self.mass.music.database.update(self.db_table, {"item_id": db_id}, values)
+        if movements:
+            await self.mass.music.database.execute_write(
+                f"UPDATE {DB_TABLE_WORKS} SET metadata = json_remove(metadata, '$.movements') "
+                "WHERE item_id = :work_id AND json_valid(metadata)",
+                {"work_id": db_id},
+            )
         await self.update_item_in_library(db_id, work)
         if replace and work.work_type != stored_type:
             await self.mass.music.classification.update_item(self.media_type, db_id)
@@ -451,6 +461,21 @@ class WorksController(MediaControllerBase[Work]):
         """
         await self.mass.music.database.update(
             self.db_table, {"item_id": work_id}, {"parent_work_id": parent_id}
+        )
+        library_item = await self.get_library_item(work_id)
+        self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+
+    async def set_movements(self, work_id: int, movements: list[WorkMovement]) -> None:
+        """
+        Replace the movements stored for a library work, a library update only adds to them.
+
+        :param work_id: Library id of the work.
+        :param movements: The movements, with any pieces of its groups.
+        """
+        await self.mass.music.database.execute_write(
+            f"UPDATE {DB_TABLE_WORKS} SET metadata = json_set(metadata, '$.movements', "
+            "json(:movements)) WHERE item_id = :work_id AND json_valid(metadata)",
+            {"movements": json_dumps([x.to_dict() for x in movements]), "work_id": work_id},
         )
         library_item = await self.get_library_item(work_id)
         self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
