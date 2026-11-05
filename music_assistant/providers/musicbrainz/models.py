@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from mashumaro import DataClassDictMixin
 from music_assistant_models.enums import ArtistEntityType, WorkType
+from music_assistant_models.media_items import WorkMovement
 from music_assistant_models.media_items.metadata import LifeSpan
 
 from music_assistant.helpers.datetime import release_year
+from music_assistant.helpers.work_titles import without_part_subtitle
 
 from .constants import (
     ARRANGEMENT_RELATION_TYPES,
@@ -18,6 +21,12 @@ from .constants import (
     NO_LYRICS_LANGUAGE,
     WORK_TYPE_MAPPING,
 )
+
+# a colon, comma or full stop between the segments of a work title
+_TITLE_SEPARATOR = re.compile(r"\s*[:,.]")
+# a colon, or the full stop after a Roman number such as an act's, and the space after it,
+# closing a shared start of two titles
+_ENDING_SEPARATOR = re.compile(r"(?::|\b[IVXL]+\.)\s+$")
 
 
 def replace_hyphens(
@@ -31,6 +40,34 @@ def replace_hyphens(
         return [replace_hyphens(x) for x in data]
 
     return data
+
+
+def part_name(title: str, parent_title: str) -> str:
+    """Return the title of a part without the start it shares with the title of its work, if any."""
+    # the parts of an act with a subtitle, such as "Luisa Miller: Atto II. “L'intrigo”", share
+    # its title only up to the act's number
+    parent_title = without_part_subtitle(parent_title)
+    shared = next(
+        (
+            index
+            for index, (char, parent_char) in enumerate(zip(title, parent_title, strict=False))
+            if char.casefold() != parent_char.casefold()
+        ),
+        min(len(title), len(parent_title)),
+    )
+    # a start shared with only part of the work's title ends where both titles go on with a
+    # separator, as "L'Arlésienne Suite no. 1" does in "L'Arlésienne Suite no. 1: III.
+    # Adagietto" and "L'Arlésienne Suite no. 1, op. 23bis", or right after one, as "Carmina
+    # Burana: " in "Carmina Burana: II. In Taberna" and "Carmina Burana: Cantiones profanæ ..."
+    if not shared or (
+        shared < len(parent_title)
+        and not (
+            _TITLE_SEPARATOR.match(title, shared) and _TITLE_SEPARATOR.match(parent_title, shared)
+        )
+        and not _ENDING_SEPARATOR.search(title[:shared])
+    ):
+        return title
+    return title[shared:].lstrip(" :,.-") or title
 
 
 @dataclass
@@ -100,6 +137,7 @@ class MusicBrainzRelation(DataClassDictMixin):
     ended: bool = False
     attributes: list[str] = field(default_factory=list)
     attribute_values: dict[str, str] = field(default_factory=dict)
+    ordering_key: int | None = None
 
     @property
     def begin_year(self) -> int | None:
@@ -349,7 +387,8 @@ class MusicBrainzWork(DataClassDictMixin):
         """
         Return the relation to the work this work is a part of, if any.
 
-        The relation carries the parent as its ``work``. Of a part of several works, such as of
+        The relation carries the parent as its ``work`` and the position of this part
+        within the parent as its ``ordering_key``. Of a part of several works, such as of
         a work and of an edition of it, the first one MusicBrainz lists is returned.
         """
         return next(iter(self.parent_relations), None)
@@ -371,6 +410,38 @@ class MusicBrainzWork(DataClassDictMixin):
             for relation in self.relations
             if relation.type == "parts" and relation.direction == "forward" and relation.work
         ]
+
+    @property
+    def movements(self) -> list[WorkMovement]:
+        """
+        Return the parts of the work as its movements, in order.
+
+        Each movement has its own number, the one MusicBrainz orders the part by, or the one
+        after the part before it when the part has none or that number is taken.
+        """
+        parts = self.part_relations
+        parts.sort(key=lambda x: (x.ordering_key is None, x.ordering_key or 0))
+        movements: list[WorkMovement] = []
+        for relation in parts:
+            if not relation.work:
+                continue
+            number = max(relation.ordering_key or 0, movements[-1].number + 1 if movements else 1)
+            movements.append(
+                WorkMovement(
+                    number=number,
+                    name=part_name(relation.work.title, self.title),
+                    mbid=relation.work.id,
+                )
+            )
+        return movements
+
+    def part_movement(self, part_id: str) -> WorkMovement | None:
+        """
+        Return a part of the work as its movement, numbered and named as in ``movements``.
+
+        :param part_id: MusicBrainz id of the part.
+        """
+        return next((x for x in self.movements if x.mbid == part_id), None)
 
     @property
     def arrangement_of_relations(self) -> list[MusicBrainzRelation]:

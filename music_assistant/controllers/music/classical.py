@@ -38,6 +38,7 @@ from music_assistant_models.media_items import (
     Recording,
     Track,
     Work,
+    WorkMovement,
     WorkSummary,
 )
 
@@ -53,9 +54,15 @@ from music_assistant.constants import (
     DB_TABLE_WORKS,
 )
 from music_assistant.controllers.music.constants import BASE_SORT_FIELD_SQL
-from music_assistant.controllers.music.helpers import preferred_thumb, search_name_match_clause
+from music_assistant.controllers.music.helpers import (
+    PIECE_NUMBERS,
+    group_piece,
+    preferred_thumb,
+    search_name_match_clause,
+)
 from music_assistant.controllers.music.listing import resolve_listing_sort
 from music_assistant.controllers.music.media.works import (
+    SHOWN_WORK_VERSION,
     WORK_ROOTS,
     work_search_sql,
     work_sort_sql,
@@ -64,10 +71,16 @@ from music_assistant.controllers.webserver.helpers.auth_middleware import get_cu
 from music_assistant.helpers.credit_roles import PERFORMING_ROLES, SQL_PERFORMING_ROLES
 from music_assistant.helpers.json import json_loads
 from music_assistant.helpers.provider_access import hidden_music_sources
-from music_assistant.helpers.work_titles import title_work_type
+from music_assistant.helpers.work_titles import (
+    part_key,
+    part_label,
+    title_work_type,
+    without_movement_number,
+    word_and_number,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from music_assistant import MusicAssistant
     from music_assistant.controllers.music.media.base import MediaControllerBase
@@ -82,6 +95,9 @@ LEADING_ROLES: Final[tuple[ArtistRole, ...]] = (ArtistRole.CONDUCTOR, *ENSEMBLE_
 # the leading roles that stay the same across a performance, where choirs come and go
 DIRECTING_ROLES: Final[tuple[ArtistRole, ...]] = (ArtistRole.CONDUCTOR, ArtistRole.ORCHESTRA)
 
+# a quoted name within a movement name, such as the aria of 'Atto I, no. 6. "Che gelida
+# manina!" (Rodolfo)', where a single quote within a word is an apostrophe
+_QUOTED_NAME = re.compile(r"\"([^\"]+)\"|“([^”]+)”|«([^»]+)»|(?<!\w)'([^']+)'(?!\w)")
 
 # the words that tell the kind of ensemble a name is, matched on the name without accents,
 # where a word ending in orchester counts too, as in Gewandhausorchester
@@ -139,6 +155,15 @@ TRACK_ALBUM_YEAR: Final[str] = f"""(SELECT {DB_TABLE_ALBUMS}.year FROM {DB_TABLE
     JOIN {DB_TABLE_ALBUMS} ON {DB_TABLE_ALBUMS}.item_id = {DB_TABLE_ALBUM_TRACKS}.album_id
     WHERE {DB_TABLE_ALBUM_TRACKS}.track_id = {DB_TABLE_TRACKS}.item_id
     ORDER BY {DB_TABLE_ALBUM_TRACKS}.album_id LIMIT 1)"""
+
+# a score number opening a name, with the letter of a piece of a group if any, such as "XXXVIa. "
+_SCORE_NUMBER: Final[re.Pattern[str]] = re.compile(r"([IVXLCDM]+)[a-z]?\.\s")
+
+# the start of the MusicBrainz title of an excerpt of a scene, such as of the Walkürenritt
+_EXCERPT: Final = "Excerpt from "
+# a section and its number in a title, such as "Akt III, " or "Scene V. ", which the own name of
+# an excerpt follows
+_SECTION_LABEL: Final[re.Pattern[str]] = re.compile(r"\b[^\W\d_]+\s(?:[IVXLC]+|\d+)[.,]\s")
 
 # the work tracks with the albums they are on, one row per album
 WORK_TRACKS_QUERY: Final[str] = f"""
@@ -381,13 +406,32 @@ class ClassicalController:
 
     async def work(self, item_id: str) -> Work:
         """
-        Get a library work as the classical listings show it.
+        Get a library work as the classical listings show it, with its movements.
 
-        A work without a type of its own shows the type its title names, as in the works listing.
+        The movements are those MusicBrainz lists, else those its tracks name, else its parts
+        with tracks, named as parts of it, such as "Part II". The pieces of a group or of an act
+        follow it, each naming it as its parent. A work without a type of its own shows the
+        type its title names.
 
         :param item_id: The library id of the work.
         """
-        return _with_title_work_type(await self.mass.music.works.get_library_item(item_id))
+        work = _with_title_work_type(await self.mass.music.works.get_library_item(item_id))
+        related = [*work.parts, *work.arrangement_of, *work.arrangements]
+        shown_works = (work, *related, *([work.parent_work] if work.parent_work else []))
+        versions = await self._shown_work_versions(shown_works)
+        for shown in shown_works:
+            _show_work_version(shown, versions)
+        names = [work.name, *(await self._ancestor_names([int(work.item_id)]))[int(work.item_id)]]
+        for part in work.parts:
+            part.name = part_label(part.name) or _part_name(part.name, names)
+        work_movements = await self._movements([int(work.item_id)])
+        await self._add_part_lists(work_movements, int(work.item_id))
+        if movements := work_movements.get(int(work.item_id)):
+            work.movements = _with_pieces(movements)
+            work.movements_from_musicbrainz = movements.from_musicbrainz
+        # the movements are sent once, as the work's own movements
+        work.metadata.movements = None
+        return work
 
     async def recordings(
         self, work_id: str | None = None, performer_id: str | None = None
@@ -396,9 +440,11 @@ class ClassicalController:
         Get the recordings of a work, or every recording a performer performs on.
 
         Recordings of a work come by year (undated last), then conductor, then ensemble, followed by
-        those of each of its parts, each recording carrying its own work and the work that one is a
-        part of, if any. A performer's recordings across their works come per work, in the order of
-        the works listing, and within a work in that same order.
+        those of each of its parts. A performer's recordings come per work, in the order of the
+        works listing. Each recording carries its work and the work that one is a part of, the
+        movements it covers and whether that is all of them, and its tracks with the number of
+        the movement each holds. Tracks of one performance join one recording: those of a scene
+        join its act, and those of a part join the recording of the requested work itself.
 
         :param work_id: Library id of the work. Required unless performer_id is given.
         :param performer_id: Only include the recordings this performer (library artist id)
@@ -413,7 +459,10 @@ class ClassicalController:
             msg = "Either work_id or performer_id is required"
             raise InvalidDataError(msg)
         parts = await self._work_parts(listed_ids)
-        work_ids = [x for listed_id in listed_ids for x in parts.get(listed_id, [listed_id])]
+        listed_works = {
+            x: listed_id for listed_id in listed_ids for x in parts.get(listed_id, [listed_id])
+        }
+        work_ids = list(listed_works)
         work_items = await self._items(self.mass.music.works, work_ids)
         works = {int(work.item_id): ItemMapping.from_item(work) for work in work_items}
         parent_works = {
@@ -421,7 +470,17 @@ class ClassicalController:
             for work in work_items
             if work.parent_work
         }
-        performances = await self._performances(work_ids)
+        joined = {x: y for ids in parts.values() for x, y in ids.items()}
+        if work_id:
+            # a part's tracks that are one performance with the work's own join its recording,
+            # after taking in those of their own parts
+            joined = {x: y for x, y in joined.items() if x != y} | {
+                x: int(work_id) for x, y in joined.items() if x == y
+            }
+        performances = await self._performances(work_ids, joined)
+        movements = await self._movements(listed_ids)
+        if work_id:
+            await self._add_part_lists(movements, int(work_id))
         if performer_id:
             for key, value in performances.items():
                 performances[key] = [x for x in value if int(performer_id) in x.performer_ids]
@@ -438,6 +497,10 @@ class ClassicalController:
                 summary=False,
             )
         }
+        shown_works = (*parent_works.values(), *(x.work for x in tracks.values() if x.work))
+        versions = await self._shown_work_versions(shown_works)
+        for shown in shown_works:
+            _show_work_version(shown, versions)
         refinements = await self._show_refined_roles(tracks.values())
         albums = {
             int(album.item_id): ItemMapping.from_item(album)
@@ -460,7 +523,13 @@ class ClassicalController:
             for recording in sorted(
                 (
                     _build_recording(
-                        works[work], parent_works.get(work), x, tracks, albums, refinements
+                        works[work],
+                        parent_works.get(work),
+                        x,
+                        tracks,
+                        albums,
+                        refinements,
+                        movements.get(listed_works[work], _Movements()),
                     )
                     for x in performances[work]
                 ),
@@ -789,8 +858,13 @@ class ClassicalController:
             track.credits = _shown_credits(track.credits, refinements)
         return refinements
 
-    async def _work_parts(self, listed_ids: Iterable[int] | None) -> dict[int, list[int]]:
-        """Return the given listed works, or all of them, each with itself and then its parts."""
+    async def _work_parts(self, listed_ids: Iterable[int] | None) -> dict[int, dict[int, int]]:
+        """
+        Return the given listed works, or all of them, each with itself and then its parts.
+
+        Each work maps to the work whose recordings its own join: itself, or for a part of a part,
+        such as a scene of an act, the part of the listed work it sits under.
+        """
         params: dict[str, Any] = {}
         roots = "parent_work_id IS NULL"
         if listed_ids is not None:
@@ -800,17 +874,18 @@ class ClassicalController:
             roots = "item_id IN :listed_ids"
         # the parts of parts, such as the arias of an act, count as parts of the listed work
         query = (
-            f"WITH RECURSIVE tree(item_id, listed_id) AS (SELECT item_id, item_id "
+            f"WITH RECURSIVE tree(item_id, listed_id, part_id) AS (SELECT item_id, item_id, NULL "
             f"FROM {DB_TABLE_WORKS} WHERE {roots} "
-            f"UNION SELECT w.item_id, tree.listed_id "
+            f"UNION SELECT w.item_id, tree.listed_id, COALESCE(tree.part_id, w.item_id) "
             f"FROM {DB_TABLE_WORKS} w JOIN tree ON w.parent_work_id = tree.item_id) "
-            "SELECT tree.item_id, tree.listed_id "
+            "SELECT tree.item_id, tree.listed_id, tree.part_id "
             f"FROM tree JOIN {DB_TABLE_WORKS} w ON w.item_id = tree.item_id "
             "ORDER BY tree.item_id != tree.listed_id, w.name_sort, w.item_id"
         )
-        parts: dict[int, list[int]] = defaultdict(list)
+        parts: dict[int, dict[int, int]] = defaultdict(dict)
         for row in await self.mass.music.database.get_rows_from_query(query, params, limit=0):
-            parts[int(row["listed_id"])].append(int(row["item_id"]))
+            item_id = int(row["item_id"])
+            parts[int(row["listed_id"])][item_id] = int(row["part_id"] or item_id)
         return parts
 
     async def _part_names(self, work_ids: Sequence[int]) -> dict[int, list[str]]:
@@ -827,13 +902,266 @@ class ClassicalController:
             names[int(row["parent_work_id"])].append(row["name"])
         return names
 
+    async def _movements(self, work_ids: Sequence[int]) -> dict[int, _Movements]:
+        """
+        Return the movements of the given works by work id, leaving out works without any.
+
+        :param work_ids: Library ids of the works.
+        """
+        movements: dict[int, _Movements] = {}
+        if not work_ids:
+            return movements
+        database = self.mass.music.database
+        params: dict[str, Any] = {"work_ids": list(set(work_ids))}
+        rows = await database.get_rows_from_query(
+            "SELECT w.item_id, w.name, w.parent_work_id, CASE WHEN json_valid(w.metadata) "
+            "THEN json_extract(w.metadata, '$.movements') END AS movements, "
+            f"EXISTS (SELECT 1 FROM {DB_TABLE_WORKS} p JOIN {DB_TABLE_WORKS} c "
+            "ON c.parent_work_id = p.item_id WHERE p.parent_work_id = w.item_id) AS nested "
+            f"FROM {DB_TABLE_WORKS} w WHERE w.item_id IN :work_ids",
+            params,
+            limit=0,
+        )
+        unlisted: list[int] = []
+        # the parts listing MusicBrainz movements, such as acts, whose groups show their pieces
+        listed_parts: dict[int, Mapping[str, Any]] = {}
+        for row in rows:
+            if stored := _stored_movements(row["movements"]):
+                movements[int(row["item_id"])] = _Movements(movements=stored, from_musicbrainz=True)
+                if row["parent_work_id"] is not None:
+                    listed_parts[int(row["item_id"])] = row
+            # a work whose parts have parts, such as acts, lists its parts instead
+            elif not row["nested"]:
+                unlisted.append(int(row["item_id"]))
+        await self._add_listed_parts(movements)
+        await self._add_pieces(movements, listed_parts)
+        if unlisted:
+            movements |= await self._track_movements({"work_ids": unlisted})
+        # a work without movements of its own lists its parts instead
+        return movements | await self._part_movements(
+            [x for x in set(work_ids) if x not in movements]
+        )
+
+    async def _add_listed_parts(self, movements: dict[int, _Movements]) -> None:
+        """
+        Link the parts of works with MusicBrainz movements to the movement each one is.
+
+        A part of a part, such as a scene of an act, is linked to the movement of the act's own
+        MusicBrainz movements it is, through its own id or that of its work below the act.
+        """
+        if not movements:
+            return
+        # every part with its listed work and the part of that it sits under, a part of a part
+        # also with its work right below that part, whose MusicBrainz id is its movement there
+        for row in await self.mass.music.database.get_rows_from_query(
+            "WITH RECURSIVE tree(item_id, listed_id, part_id, entry_id) AS ("
+            f"SELECT item_id, parent_work_id, item_id, NULL FROM {DB_TABLE_WORKS} "
+            "WHERE parent_work_id IN :work_ids "
+            "UNION SELECT w.item_id, tree.listed_id, tree.part_id, "
+            f"COALESCE(tree.entry_id, w.item_id) FROM {DB_TABLE_WORKS} w "
+            "JOIN tree ON w.parent_work_id = tree.item_id) "
+            "SELECT tree.item_id, tree.listed_id, tree.part_id, tree.entry_id, "
+            "e.external_id AS mbid, CASE WHEN json_valid(w.metadata) "
+            "THEN json_extract(w.metadata, '$.movements') END AS movements "
+            f"FROM tree JOIN {DB_TABLE_WORKS} w ON w.item_id = tree.item_id "
+            f"JOIN {DB_TABLE_EXTERNAL_ID_LOOKUP} e ON e.media_type = :work "
+            "AND e.item_id = COALESCE(tree.entry_id, tree.item_id) "
+            "AND e.external_id_type = :mb_work "
+            "ORDER BY tree.entry_id IS NOT NULL",
+            {
+                "work_ids": list(movements),
+                "work": MediaType.WORK.value,
+                "mb_work": ExternalID.MB_WORK.value,
+            },
+            limit=0,
+        ):
+            listed = movements[int(row["listed_id"])]
+            item_id, part_id = int(row["item_id"]), int(row["part_id"])
+            mbid = row["mbid"].casefold()
+            if row["entry_id"] is not None:
+                if entry := next(
+                    (
+                        x
+                        for x in listed.part_movements.get(part_id, [])
+                        if x.mbid and x.mbid.casefold() == mbid
+                    ),
+                    None,
+                ):
+                    listed.parts[item_id] = listed.parts[part_id]
+                    listed.part_movements[item_id] = listed.part_movements[part_id]
+                    listed.part_entries[item_id] = entry
+                continue
+            for index, movement in enumerate(listed.movements):
+                if not movement.mbid or movement.mbid.casefold() != mbid:
+                    continue
+                listed.movements[index] = replace(movement, work_id=str(item_id))
+                listed.parts[item_id] = listed.movements[index]
+                if stored := _stored_movements(row["movements"]):
+                    listed.part_movements[item_id] = stored
+                break
+
+    async def _add_pieces(
+        self, movements: dict[int, _Movements], parts: Mapping[int, Mapping[str, Any]]
+    ) -> None:
+        """
+        Add the pieces of the groups the given parts list, such as the scenes of a number of an act.
+
+        A group's pieces are the movements MusicBrainz lists for its library work, else those
+        stored under it in the part's own movements. They are named as parts of the part.
+
+        :param movements: The movements of the listed works, by work id.
+        :param parts: The works rows of the listed works that are parts of another work, by id.
+        """
+        if not parts:
+            return
+        ancestors = await self._ancestor_names(list(parts))
+        for work_id, row in parts.items():
+            listed = movements[work_id]
+            names = [row["name"], *ancestors[work_id]]
+            stored = _stored_pieces(row["movements"])
+            for movement in listed.movements:
+                if movement.work_id and (own := listed.part_movements.get(int(movement.work_id))):
+                    pieces = [group_piece(movement.number, x) for x in own]
+                else:
+                    pieces = [x for x in stored if x.parent == movement.number]
+                if pieces:
+                    listed.pieces[movement.number] = [
+                        replace(x, name=_piece_name(x.name, names)) for x in pieces
+                    ]
+
+    async def _add_part_lists(self, movements: dict[int, _Movements], work_id: int) -> None:
+        """
+        Add the movements of each empty part a work lists, as the part's own page lists them.
+
+        :param movements: The movements of the listed works, by work id.
+        :param work_id: Library id of the work whose page is shown.
+        """
+        if not (listed := movements.get(work_id)):
+            return
+        # a part with pieces or parts listed under it already shows what it holds
+        filled = set(listed.pieces) | {x.parent for x in listed.movements}
+        numbers = {
+            int(x.work_id): x.number
+            for x in listed.movements
+            if x.work_id and x.parent is None and x.number not in filled
+        }
+        for part_id, part in (await self._movements(list(numbers))).items():
+            # numbers its tracks give without names tell nothing about the part
+            if part.from_musicbrainz or all(x.name for x in part.movements):
+                listed.part_lists[numbers[part_id]] = part
+
+    async def _track_movements(self, params: dict[str, Any]) -> dict[int, _Movements]:
+        """Return the movements the classical tracks of the works in params name, by work id."""
+        # the most common name each movement number of a work goes by on its tracks
+        names: dict[int, dict[int, Counter[str]]] = defaultdict(lambda: defaultdict(Counter))
+        for row in await self.mass.music.database.get_rows_from_query(
+            f"SELECT work_id, movement_number, movement_name FROM {DB_TABLE_TRACKS} "
+            "WHERE work_id IN :work_ids AND movement_number IS NOT NULL "
+            f"AND item_id IN ({self._classical_tracks(params)}) ORDER BY item_id",
+            params,
+            limit=0,
+        ):
+            counts = names[int(row["work_id"])][int(row["movement_number"])]
+            if row["movement_name"]:
+                counts[row["movement_name"]] += 1
+        return {
+            work_id: _Movements(
+                movements=[
+                    WorkMovement(
+                        number=number,
+                        name=counts.most_common(1)[0][0] if counts else "",
+                    )
+                    for number, counts in sorted(numbers.items())
+                ]
+            )
+            for work_id, numbers in names.items()
+        }
+
+    async def _part_movements(self, work_ids: Sequence[int]) -> dict[int, _Movements]:
+        """
+        Return the parts of the given works that have classical tracks, as their movements.
+
+        The parts at every depth come in work order, each after the listed part it belongs
+        to, which is its parent.
+
+        :param work_ids: Library ids of the works.
+        """
+        if not work_ids:
+            return {}
+        params: dict[str, Any] = {"work_ids": list(work_ids)}
+        rows = await self.mass.music.database.get_rows_from_query(
+            f"WITH RECURSIVE tree(item_id, root_id) AS (SELECT item_id, item_id "
+            f"FROM {DB_TABLE_WORKS} WHERE item_id IN :work_ids "
+            f"UNION SELECT w.item_id, tree.root_id FROM {DB_TABLE_WORKS} w "
+            "JOIN tree ON w.parent_work_id = tree.item_id) "
+            "SELECT tree.root_id, w.item_id, w.parent_work_id, w.name, w.name_sort, "
+            "CASE WHEN json_valid(w.metadata) "
+            "THEN json_extract(w.metadata, '$.movements') END AS movements, "
+            f"(SELECT MIN(e.external_id) FROM {DB_TABLE_EXTERNAL_ID_LOOKUP} e "
+            f"WHERE e.media_type = '{MediaType.WORK.value}' AND e.item_id = w.item_id "
+            f"AND e.external_id_type = '{ExternalID.MB_WORK.value}') AS mbid, "
+            f"w.item_id IN ({self._classical_work_ids(params)}) AS recorded "
+            f"FROM tree JOIN {DB_TABLE_WORKS} w ON w.item_id = tree.item_id",
+            params,
+            limit=0,
+        )
+        trees: dict[int, dict[int, Mapping[str, Any]]] = defaultdict(dict)
+        for row in rows:
+            trees[int(row["root_id"])][int(row["item_id"])] = row
+        ancestors = await self._ancestor_names(list(trees))
+        movements: dict[int, _Movements] = {}
+        for root_id, tree in trees.items():
+            if parts := _ordered_parts(root_id, tree, ancestors[root_id]):
+                movements[root_id] = _Movements(
+                    movements=list(parts.values()),
+                    parts=parts,
+                    part_movements={
+                        x: stored
+                        for x in parts
+                        if (stored := _stored_movements(tree[x]["movements"]))
+                    },
+                )
+        return movements
+
+    async def _shown_work_versions(self, works: Iterable[Work | ItemMapping]) -> dict[int, str]:
+        """Return the versions the given works show, by work id, for those sharing a name only."""
+        if not (work_ids := list({int(x.item_id) for x in works})):
+            return {}
+        return {
+            int(row["item_id"]): row["version"]
+            for row in await self.mass.music.database.get_rows_from_query(
+                f"SELECT item_id, {SHOWN_WORK_VERSION} AS version FROM {DB_TABLE_WORKS} "
+                f"WHERE item_id IN :work_ids AND {SHOWN_WORK_VERSION} != ''",
+                {"work_ids": work_ids},
+                limit=0,
+            )
+        }
+
+    async def _ancestor_names(self, work_ids: Sequence[int]) -> dict[int, list[str]]:
+        """Return the names of the works the given works are a part of, at any depth."""
+        names: dict[int, list[str]] = defaultdict(list)
+        if not work_ids:
+            return names
+        for row in await self.mass.music.database.get_rows_from_query(
+            f"WITH RECURSIVE up(work_id, item_id) AS (SELECT item_id, parent_work_id "
+            f"FROM {DB_TABLE_WORKS} WHERE item_id IN :work_ids AND parent_work_id IS NOT NULL "
+            f"UNION SELECT up.work_id, w.parent_work_id FROM {DB_TABLE_WORKS} w "
+            "JOIN up ON w.item_id = up.item_id WHERE w.parent_work_id IS NOT NULL) "
+            f"SELECT up.work_id, w.name FROM up JOIN {DB_TABLE_WORKS} w ON w.item_id = up.item_id",
+            {"work_ids": list(work_ids)},
+            limit=0,
+        ):
+            names[int(row["work_id"])].append(row["name"])
+        return names
+
     async def _listed_work_performances(
         self, listed_ids: Iterable[int] | None
     ) -> dict[int, list[_Performance]]:
         """Return the performances of the given listed works or of all, including their parts'."""
         parts = await self._work_parts(listed_ids)
         performances = await self._performances(
-            None if listed_ids is None else [x for ids in parts.values() for x in ids]
+            None if listed_ids is None else [x for ids in parts.values() for x in ids],
+            {x: y for ids in parts.values() for x, y in ids.items()},
         )
         listed: dict[int, list[_Performance]] = defaultdict(list)
         for listed_id, work_ids in parts.items():
@@ -841,8 +1169,16 @@ class ClassicalController:
                 listed[listed_id].extend(performances[work_id])
         return listed
 
-    async def _performances(self, work_ids: Iterable[int] | None) -> dict[int, list[_Performance]]:
-        """Return the performances of the given classical works, or of every classical work."""
+    async def _performances(
+        self, work_ids: Iterable[int] | None, joined: Mapping[int, int]
+    ) -> dict[int, list[_Performance]]:
+        """
+        Return the performances of the given classical works, or of every classical work.
+
+        :param work_ids: Library ids of the works, None for every work.
+        :param joined: The work each work's performances join when they are one of its own,
+            such as a scene joining the performance of its act, by work id.
+        """
         performances: dict[int, list[_Performance]] = defaultdict(list)
         params: dict[str, Any] = {}
         scope = "t.work_id IS NOT NULL"
@@ -888,6 +1224,11 @@ class ClassicalController:
                 if row["role"] in DIRECTING_ROLES:
                     track.directors.add(int(row["artist_id"]))
         groups = {work_id: _group_performances(x) for work_id, x in work_tracks.items()}
+        # the tracks of a scene that are one performance with tracks of its act join those
+        for work_id, joined_id in joined.items():
+            if joined_id != work_id and work_id in groups and joined_id in groups:
+                for key in groups[work_id].keys() & groups[joined_id].keys():
+                    groups[joined_id][key].extend(groups[work_id].pop(key))
         for work_id, work_groups in groups.items():
             performances[work_id] = [
                 _build_performance(work_id, key, group) for key, group in work_groups.items()
@@ -950,6 +1291,29 @@ class _Performance:
     tracks: list[tuple[int, _Appearance | None]]
 
 
+@dataclass(kw_only=True)
+class _Movements:
+    """The movements of a work, as its listing and the recordings of it show them."""
+
+    movements: list[WorkMovement] = field(default_factory=list)
+    from_musicbrainz: bool = False
+    # the movement each part of the work is, by part id, a part of a part counting as the part
+    # it sits under
+    parts: dict[int, WorkMovement] = field(default_factory=dict)
+    # the movements MusicBrainz lists for each of those parts, by part id, a part of a part
+    # sharing those of the part it sits under
+    part_movements: dict[int, list[WorkMovement]] = field(default_factory=dict)
+    # the movement of its part's MusicBrainz movements each part of a part is, such as a scene
+    # of an act, by part id
+    part_entries: dict[int, WorkMovement] = field(default_factory=dict)
+    # the pieces of each group the movements of a part hold, such as the scenes of a number of an
+    # act, numbered as group_piece numbers them, by the group's number
+    pieces: dict[int, list[WorkMovement]] = field(default_factory=dict)
+    # the own movements of each part listed with nothing under it, such as the numbers of an act,
+    # as the part's own page lists them, by the part's number
+    part_lists: dict[int, _Movements] = field(default_factory=dict)
+
+
 def _group_performances(tracks: Iterable[_WorkTrack]) -> dict[str, list[list[_WorkTrack]]]:
     """
     Group the classical tracks of a work into its performances, by performance key.
@@ -992,7 +1356,7 @@ def _build_performance(
             chosen.append(min(placed, key=lambda x: (album_rank[x[1].album_id], x[0].track_id)))
         else:
             chosen.append((min(movement, key=lambda x: x.track_id), None))
-    # in album order
+    # in album order, which the recording puts in the order of the movements it shows
     chosen.sort(
         key=lambda x: (
             x[1].disc_number if x[1] else 0,
@@ -1019,6 +1383,7 @@ def _build_recording(
     tracks: dict[int, Track],
     albums: dict[int, ItemMapping],
     refinements: dict[int, dict[ArtistRole, ArtistRole]],
+    movements: _Movements,
 ) -> Recording:
     """
     Build a Recording from a performance and its library tracks and albums.
@@ -1029,6 +1394,7 @@ def _build_recording(
     :param tracks: The library tracks of the performance, by track id.
     :param albums: The albums of the performance, by album id.
     :param refinements: The shown role of each refined stored performing role, by performer.
+    :param movements: The movements of the requested work, which may be the parent of work.
     """
     movement_tracks: list[Track] = []
     for track_id, appearance in performance.tracks:
@@ -1043,6 +1409,52 @@ def _build_recording(
     performing_credits = _shown_credits(
         (x for track in movement_tracks for x in _track_performing_credits(track)), refinements
     )
+    covered: set[int] = set()
+    own_part = movements.parts.get(int(work.item_id))
+    # the own movements of the part a recording of a part is of, such as the numbers of an act
+    part_list = movements.part_lists.get(own_part.number) if own_part else None
+    part_movements = _part_coverage(
+        movement_tracks,
+        movements.part_movements.get(int(work.item_id))
+        # a part without MusicBrainz movements counts those its own page lists
+        or (part_list.movements if part_list and not part_list.parts else []),
+        movements.part_entries,
+    )
+    # the movement each track shows in the part's own movements, as the part's own page shows it
+    in_part: dict[int, WorkMovement] = {}
+    for track in movement_tracks:
+        if part_list and track.work:
+            inner_part = part_list.parts.get(int(track.work.item_id))
+            if inner := _shown_track_movement(track, part_list, inner_part)[1]:
+                in_part[int(track.item_id)] = inner
+        # a track of a part joining the work's own recording holds the movement that part is
+        track_part = own_part or (
+            movements.parts.get(int(track.work.item_id)) if track.work else None
+        )
+        matched, shown = _shown_track_movement(track, movements, track_part)
+        if shown:
+            covered.update(x.number for x in matched)
+            # the movement fields are only changed on the returned track, never stored
+            track.movement_number = shown.number
+            track.movement_name = without_movement_number(track.movement_name or shown.name) or None
+    # in the order of the movements shown, a track showing none after them
+    movement_tracks.sort(
+        key=lambda x: (x.movement_number is None, _movement_order(x.movement_number or 0))
+    )
+    if own_part and in_part:
+        act_numbers = {int(x.item_id): x.movement_number for x in movement_tracks}
+        for track in movement_tracks:
+            if inner := in_part.get(int(track.item_id)):
+                track.movement_number = _in_group(own_part.number, inner.number)
+        # within a part the tracks follow its own movements, those showing none after them
+        movement_tracks.sort(
+            key=lambda x: (
+                act_numbers[int(x.item_id)] is None,
+                _movement_order(act_numbers[int(x.item_id)] or 0),
+                int(x.item_id) not in in_part,
+                _movement_order(x.movement_number or 0),
+            )
+        )
     return Recording(
         key=performance.key,
         work=work,
@@ -1052,7 +1464,300 @@ def _build_recording(
         year=performance.year,
         albums=[albums[x] for x in performance.album_ids if x in albums],
         duration=sum(x.duration or 0 for x in movement_tracks),
+        movement_numbers=sorted(covered),
+        complete=(
+            {x.number for x in movements.movements} <= covered
+            if movements.from_musicbrainz
+            else None
+        ),
+        part_movements=part_movements,
     )
+
+
+def _part_coverage(
+    tracks: Sequence[Track],
+    part_movements: list[WorkMovement],
+    part_entries: Mapping[int, WorkMovement],
+) -> list[WorkMovement]:
+    """
+    Return the movements of a part the tracks of a recording of it cover, in movement order.
+
+    None are returned when the tracks cover all of them, or when a track holds none of them, as
+    the recording then counts as the whole part.
+
+    :param tracks: The tracks of the recording, before their movement fields are changed.
+    :param part_movements: The movements MusicBrainz lists for the part.
+    :param part_entries: The movement of the part each of its own parts is, by work id.
+    """
+    listed = _Movements(movements=part_movements)
+    covered: dict[int, WorkMovement] = {}
+    for track in tracks:
+        # a track of a part of the part, such as a scene of an act, holds that one movement
+        entry = part_entries.get(int(track.work.item_id)) if track.work else None
+        if not (matched := [entry] if entry else _held_movements(track, listed, None)):
+            return []
+        covered |= {x.number: x for x in matched}
+    if len(covered) == len(part_movements):
+        return []
+    return sorted(covered.values(), key=lambda x: x.number)
+
+
+def _held_movements(
+    track: Track, movements: _Movements, own_part: WorkMovement | None
+) -> list[WorkMovement]:
+    """
+    Return the movements a track of a recording holds, none when unknown or ambiguous.
+
+    :param track: The track.
+    :param movements: The movements of the requested work.
+    :param own_part: The part of the requested work the track's work is, if any.
+    """
+    if own_part:
+        return [own_part]
+    mb_works = {
+        mbid.casefold() for id_type, mbid in track.external_ids if id_type == ExternalID.MB_WORK
+    }
+    # a track's MusicBrainz work names its movements, as one track may hold two
+    if by_work := [x for x in movements.movements if x.mbid and x.mbid.casefold() in mb_works]:
+        return by_work
+    # the numbers of listed parts are their positions, not the numbers on their tracks
+    if track.movement_number and (movements.from_musicbrainz or not movements.parts):
+        if by_number := [x for x in movements.movements if x.number == track.movement_number]:
+            return by_number
+    name = _movement_name(track)
+    by_name = [x for x in movements.movements if _same_movement_name(name, x.name)]
+    return by_name if len(by_name) == 1 else []
+
+
+def _shown_track_movement(
+    track: Track, movements: _Movements, own_part: WorkMovement | None
+) -> tuple[list[WorkMovement], WorkMovement | None]:
+    """
+    Return the movements a track of a recording holds and the one it shows, if any.
+
+    :param track: The track, before its movement fields are changed.
+    :param movements: The movements of the requested work.
+    :param own_part: The part of the requested work the track's work is, if any.
+    """
+    if not (matched := _held_movements(track, movements, own_part)):
+        return [], None
+    # a track holding several movements shows the one it is named after
+    shown = next(
+        (x for x in matched if _same_movement_name(_movement_name(track), x.name)), matched[0]
+    )
+    return matched, _held_piece(track, shown, movements) or shown
+
+
+def _held_piece(track: Track, group: WorkMovement, movements: _Movements) -> WorkMovement | None:
+    """
+    Return the one piece of a group a track holds, None when it holds the whole group or unknown.
+
+    :param track: The track, before its movement fields are changed.
+    :param group: The movement of the requested work the track holds.
+    :param movements: The movements of the requested work.
+    """
+    if not (pieces := movements.pieces.get(group.number)):
+        return None
+    mb_works = {
+        mbid.casefold() for id_type, mbid in track.external_ids if id_type == ExternalID.MB_WORK
+    }
+    if held := [x for x in pieces if x.mbid and x.mbid.casefold() in mb_works]:
+        return held[0] if len(held) == 1 else None
+    # a track of the group's own work is numbered as the piece it holds
+    if track.work and track.work.item_id == group.work_id and track.movement_number:
+        number = group.number * PIECE_NUMBERS + track.movement_number
+        return next((x for x in pieces if x.number == number), None)
+    return None
+
+
+def _movement_order(number: int) -> tuple[int, ...]:
+    """Return the sort key of a movement number, which puts a piece right after its group."""
+    pieces: list[int] = []
+    while number >= PIECE_NUMBERS:
+        number, piece = divmod(number, PIECE_NUMBERS)
+        pieces.insert(0, piece)
+    return (number, *pieces)
+
+
+def _in_group(group: int, number: int) -> int:
+    """Return the number of an entry of a group's own list in the list holding the group."""
+    return int(group * PIECE_NUMBERS ** len(_movement_order(number))) + number
+
+
+def _movement_name(track: Track) -> str:
+    """Return the name of the movement a track performs, from its title when it names none."""
+    return track.movement_name or track.name.rpartition(": ")[2]
+
+
+def _same_movement_name(name: str, other: str) -> bool:
+    """
+    Return whether two names name the same movement, as "Var. 1" and "Variatio 1." do.
+
+    A quoted name within either, such as the aria in 'No. 6. "Che gelida manina!"', also
+    names the movement.
+    """
+    keys = {create_safe_string(x, True, True) for x in (name, *_quoted_names(name))}
+    other_keys = {create_safe_string(x, True, True) for x in (other, *_quoted_names(other))}
+    if (keys & other_keys) - {""}:
+        return True
+    if not (numbered := word_and_number(name)) or not (other_numbered := word_and_number(other)):
+        return False
+    (word, number), (other_word, other_number) = sorted(
+        (numbered, other_numbered), key=lambda x: len(x[0])
+    )
+    return number == other_number and other_word.startswith(word)
+
+
+def _quoted_names(name: str) -> list[str]:
+    """Return the quoted names within a name, such as the aria of a numbered opera scene."""
+    return [next(x for x in match.groups() if x) for match in _QUOTED_NAME.finditer(name)]
+
+
+def _stored_movements(raw: str | None) -> list[WorkMovement]:
+    """Return the movements stored in a work's metadata, in movement order, without pieces."""
+    return [x for x in _stored_entries(raw) if x.parent is None]
+
+
+def _stored_pieces(raw: str | None) -> list[WorkMovement]:
+    """Return the pieces stored under the groups a work's movements hold, in movement order."""
+    return [x for x in _stored_entries(raw) if x.parent is not None]
+
+
+def _stored_entries(raw: str | None) -> list[WorkMovement]:
+    """Return the movements and pieces stored in a work's metadata, in number order."""
+    if not raw:
+        return []
+    # a later lookup that renamed a movement adds it after the earlier name
+    stored = {x.number: x for x in map(WorkMovement.from_dict, json_loads(raw))}
+    return sorted(stored.values(), key=lambda x: x.number)
+
+
+def _with_pieces(movements: _Movements) -> list[WorkMovement]:
+    """
+    Return the movements of a work, each group followed by its pieces and each part by its own.
+
+    A group whose name only joins the names of its pieces, such as "IVa. ... - IVb. ...", is named
+    by the score number they share, such as "IV".
+    """
+    listed: list[WorkMovement] = []
+    for movement in movements.movements:
+        pieces = movements.pieces.get(movement.number, [])
+        number = _shared_score_number(movement.name, pieces)
+        listed.extend((replace(movement, name=number) if number else movement, *pieces))
+        if part_list := movements.part_lists.get(movement.number):
+            group = movement.number
+            listed.extend(
+                replace(
+                    x,
+                    number=_in_group(group, x.number),
+                    parent=group if x.parent is None else _in_group(group, x.parent),
+                )
+                for x in _with_pieces(part_list)
+            )
+    return listed
+
+
+def _shared_score_number(name: str, pieces: Sequence[WorkMovement]) -> str | None:
+    """Return the score number a group's pieces share when its name only joins their names."""
+    # each part of the name and each piece opens with the same score number, such as "IVb. "
+    parts = name.split(" - ")
+    if not pieces or len(parts) != len(pieces):
+        return None
+    numbers = {m.group(1) if (m := _SCORE_NUMBER.match(x)) else None for x in parts}
+    numbers |= {m.group(1) if (m := _SCORE_NUMBER.match(x.name)) else None for x in pieces}
+    return numbers.pop() if len(numbers) == 1 and None not in numbers else None
+
+
+def _ordered_parts(
+    root_id: int, tree: Mapping[int, Mapping[str, Any]], ancestors: Sequence[str]
+) -> dict[int, WorkMovement]:
+    """
+    Return the movement each part of a work with tracks is, by part id, in work order.
+
+    The parent of a movement is the nearest part it belongs to that is listed too.
+
+    :param root_id: Library id of the work.
+    :param tree: The work and all its parts, by work id.
+    :param ancestors: Names of the works the work is a part of.
+    """
+    children: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
+    for item_id, row in tree.items():
+        if item_id != root_id and row["parent_work_id"] is not None:
+            children[int(row["parent_work_id"])].append(row)
+    ordered: dict[int, WorkMovement] = {}
+
+    def add_parts(parent_id: int, ancestors: list[str], parent: int | None) -> None:
+        # the movements MusicBrainz lists for a work give the order of its parts
+        positions = {
+            x.mbid.casefold(): x.number
+            for x in _stored_movements(tree[parent_id]["movements"])
+            if x.mbid
+        }
+        names = [tree[parent_id]["name"], *ancestors]
+        for row in sorted(children[parent_id], key=lambda x: _part_order(x, positions, names)):
+            part_id = int(row["item_id"])
+            movement = None
+            if row["recorded"]:
+                movement = ordered[part_id] = WorkMovement(
+                    number=len(ordered) + 1,
+                    name=part_label(row["name"]) or _part_name(row["name"], names),
+                    mbid=row["mbid"],
+                    parent=parent,
+                    work_id=str(part_id),
+                )
+            add_parts(part_id, names, movement.number if movement else parent)
+
+    add_parts(root_id, list(ancestors), None)
+    return ordered
+
+
+def _part_order(
+    row: Mapping[str, Any], positions: dict[str, int], names: Sequence[str]
+) -> tuple[Any, ...]:
+    """Return the sort key of a part among the other parts of its work."""
+    position = positions.get((row["mbid"] or "").casefold())
+    if position is None and (key := part_key(row["name"])) and isinstance(key[1], int):
+        position = key[1]
+    if position is None and (numbered := word_and_number(_part_name(row["name"], names))):
+        position = numbered[1]
+    return position is None, position or 0, row["name_sort"], int(row["item_id"])
+
+
+def _piece_name(name: str, names: Sequence[str]) -> str:
+    """
+    Return the name of a piece as a part of the given works, an excerpt by its own name.
+
+    An excerpt, such as "Excerpt from Die Walküre, WWV 86B: Akt III, Scene I, Walkürenritt",
+    is named "Walkürenritt (excerpt)".
+
+    :param name: The piece's MusicBrainz name.
+    :param names: The names of the works it is a part of, the nearest first.
+    """
+    if not name.startswith(_EXCERPT):
+        return _part_name(name, names)
+    rest = name.removeprefix(_EXCERPT)
+    sections = list(_SECTION_LABEL.finditer(rest))
+    own = rest[sections[-1].end() :] if sections else _part_name(rest, names)
+    return f"{own} (excerpt)"
+
+
+def _part_name(name: str, names: Sequence[str]) -> str:
+    """Return the name of a part without the longest of the given work names it starts with."""
+    shortest = name
+    for prefix in names:
+        if not (key := create_safe_string(prefix, True, True)):
+            continue
+        for end in range(1, len(name)):
+            head = create_safe_string(name[:end], True, True)
+            if not key.startswith(head):
+                break
+            # the work name ends where a word does, as "Tosca" never starts "Toscanini"
+            if head == key and not name[end].isalnum():
+                rest = name[end:].lstrip(" ,.:;/-\u2013\u2014")
+                if rest and len(rest) < len(shortest):
+                    shortest = rest
+                break
+    return shortest
 
 
 def _track_performing_credits(track: Track) -> list[Credit]:
@@ -1212,6 +1917,11 @@ def _with_title_work_type[WorkT: Work](work: WorkT) -> WorkT:
     """Return a work with the type its title names when it has no type of its own."""
     work.work_type = work.work_type or title_work_type(work.name)
     return work
+
+
+def _show_work_version(work: Work | ItemMapping, versions: Mapping[int, str]) -> None:
+    """Give a work the version it shows, none unless another library work shares its name."""
+    work.version = versions.get(int(work.item_id), "")
 
 
 def _sort_sql(table: str, field: SortField, direction: SortDirection | None) -> str:
