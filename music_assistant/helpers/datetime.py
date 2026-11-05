@@ -97,3 +97,13 @@ def local_clock_time_to_utc(hour: int, minute: int = 0) -> tuple[int, int]:
     )
     utc_datetime = local_datetime.astimezone(datetime.UTC)
     return utc_datetime.hour, utc_datetime.minute
+
+
+def release_year(date: str | None) -> int | None:
+    """
+    Read the year off a date of any precision, such as a MusicBrainz date.
+
+    :param date: The date, as a year, year-month or full date, if known.
+    :return: The year, or None if the date is absent or unparsable.
+    """
+    return int(year) if date and (year := date[:4]).isdigit() else None

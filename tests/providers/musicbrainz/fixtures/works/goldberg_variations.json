@@ -1,0 +1,212 @@
+{
+  "attributes": [
+    {
+      "type-id": "7526c19d-3be4-3420-b6cc-9fb6e49fa1a9",
+      "type": "Key",
+      "value": "G major",
+      "value-id": "de4a0e0c-7af9-3476-8f62-1f5c0e05f191"
+    }
+  ],
+  "iswcs": [],
+  "id": "1d51e560-2a59-4e97-8943-13052b6adc03",
+  "language": "zxx",
+  "type": null,
+  "languages": [
+    "zxx"
+  ],
+  "type-id": null,
+  "relations": [
+    {
+      "type": "composer",
+      "attribute-ids": {},
+      "source-credit": "",
+      "ended": true,
+      "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+      "end": "1741",
+      "target-credit": "",
+      "artist": {
+        "sort-name": "Bach, Johann Sebastian",
+        "disambiguation": "German Baroque period composer & musician",
+        "country": "DE",
+        "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+        "name": "Johann Sebastian Bach",
+        "type": "Person"
+      },
+      "attributes": [],
+      "target-type": "artist",
+      "direction": "backward",
+      "attribute-values": {},
+      "begin": "1741"
+    },
+    {
+      "series": {
+        "id": "d977f7fd-96c9-4e3e-83b5-eb484a9e6582",
+        "type-id": "49482ff0-fc9e-3b8c-a2d0-30e84d9df002",
+        "name": "Bach-Werke-Verzeichnis",
+        "type": "Catalogue",
+        "disambiguation": ""
+      },
+      "type": "part of",
+      "type-id": "b0d44366-cdf0-3acb-bee6-0f65a77a6ef0",
+      "attribute-values": {
+        "number": "BWV 988"
+      },
+      "begin": null,
+      "target-type": "series",
+      "direction": "backward",
+      "target-credit": "",
+      "attribute-ids": {
+        "number": "a59c5830-5ec7-38fe-9a21-c7ea54f6650a"
+      },
+      "source-credit": "",
+      "ordering-key": 839,
+      "ended": false,
+      "end": null,
+      "attributes": [
+        "number"
+      ]
+    },
+    {
+      "ended": false,
+      "end": null,
+      "attribute-ids": {
+        "number": "a59c5830-5ec7-38fe-9a21-c7ea54f6650a"
+      },
+      "source-credit": "",
+      "ordering-key": 11,
+      "target-credit": "",
+      "attributes": [
+        "number"
+      ],
+      "type-id": "b0d44366-cdf0-3acb-bee6-0f65a77a6ef0",
+      "type": "part of",
+      "series": {
+        "disambiguation": "2025",
+        "type": "Work series",
+        "name": "Classic 100: Piano",
+        "type-id": "b689f694-6305-3d78-954d-df6759a1877b",
+        "id": "75d093b1-e515-42a4-b908-876c9fe7d292"
+      },
+      "direction": "backward",
+      "target-type": "series",
+      "begin": null,
+      "attribute-values": {
+        "number": "11"
+      }
+    },
+    {
+      "target-type": "series",
+      "direction": "backward",
+      "attribute-values": {
+        "number": "2"
+      },
+      "begin": null,
+      "type": "part of",
+      "type-id": "b0d44366-cdf0-3acb-bee6-0f65a77a6ef0",
+      "series": {
+        "type-id": "b689f694-6305-3d78-954d-df6759a1877b",
+        "id": "a5612f6d-dc9c-43c6-8bc7-2d32dcd48368",
+        "type": "Work series",
+        "name": "Classic 100: Piano",
+        "disambiguation": "2004"
+      },
+      "attributes": [
+        "number"
+      ],
+      "source-credit": "",
+      "ordering-key": 2,
+      "attribute-ids": {
+        "number": "a59c5830-5ec7-38fe-9a21-c7ea54f6650a"
+      },
+      "end": null,
+      "ended": false,
+      "target-credit": ""
+    },
+    {
+      "target-credit": "",
+      "ended": false,
+      "end": null,
+      "attribute-ids": {},
+      "source-credit": "",
+      "work": {
+        "id": "c0b98a5b-a43c-41d6-8edd-73013b9a54b0",
+        "iswcs": [],
+        "attributes": [],
+        "language": "zxx",
+        "type-id": null,
+        "languages": [
+          "zxx"
+        ],
+        "type": null,
+        "title": "Goldberg-Variationen, BWV 988",
+        "disambiguation": "catch-all for arrangements"
+      },
+      "attributes": [],
+      "type-id": "51975ed8-bbfa-486b-9f28-5947f4370299",
+      "type": "arrangement",
+      "begin": null,
+      "attribute-values": {},
+      "direction": "forward",
+      "target-type": "work"
+    },
+    {
+      "type-id": "ca8d3642-ce5f-49f8-91f2-125d72524e6a",
+      "type": "parts",
+      "begin": null,
+      "attribute-values": {},
+      "direction": "forward",
+      "target-type": "work",
+      "target-credit": "",
+      "ended": false,
+      "end": null,
+      "attribute-ids": {},
+      "ordering-key": 2,
+      "source-credit": "",
+      "work": {
+        "type-id": null,
+        "languages": [
+          "zxx"
+        ],
+        "type": null,
+        "title": "Goldberg-Variationen, BWV 988: Variatio 1. a 1 Clav.",
+        "disambiguation": "",
+        "id": "84d128d5-7b06-3c41-ad1b-002a46821345",
+        "attributes": [],
+        "iswcs": [],
+        "language": "zxx"
+      },
+      "attributes": []
+    },
+    {
+      "type-id": "ca8d3642-ce5f-49f8-91f2-125d72524e6a",
+      "type": "parts",
+      "direction": "forward",
+      "target-type": "work",
+      "begin": null,
+      "attribute-values": {},
+      "ended": false,
+      "end": null,
+      "attribute-ids": {},
+      "ordering-key": 3,
+      "source-credit": "",
+      "target-credit": "",
+      "attributes": [],
+      "work": {
+        "title": "Goldberg-Variationen, BWV 988: Variatio 2. a 1 Clav.",
+        "disambiguation": "",
+        "languages": [
+          "zxx"
+        ],
+        "type-id": null,
+        "type": null,
+        "language": "zxx",
+        "id": "135e4c72-4f81-3d75-92d1-32497518758c",
+        "attributes": [],
+        "iswcs": []
+      }
+    }
+  ],
+  "disambiguation": "",
+  "title": "Goldberg-Variationen, BWV 988"
+}
