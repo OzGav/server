@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 from music_assistant_models.enums import ArtistEntityType, ArtistRole, ExternalID, Period, WorkType
-from music_assistant_models.errors import InvalidDataError
+from music_assistant_models.errors import InvalidDataError, MediaNotFoundError
 from music_assistant_models.media_items import (
     Artist,
     Credit,
@@ -273,6 +273,13 @@ async def _add_symphony_5(
     )
     track = await _add_track(mass, work, [movement.id], credit)
     return work, track, _controller(mass, [symphony, movement], artists)
+
+
+async def _track_work(mass: MusicAssistant, track: Track) -> tuple[Track, Work]:
+    """Return a library track as stored, with the library work it is on."""
+    stored = await mass.music.tracks.get_library_item(track.item_id)
+    assert stored.work is not None
+    return stored, await mass.music.works.get_library_item(stored.work.item_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -957,12 +964,16 @@ async def test_work_looked_up_again_takes_musicbrainz_current_values(mass: Music
     assert stored.catalog_numbers == ["BWV 2"]
 
 
-async def test_work_merged_on_musicbrainz_takes_the_new_id(mass: MusicAssistant) -> None:
-    """A work whose id MusicBrainz answers with another work takes that id."""
+async def test_work_merged_on_musicbrainz_takes_the_new_id_and_joins_its_holder(
+    mass: MusicAssistant,
+) -> None:
+    """A work whose id MusicBrainz answers with another work takes that id and joins its holder."""
     token = _token()
     new = MusicBrainzWork(id=str(uuid4()), title=f"Ave Maria {token}")
     old_id = str(uuid4())
     merged = await _add_work(mass, f"Ave Maria {token}", mbid=old_id)
+    track = await _add_track(mass, merged, [old_id])
+    holder = await _add_work(mass, f"Ave Maria (holder) {token}", mbid=new.id)
     ctrl = _controller(mass, [new])
     cast("AsyncMock", ctrl._musicbrainz_provider().get_work_details).side_effect = (  # type: ignore[union-attr]
         lambda work_id: new if work_id in (old_id, new.id) else None
@@ -971,6 +982,15 @@ async def test_work_merged_on_musicbrainz_takes_the_new_id(mass: MusicAssistant)
     stored = await _reload(ctrl, merged)
 
     assert stored.mbid == new.id
+    holders = await mass.music.works.get_library_items_by_external_id(
+        new.id, ExternalID.MB_WORK, limit=None
+    )
+    assert [x.item_id for x in holders] == [stored.item_id]
     assert not await mass.music.works.get_library_items_by_external_id(
         old_id, ExternalID.MB_WORK, limit=None
     )
+    # the work holding the track survives
+    assert stored.item_id == merged.item_id
+    with pytest.raises(MediaNotFoundError):
+        await mass.music.works.get_library_item(holder.item_id)
+    assert (await _track_work(mass, track))[1].item_id == merged.item_id
