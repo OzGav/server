@@ -70,6 +70,7 @@ from music_assistant.constants import (
     DB_TABLE_PLAY_HISTORY,
     DB_TABLE_PROVIDER_MAPPINGS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
     EXTERNAL_ID_PROVIDER,
     MASS_LOGGER_NAME,
 )
@@ -86,6 +87,7 @@ from music_assistant.controllers.music.constants import (
 )
 from music_assistant.controllers.music.helpers import (
     ResumePoint,
+    instrument_label,
     mappings_within_sources,
     preferred_thumb,
     provider_mappings_from_urls,
@@ -160,6 +162,7 @@ ItemCls = TypeVar("ItemCls", bound="MediaItemType")
 
 JSON_KEYS = (
     "artists",
+    "credits",
     "track_album",
     "metadata",
     "provider_mappings",
@@ -181,6 +184,7 @@ RELATION_TABLE_COLUMNS = {
     DB_TABLE_ALBUM_TRACKS: ("track_id", "album_id", "disc_number", "track_number"),
     DB_TABLE_AUDIOBOOK_ARTISTS: ("audiobook_id", "artist_id"),
     DB_TABLE_TRACK_ARTISTS: ("track_id", "artist_id"),
+    DB_TABLE_TRACK_CREDITS: ("track_id", "artist_id", "role", "instrument", "position"),
 }
 
 # When set (task-local), per-item MEDIA_ITEM_ADDED/UPDATED events and the on_item_updated
@@ -3382,6 +3386,8 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         db_row_dict = dict(db_row)
         db_row_dict["provider"] = "library"
         db_row_dict["favorite"] = parse_optional_bool(db_row_dict["favorite"])
+        if "is_classical" in db_row_dict:
+            db_row_dict["is_classical"] = bool(db_row_dict["is_classical"])
         db_row_dict["item_id"] = str(db_row_dict["item_id"])
         db_row_dict["date_added"] = datetime.fromtimestamp(
             db_row_dict["timestamp_added"], tz=UTC
@@ -3393,6 +3399,18 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             if not (raw_value := db_row_dict[key]):
                 continue
             db_row_dict[key] = json_loads(raw_value)
+
+        # a track keeps its classical tag in a column of its own
+        if "classical_tag" in db_row_dict:
+            db_row_dict["metadata"] = {
+                **(db_row_dict.get("metadata") or {}),
+                "classical_tag": bool(db_row_dict.pop("classical_tag")),
+            }
+
+        for credit in db_row_dict.get("credits") or ():
+            credit["instrument_label"] = instrument_label(
+                credit["instrument"], credit["artist"]["name"]
+            )
 
         # parse "fully_played" as bool if present in the row
         if "fully_played" in db_row_dict:
@@ -4375,6 +4393,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         db_id: int,
         artists: Iterable[Artist | ItemMapping],
         overwrite: bool = False,
+        resolved_artists: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """
         Store the main artists of an album or track.
@@ -4386,6 +4405,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         :param db_id: Library id of the item.
         :param artists: The main artists.
         :param overwrite: Replace the stored main artists rather than adding to them.
+        :param resolved_artists: Library ids of the artists resolved so far, by provider and item id.
         """
         all_artists = list(artists)
         if not all_artists:
@@ -4399,10 +4419,13 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                 )
             return
         # look up all artists first so a failing lookup leaves the stored rows untouched
-        artist_ids = [
-            await self.mass.music.artists.get_or_add_library_artist_id(artist)
-            for artist in all_artists
-        ]
+        resolved = {} if resolved_artists is None else resolved_artists
+        artist_ids = []
+        for artist in all_artists:
+            key = (artist.provider, artist.item_id)
+            if key not in resolved:
+                resolved[key] = await self.mass.music.artists.get_or_add_library_artist_id(artist)
+            artist_ids.append(resolved[key])
         if overwrite:
             await self.mass.music.database.delete(table, {item_column: db_id})
         for artist_id in artist_ids:
@@ -4440,6 +4463,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                 (DB_TABLE_ALBUM_ARTISTS, "artist_id"),
                 (DB_TABLE_AUDIOBOOK_ARTISTS, "artist_id"),
                 (DB_TABLE_TRACK_ARTISTS, "artist_id"),
+                (DB_TABLE_TRACK_CREDITS, "artist_id"),
             )
         if self.media_type == MediaType.AUDIOBOOK:
             return ((DB_TABLE_AUDIOBOOK_ARTISTS, "audiobook_id"),)
@@ -4447,6 +4471,7 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             return (
                 (DB_TABLE_ALBUM_TRACKS, "track_id"),
                 (DB_TABLE_TRACK_ARTISTS, "track_id"),
+                (DB_TABLE_TRACK_CREDITS, "track_id"),
             )
         return ()
 
