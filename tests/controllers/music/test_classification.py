@@ -614,6 +614,43 @@ async def test_update_all_gives_existing_composers_their_period(
     assert await _period(mass, composer) == Period.ROMANTIC
 
 
+async def _offer_sort_name(mass: MusicAssistant, artist: Artist, sort_name: str) -> str | None:
+    """Offer the library a sort name for an artist and return the sort name it stores."""
+    library_artist = await mass.music.artists.get_library_item(artist.item_id)
+    library_artist.sort_name = sort_name
+    await mass.music.artists.update_item_in_library(artist.item_id, library_artist)
+    return (await mass.music.artists.get_library_item(artist.item_id)).sort_name
+
+
+@pytest.mark.parametrize(
+    ("sort_name", "classical", "expected"),
+    [
+        (None, True, "Copland, Aaron"),
+        ("Copland, A.", True, "Copland, A."),
+        (None, False, None),
+    ],
+)
+async def test_classical_artist_takes_a_real_sort_name(
+    mass: MusicAssistant, sort_name: str | None, classical: bool, expected: str | None
+) -> None:
+    """
+    A classical artist's sort name made from its name gives way to one such as MusicBrainz's.
+
+    A classical artist's sort name from the tags is kept, as is the sort name made from its
+    name of an artist that is not classical.
+    """
+    composer = await _add_artist(mass, "Aaron Copland", sort_name=sort_name)
+    await _add_track(
+        mass,
+        credits=[Credit(artist=composer, role=ArtistRole.COMPOSER)],
+        classical_tag=classical,
+    )
+
+    stored = await _offer_sort_name(mass, composer, "Copland, Aaron")
+
+    assert stored == (expected or composer.sort_name)
+
+
 class TestHasContent:
     """The classical content probe, on a library of its own."""
 

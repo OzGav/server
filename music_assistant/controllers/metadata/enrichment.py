@@ -66,7 +66,7 @@ from .constants import (
     REFRESH_INTERVAL,
     REFRESH_RETRY_INTERVAL,
 )
-from .helpers import fill_artist_from_musicbrainz
+from .helpers import fill_artist_from_musicbrainz, is_latin, musicbrainz_name
 
 if TYPE_CHECKING:
     import logging
@@ -79,7 +79,7 @@ if TYPE_CHECKING:
     from music_assistant import MusicAssistant
     from music_assistant.models.media_capabilities import MusicDiscoveryMixin
     from music_assistant.models.metadata_provider import MetadataProvider
-    from music_assistant.providers.musicbrainz.models import MusicBrainzRelease
+    from music_assistant.providers.musicbrainz.models import MusicBrainzArtist, MusicBrainzRelease
 
 # how many reference albums and tracks an artist is identified on MusicBrainz through
 MAX_MUSICBRAINZ_REF_ITEMS = 3
@@ -685,6 +685,9 @@ class MetadataEnrichmentMixin:
         Fill an artist in from MusicBrainz and link it to the music providers MusicBrainz knows.
 
         The artist takes its Discogs id, type and life dates, and a classical composer its period.
+        A classical composer, or a classical artist named in another script, takes the name and
+        sort name MusicBrainz gives it in Latin script. Otherwise a classical artist takes the
+        sort name MusicBrainz gives it.
 
         :param artist: The library artist to link.
         :param follow_merged: Give an artist MusicBrainz merged into another the other's id; not
@@ -710,6 +713,13 @@ class MetadataEnrichmentMixin:
                 # a period from the tags or genres is kept
                 if not artist.period and (period := await self._composer_period(artist)):
                     artist.period = period
+                # only a sort name made from the artist's name gives way to this one
+                if (
+                    artist.is_classical
+                    and not await self._name_after_musicbrainz(artist, details)
+                    and details.sort_name
+                ):
+                    artist.sort_name = details.sort_name
                 if self.link_providers_via_musicbrainz:
                     await self.mass.music.artists.link_musicbrainz_mappings(artist, urls)
             except _TEMPORARY_ERRORS as err:
@@ -997,6 +1007,30 @@ class MetadataEnrichmentMixin:
         if not (period := life_span_period(artist)):
             return None
         return period if await self._is_classical_composer(int(artist.item_id)) else None
+
+    async def _name_after_musicbrainz(self, artist: Artist, details: MusicBrainzArtist) -> bool:
+        """
+        Give a library artist the name MusicBrainz gives it, in Latin script.
+
+        An alias in the user's metadata language comes before an English one. An artist not
+        credited as classical composer is only renamed when its name is not in Latin script.
+
+        :param artist: The library artist holding the MusicBrainz id.
+        :param details: The MusicBrainz artist with its aliases.
+        :return: Whether the artist carries that name and sort name.
+        """
+        mb_name = musicbrainz_name(details, self.preferred_language)
+        if not mb_name:
+            return False
+        if (artist.name, artist.sort_name) == mb_name:
+            return True
+        if is_latin(artist.name) and not await self._is_classical_composer(int(artist.item_id)):
+            return False
+        if artist.name != mb_name[0]:
+            self.logger.debug('Renaming "%s" to "%s"', artist.name, mb_name[0])
+        await self.mass.music.artists.set_library_artist_name(int(artist.item_id), *mb_name)
+        artist.name, artist.sort_name = mb_name
+        return True
 
     async def _is_classical_composer(self, artist_id: int) -> bool:
         """Return whether a library artist is a classical artist credited as composer."""

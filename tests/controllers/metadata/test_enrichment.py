@@ -44,6 +44,7 @@ from music_assistant.controllers.metadata.enrichment import MetadataEnrichmentMi
 from music_assistant.controllers.music.helpers import fill_track_from_recording
 from music_assistant.controllers.music.listing_cache import Listing
 from music_assistant.providers.musicbrainz.models import (
+    MusicBrainzAlias,
     MusicBrainzArtist,
     MusicBrainzLifeSpan,
     MusicBrainzRecording,
@@ -1750,6 +1751,119 @@ async def test_track_identity_with_linking_disabled_fills_ids_but_links_nothing(
     assert (ExternalID.ISRC, "GBSTK0700001") in track.external_ids
     assert track.metadata.last_musicbrainz_lookup is not None
     _mass(enrichment).music.tracks.link_musicbrainz_mappings.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("is_classical", "expected"), [(True, "Copland, Aaron"), (False, None)])
+async def test_artist_identity_offers_musicbrainz_sort_name_for_classical_artists(
+    is_classical: bool, expected: str | None
+) -> None:
+    """A classical artist is offered the sort name MusicBrainz knows; other artists are not."""
+    details = MusicBrainzArtist(id=OTHER_MBID, name="Aaron Copland", sort_name="Copland, Aaron")
+    enrichment = _enrichment(_musicbrainz(artist=details))
+    # a classical artist the library holds as no composer
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": 0}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name="Aaron Copland",
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        is_classical=is_classical,
+    )
+    default_sort_name = artist.sort_name
+
+    await enrichment._link_artist_to_musicbrainz(artist)
+
+    assert artist.sort_name == (expected or default_sort_name)
+
+
+def _rubinstein() -> MusicBrainzArtist:
+    """Return a composer whose MusicBrainz main name is in Cyrillic script."""
+    return MusicBrainzArtist(
+        id=OTHER_MBID,
+        name="Антон Григорьевич Рубинштейн",
+        sort_name="Рубинштейн, Антон Григорьевич",
+        aliases=[
+            MusicBrainzAlias("Anton Rubinstein", "Rubinstein, Anton", locale="en", primary=True)
+        ],
+    )
+
+
+async def _link_classical_artist(
+    name: str, sort_name: str | None, is_composer: bool
+) -> tuple[Artist, MagicMock, MetadataEnrichmentMixin]:
+    """
+    Link a classical artist holding a MusicBrainz id.
+
+    :param name: The library name of the artist.
+    :param sort_name: The library sort name of the artist, made from its name if None.
+    :param is_composer: Whether the library credits the artist as a classical composer.
+    :return: The artist, the MusicBrainz provider stub and the enrichment mixin.
+    """
+    musicbrainz = _musicbrainz(artist=_rubinstein())
+    enrichment = _enrichment(musicbrainz)
+    artists = _mass(enrichment).music.artists
+    artists.set_library_artist_name = AsyncMock()
+    _mass(enrichment).music.database.get_rows_from_query = AsyncMock(
+        return_value=[{"is_classical_composer": int(is_composer)}]
+    )
+    artist = Artist(
+        item_id="1",
+        provider="library",
+        name=name,
+        sort_name=sort_name,
+        provider_mappings=set(),
+        external_ids={(ExternalID.MB_ARTIST, OTHER_MBID)},
+        is_classical=True,
+    )
+    await enrichment._link_artist_to_musicbrainz(artist)
+    return artist, musicbrainz, enrichment
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "is_composer", "renamed"),
+    [
+        # the English name MusicBrainz gives a Cyrillic main name
+        ("Rubenstein", True, True),
+        ("Rubenstein", False, False),
+        ("Антон Рубинштейн", False, True),
+    ],
+)
+async def test_artist_identity_gives_a_composer_its_musicbrainz_name(
+    name: str, is_composer: bool, renamed: bool
+) -> None:
+    """
+    A composer holding an id takes the name MusicBrainz gives it in Latin script.
+
+    A classical artist not credited as composer keeps its own name, unless it is in another
+    script.
+    """
+    artist, musicbrainz, enrichment = await _link_classical_artist(name, None, is_composer)
+
+    musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
+    set_name = _mass(enrichment).music.artists.set_library_artist_name
+    if renamed:
+        set_name.assert_awaited_once_with(1, "Anton Rubinstein", "Rubinstein, Anton")
+        assert (artist.name, artist.sort_name) == ("Anton Rubinstein", "Rubinstein, Anton")
+    else:
+        set_name.assert_not_awaited()
+        assert artist.name == name
+
+
+@pytest.mark.asyncio
+async def test_artist_identity_leaves_a_composer_already_named_alone() -> None:
+    """A composer already carrying its MusicBrainz name costs no lookup and no rename."""
+    _artist, musicbrainz, enrichment = await _link_classical_artist(
+        "Anton Rubinstein", "Rubinstein, Anton", is_composer=True
+    )
+
+    musicbrainz.get_artist_details.assert_awaited_once_with(OTHER_MBID)
+    _mass(enrichment).music.database.get_rows_from_query.assert_not_awaited()
+    _mass(enrichment).music.artists.set_library_artist_name.assert_not_awaited()
 
 
 @pytest.mark.asyncio
