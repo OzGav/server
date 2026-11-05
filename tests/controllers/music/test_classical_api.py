@@ -153,6 +153,7 @@ async def test_composers(library: _Library) -> None:
         ("Ludwig van Beethoven", 3, 7),
         ("Antonio Vivaldi", 2, 2),
     ]
+    assert [x.artist.period for x in rows] == [Period.CLASSICAL, None]
 
 
 @pytest.mark.parametrize(
@@ -360,6 +361,7 @@ async def test_works(library: _Library) -> None:
     assert rows[0].work.catalog_numbers == ["Op. 55"]
     assert [x.name for x in rows[0].work.composers] == ["Ludwig van Beethoven"]
     assert all(x.part_names == [] for x in rows)
+    assert [x.period for x in rows] == [Period.CLASSICAL] * 3 + [None] * 2
     # works without a stored type, alone or listed, show the type their title names
     assert [x.work.work_type for x in rows] == [
         WorkType.SYMPHONY,
@@ -699,6 +701,28 @@ async def test_works_type_filter(
     assert [x.work.item_id for x in rows] == [library.work_id(x) for x in expected]
 
 
+@pytest.mark.parametrize(
+    ("period", "work_type", "expected"),
+    [
+        ([Period.CLASSICAL], None, ["Eroica", "Fifth", "Emperor"]),
+        ([Period.BAROQUE, Period.CLASSICAL], None, ["Eroica", "Fifth", "Emperor"]),
+        ([Period.BAROQUE], None, []),
+        ([], None, ["Eroica", "Fifth", "Emperor", "Spring", "Gloria"]),
+        ([Period.CLASSICAL], [WorkType.CONCERTO], ["Emperor"]),
+    ],
+)
+async def test_works_period_filter(
+    library: _Library,
+    period: list[Period],
+    work_type: list[WorkType] | None,
+    expected: list[str],
+) -> None:
+    """The period filter keeps the works whose composer is of any chosen period."""
+    rows = await library.mass.music.classical.works(period=period, work_type=work_type)
+
+    assert [x.work.item_id for x in rows] == [library.work_id(x) for x in expected]
+
+
 async def test_filter_values(library: _Library) -> None:
     """The filter value commands return the values found across each whole list."""
     classical = library.mass.music.classical
@@ -710,6 +734,7 @@ async def test_filter_values(library: _Library) -> None:
         roles=[ArtistRole.CONDUCTOR, ArtistRole.ORCHESTRA, ArtistRole.CHOIR, ArtistRole.SOLOIST]
     )
     assert await classical.work_filters() == ClassicalWorkFilters(
+        periods=[Period.CLASSICAL],
         work_types=[WorkType.SYMPHONY, WorkType.CONCERTO],
         work_type_unknown=True,
         earliest_year=1720,
@@ -2858,6 +2883,22 @@ def test_specific_role_leads_over_general_performer_role() -> None:
             ],
             [([1], 1977, {10, 11}), ([2], 1977, {10, 12})],
         ),
+        # two recordings by the same conductor on one album are told apart by their years
+        (
+            {"performers": {10}, "leaders": {10}, "year": 2002, "album_id": 5},
+            [{"recording_year": 1955}, {"recording_year": 1981}],
+            [([1], 1955, {10}), ([2], 1981, {10})],
+        ),
+        # a performance takes the year it was recorded, its album's year only without one
+        (
+            {"year": 1990},
+            [
+                {"performers": {10}, "leaders": {10}, "recording_year": 1962},
+                {"performers": {10}, "leaders": {10}, "recording_year": 1962, "movement": 2},
+                {"performers": {11}, "leaders": {11}},
+            ],
+            [([1, 2], 1962, {10}), ([3], 1990, {11})],
+        ),
     ],
 )
 def test_performances(
@@ -2869,7 +2910,7 @@ def test_performances(
     The tracks of a work group into performances by conductor and ensemble, else by album.
 
     Without a conductor or ensemble, a compilation's tracks group by their performers. The
-    year of their album dates them.
+    recording year tells performances apart and dates them, else the year of their album.
 
     :param shared: The details all tracks share, as _work_track takes them.
     :param tracks: The details of each track, numbered from 1.
@@ -2886,6 +2927,32 @@ def test_performances(
         )
         == expected
     )
+
+
+async def test_recordings_read_the_recording_year_of_their_tracks(library: _Library) -> None:
+    """A recording is dated by the recording year stored on its tracks."""
+    karajan_tracks = [x for x in library.tracks.values() if x.name.startswith("Karajan")]
+    database = library.mass.music.database
+    for track in karajan_tracks:
+        await database.execute_write(
+            "UPDATE tracks SET metadata = json_set(metadata, '$.recording_year', 1961) "
+            "WHERE item_id = :item_id",
+            {"item_id": int(track.item_id)},
+        )
+    try:
+        recordings = await library.mass.music.classical.recordings(library.work_id("Fifth"))
+    finally:
+        for track in karajan_tracks:
+            await database.execute_write(
+                "UPDATE tracks SET metadata = json_remove(metadata, '$.recording_year') "
+                "WHERE item_id = :item_id",
+                {"item_id": int(track.item_id)},
+            )
+
+    assert [(x.year, _track_names(x)[0]) for x in recordings] == [
+        (1961, "Karajan I"),
+        (1979, "Bernstein I"),
+    ]
 
 
 async def test_work_movements_come_from_its_tracks(library: _Library) -> None:
@@ -3131,6 +3198,7 @@ def _work_track(
     year: int | None,
     leaders: set[int] | None = None,
     movement: int = 1,
+    recording_year: int | None = None,
     album_id: int | None = None,
     directors: set[int] | None = None,
     compilation: bool = False,
@@ -3144,6 +3212,7 @@ def _work_track(
     :param year: The year of the track's album.
     :param leaders: The ids of the conductors and ensembles of the track.
     :param movement: The movement number of the track.
+    :param recording_year: The year the track was recorded.
     :param album_id: The id of the track's album.
     :param directors: The ids of the conductors and orchestras of the track.
     :param compilation: Whether the track's album is a compilation.
@@ -3166,6 +3235,7 @@ def _work_track(
         track_id=track_id,
         movement=movement,
         mb_recording=None,
+        recording_year=recording_year,
         performers=performers,
         leaders=leaders or set(),
         directors=directors or set(),

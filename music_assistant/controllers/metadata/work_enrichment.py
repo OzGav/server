@@ -28,13 +28,17 @@ from music_assistant.constants import (
 )
 from music_assistant.controllers.music.helpers import group_piece
 from music_assistant.helpers.compare import is_named_by
+from music_assistant.helpers.logging import log_once
 from music_assistant.helpers.work_titles import (
+    parent_work_name,
     parse_catalog_numbers,
     part_label,
+    split_movement_title,
     without_movement_number,
     without_part_subtitle,
 )
 from music_assistant.providers.musicbrainz.api_client import fresh_reads
+from music_assistant.providers.musicbrainz.constants import MUSICBRAINZ_WEB_URL
 from music_assistant.providers.musicbrainz.models import part_name
 from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider
 
@@ -46,7 +50,7 @@ from .helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Hashable, Sequence
 
     from music_assistant_models.media_items import Album, WorkMovement
 
@@ -62,13 +66,14 @@ class WorkEnrichmentMixin:
     """
     MusicBrainz work enrichment for the MetaDataController.
 
-    Expects to be mixed with a class providing ``mass``, ``logger``, ``preferred_language``,
-    ``_musicbrainz_provider`` and ``_follow_merged_id``.
+    Expects to be mixed with a class providing ``mass``, ``logger``, ``_logged_hints``,
+    ``preferred_language``, ``_musicbrainz_provider`` and ``_follow_merged_id``.
     """
 
     if TYPE_CHECKING:
         mass: MusicAssistant
         logger: logging.Logger
+        _logged_hints: set[Hashable]
 
         @property
         def preferred_language(self) -> str: ...  # noqa: D102
@@ -133,6 +138,7 @@ class WorkEnrichmentMixin:
             await works.update_item_in_library(work.item_id, work)
             return work
         given = work
+        self._log_part_without_parent(hierarchy[0])
         # MusicBrainz answers a merged work's old id with the work it was merged into
         await self._follow_merged_id(work, hierarchy[0].id)
         # the caller reads the outcome off the work it passed in, which a merge may remove
@@ -642,6 +648,27 @@ class WorkEnrichmentMixin:
         await artists.update_item_in_library(artist.item_id, artist)
         # the oldest of the artists sharing the id survives
         await artists.merge_library_artists_by_mbid(int(artist.item_id), mb_artist.id)
+
+    def _log_part_without_parent(self, mb_work: MusicBrainzWork) -> None:
+        """Log, once per larger work, a MusicBrainz work titled as its part but part of no work."""
+        if mb_work.parent_relation:
+            return
+        movement = split_movement_title(mb_work.title)
+        if not (larger := movement.name if movement else parent_work_name(mb_work.title)):
+            return
+        log_once(
+            self.logger,
+            self._logged_hints,
+            ("larger_work", larger.casefold()),
+            logging.INFO,
+            'MusicBrainz work "%s" looks like a part of "%s" but is not linked to it, add its '
+            '"part of" relationship, or merge it into the same part listed there; its other '
+            "parts may need the same: %s/work/%s",
+            mb_work.title,
+            larger,
+            MUSICBRAINZ_WEB_URL,
+            mb_work.id,
+        )
 
 
 def _fill_work_from_musicbrainz(

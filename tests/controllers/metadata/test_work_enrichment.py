@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import pathlib
 import re
 from time import time
@@ -101,6 +102,7 @@ def _controller(
     ctrl = MetaDataController.__new__(MetaDataController)
     ctrl.mass = mass
     ctrl.logger = Mock()
+    ctrl._logged_hints = set()
     by_id = {work.id: work for work in works}
     # MusicBrainz lists a part on its parent too
     for work in by_id.values():
@@ -778,6 +780,63 @@ def _passion(token: str) -> list[MusicBrainzWork]:
         relations=[MusicBrainzRelation(type="parts", direction="backward", work=part)],
     )
     return [movement, part, passion]
+
+
+@pytest.mark.parametrize(
+    ("title", "has_parent", "logged"),
+    [
+        ("Orchestral Suite no. 3, BWV 1068: II. Air", False, True),
+        ("La bohème, Act II", False, True),
+        ("Orchestral Suite no. 3, BWV 1068: II. Air", True, False),
+        # a whole work despite its colon
+        ("Romeo and Juliet: Suite no. 2", False, False),
+    ],
+)
+async def test_movement_without_a_parent_on_musicbrainz_is_logged_once(
+    mass: MusicAssistant,
+    caplog: pytest.LogCaptureFixture,
+    title: str,
+    has_parent: bool,
+    logged: bool,
+) -> None:
+    """A MusicBrainz work titled as a movement or act but part of no work is logged with it."""
+    levels = _work_levels((title, None), ("Orchestral Suite no. 3", "Suite"))
+    mb_work = levels[0] if has_parent else MusicBrainzWork(id=str(uuid4()), title=title)
+    work = await _add_work(mass, f"{title} {_token()}", mbid=mb_work.id)
+    ctrl = _controller(mass, [*levels[1:], mb_work])
+    ctrl.logger = logging.getLogger("test_work_hints")
+    caplog.set_level(logging.DEBUG, logger="test_work_hints")
+
+    await _enrich(ctrl, work)
+    await _enrich(ctrl, work)
+
+    larger = title.partition(":")[0] if ":" in title else "La bohème"
+    expected = (
+        f'MusicBrainz work "{title}" looks like a part of "{larger}" but is not linked to it, '
+        'add its "part of" relationship, or merge it into the same part listed there; its other '
+        f"parts may need the same: https://musicbrainz.org/work/{mb_work.id}"
+    )
+    hints = [(x.levelno, x.getMessage()) for x in caplog.records if "looks like a part" in x.msg]
+    assert hints == ([(logging.INFO, expected)] if logged else [])
+
+
+async def test_parts_without_a_parent_are_logged_once_per_larger_work(
+    mass: MusicAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Several unlinked parts of one larger work give a single hint."""
+    mb_works = [
+        MusicBrainzWork(id=str(uuid4()), title=f"Symphony no. 9, op. 125: {number}. Allegro")
+        for number in ("I", "II")
+    ]
+    ctrl = _controller(mass, mb_works)
+    ctrl.logger = logging.getLogger("test_work_hints_once")
+    caplog.set_level(logging.DEBUG, logger="test_work_hints_once")
+
+    for mb_work in mb_works:
+        await _enrich(ctrl, await _add_work(mass, f"{mb_work.title} {_token()}", mbid=mb_work.id))
+
+    hints = [x for x in caplog.records if "looks like a part" in x.msg]
+    assert len(hints) == 1
 
 
 async def test_every_level_above_a_movement_is_added_below_the_level_above_it(

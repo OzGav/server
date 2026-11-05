@@ -17,6 +17,7 @@ from music_assistant_models.enums import (
     ImageType,
     ListingType,
     MediaType,
+    Period,
     ProviderFeature,
     ProviderType,
     SortDirection,
@@ -177,6 +178,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         SELECT
             {self._summary_base_columns()},
             artists.artist_type,
+            artists.period,
             {self._provider_mappings_query()} AS provider_mappings
             FROM artists"""
         return query, {}
@@ -2056,6 +2058,12 @@ class ArtistsController(MediaControllerBase[Artist]):
             )
             raise InvalidDataError(msg)
 
+    async def _merge_library_item_references(self, target_id: int, source_id: int) -> None:
+        """Have the link run read the performers of a merged artist's classical tracks again."""
+        # a track's performers were matched to its artists as they were when it was read, so
+        # an artist that lacked the MusicBrainz id the other one carries was missed
+        await self.mass.music.tracks.reread_artist_recordings(source_id)
+
     async def _remove_music_artist_from_library(self, db_id: int, recursive: bool) -> None:
         # recursively also remove artist albums
         for db_row in await self.mass.music.database.get_rows_from_query(
@@ -2120,6 +2128,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         """Parse a raw summary db row into an ArtistSummary object."""
         item = cast("ArtistSummary", super()._parse_summary_row(db_row, hidden_sources))
         item.artist_type = ArtistType(db_row["artist_type"])
+        item.period = Period(period) if (period := db_row["period"]) else None
         return item
 
     async def _get_artist_discography_data(
