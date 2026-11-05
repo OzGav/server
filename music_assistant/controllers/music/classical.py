@@ -54,7 +54,11 @@ from music_assistant.constants import (
 from music_assistant.controllers.music.constants import BASE_SORT_FIELD_SQL
 from music_assistant.controllers.music.helpers import preferred_thumb, search_name_match_clause
 from music_assistant.controllers.music.listing import resolve_listing_sort
-from music_assistant.controllers.music.media.works import work_sort_sql
+from music_assistant.controllers.music.media.works import (
+    WORK_ROOTS,
+    work_search_sql,
+    work_sort_sql,
+)
 from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
 from music_assistant.helpers.credit_roles import PERFORMING_ROLES, SQL_PERFORMING_ROLES
 from music_assistant.helpers.json import json_loads
@@ -94,6 +98,15 @@ PERFORMER_CREDITS: Final[str] = f"""FROM (
     ) ta
     JOIN {DB_TABLE_TRACKS} t ON t.item_id = ta.track_id
     WHERE t.is_classical = 1"""
+
+# the composers of each listed work, its own or else those of its parts
+LISTED_WORK_COMPOSERS: Final[str] = f"""
+    SELECT r.root_id AS work_id, wa.artist_id
+    FROM ({WORK_ROOTS}) r
+    JOIN {DB_TABLE_WORK_ARTISTS} wa ON wa.work_id = r.item_id
+        AND wa.role = '{ArtistRole.COMPOSER.value}'
+    WHERE r.item_id = r.root_id OR NOT EXISTS (SELECT 1 FROM {DB_TABLE_WORK_ARTISTS} pa
+        WHERE pa.work_id = r.root_id AND pa.role = '{ArtistRole.COMPOSER.value}')"""
 
 # the year of the album a track is listed with
 TRACK_ALBUM_YEAR: Final[str] = f"""(SELECT {DB_TABLE_ALBUMS}.year FROM {DB_TABLE_ALBUM_TRACKS}
@@ -159,10 +172,10 @@ class ClassicalController:
             ListingType.CLASSICAL_COMPOSERS, sort_field, sort_direction
         )
         params: dict[str, Any] = {}
+        # only composers of a work are listed, so each row counts at least one work
         conditions = [
-            f"{DB_TABLE_ARTISTS}.item_id IN (SELECT artist_id FROM {DB_TABLE_TRACK_CREDITS} "
-            f"WHERE role = '{ArtistRole.COMPOSER.value}' "
-            f"AND track_id IN ({self._classical_tracks(params)}))"
+            f"{DB_TABLE_ARTISTS}.item_id IN "
+            f"(SELECT artist_id FROM ({self._composer_works_query(params)}))"
         ]
         if artist_id:
             params["artist_id"] = int(artist_id)
@@ -182,7 +195,9 @@ class ClassicalController:
                 DB_TABLE_ARTISTS, conditions, params, search, sort_key, limit, offset
             )
             works = await self._composer_works(ids)
-        performances = await self._performances({x for item_id in ids for x in works[item_id]})
+        performances = await self._listed_work_performances(
+            {x for item_id in ids for x in works[item_id]}
+        )
         fanarts = await self._artist_fanarts(ids)
         return [
             ClassicalComposer(
@@ -235,7 +250,7 @@ class ClassicalController:
             sort_key = _sort_sql(DB_TABLE_ARTISTS, SortField.NAME, SortDirection.ASC)
             ids = await self._ids(DB_TABLE_ARTISTS, conditions, params, search, sort_key)
             roles, works = await self._performer_credits(None)
-            performances = await self._performances(None)
+            performances = await self._listed_work_performances(None)
             counts = {x: _performer_recording_count(x, works[x], performances) for x in ids}
             ids = _page(
                 sorted(ids, key=lambda x: counts[x], reverse=direction == SortDirection.DESC),
@@ -248,7 +263,9 @@ class ClassicalController:
                 DB_TABLE_ARTISTS, conditions, params, search, sort_key, limit, offset
             )
             roles, works = await self._performer_credits(ids)
-            performances = await self._performances({x for item_id in ids for x in works[item_id]})
+            performances = await self._listed_work_performances(
+                {x for item_id in ids for x in works[item_id]}
+            )
         fanarts = await self._artist_fanarts(ids)
         return [
             _performer_row(
@@ -275,6 +292,10 @@ class ClassicalController:
     ) -> list[ClassicalWorkEntry]:
         """
         Get the works of the classical library, with their recording counts.
+
+        The parts of a work, such as the arias of an opera, are listed through that work:
+        its recordings, filters and search cover those of its parts, and each row carries
+        the names of all its parts in the library.
 
         :param composer_id: Only include works by this composer (library artist id).
         :param performer_id: Only include works this performer (library artist id) performs
@@ -303,7 +324,7 @@ class ClassicalController:
         if field == SortField.RECORDING_COUNT:
             sort_key = work_sort_sql(SortField.COMPOSER, SortDirection.ASC, bool(composer_id))
             ids = await self._work_ids(sort_key, **filters)
-            performances = await self._performances(None)
+            performances = await self._listed_work_performances(None)
             ids = _page(
                 sorted(
                     ids,
@@ -316,11 +337,13 @@ class ClassicalController:
         else:
             sort_key = work_sort_sql(field, direction, bool(composer_id))
             ids = await self._work_ids(sort_key, limit=limit, offset=offset, **filters)
-            performances = await self._performances(ids)
+            performances = await self._listed_work_performances(ids)
+        part_names = await self._part_names(ids)
         return [
             ClassicalWorkEntry(
                 work=_with_title_work_type(cast("WorkSummary", work)),
                 recording_count=_recording_count(performances[int(work.item_id)], performer),
+                part_names=part_names[int(work.item_id)],
             )
             for work in await self._items(self.mass.music.works, ids)
         ]
@@ -341,25 +364,31 @@ class ClassicalController:
         """
         Get the recordings of a work, or every recording a performer performs on.
 
-        Recordings of a work come by year (undated last), then conductor, then ensemble. A
-        performer's recordings across their works come per work, in the order of the works
-        listing, and within a work in that same order.
+        Recordings of a work come by year (undated last), then conductor, then ensemble, followed by
+        those of each of its parts, each recording carrying its own work and the work that one is a
+        part of, if any. A performer's recordings across their works come per work, in the order of
+        the works listing, and within a work in that same order.
 
         :param work_id: Library id of the work. Required unless performer_id is given.
         :param performer_id: Only include the recordings this performer (library artist id)
             performs on.
         """
         if work_id:
-            work_ids = [int(work_id)]
+            listed_ids = [int(work_id)]
         elif performer_id:
             sort_key = work_sort_sql(*resolve_listing_sort(ListingType.CLASSICAL_WORKS))
-            work_ids = await self._work_ids(sort_key, performer=int(performer_id))
+            listed_ids = await self._work_ids(sort_key, performer=int(performer_id))
         else:
             msg = "Either work_id or performer_id is required"
             raise InvalidDataError(msg)
-        works = {
-            int(work.item_id): ItemMapping.from_item(work)
-            for work in await self._items(self.mass.music.works, work_ids)
+        parts = await self._work_parts(listed_ids)
+        work_ids = [x for listed_id in listed_ids for x in parts.get(listed_id, [listed_id])]
+        work_items = await self._items(self.mass.music.works, work_ids)
+        works = {int(work.item_id): ItemMapping.from_item(work) for work in work_items}
+        parent_works = {
+            int(work.item_id): ItemMapping.from_item(work.parent_work)
+            for work in work_items
+            if work.parent_work
         }
         performances = await self._performances(work_ids)
         if performer_id:
@@ -397,7 +426,10 @@ class ClassicalController:
             for work in work_ids
             if work in works
             for recording in sorted(
-                (_build_recording(works[work], x, tracks, albums) for x in performances[work]),
+                (
+                    _build_recording(works[work], parent_works.get(work), x, tracks, albums)
+                    for x in performances[work]
+                ),
                 key=_recording_sort_key,
             )
         ]
@@ -501,19 +533,25 @@ class ClassicalController:
         params: dict[str, Any] = {}
         if performer:
             params["performer_id"] = performer
-            conditions = [
-                f"{DB_TABLE_WORKS}.item_id IN (SELECT t.work_id {PERFORMER_CREDITS} "
+            work_ids = (
+                f"SELECT t.work_id {PERFORMER_CREDITS} "
                 f"AND t.item_id IN ({self._classical_tracks(params)}) "
-                "AND ta.artist_id = :performer_id)"
-            ]
+                "AND ta.artist_id = :performer_id"
+            )
         else:
-            conditions = [f"{DB_TABLE_WORKS}.item_id IN ({self._classical_work_ids(params)})"]
+            work_ids = self._classical_work_ids(params)
+        conditions = [
+            f"{DB_TABLE_WORKS}.item_id IN (SELECT r.root_id FROM ({WORK_ROOTS}) r "
+            f"WHERE r.item_id IN ({work_ids}))"
+        ]
         if composer_id:
             params["composer_id"] = int(composer_id)
             conditions.append(
-                f"{DB_TABLE_WORKS}.item_id IN (SELECT work_id FROM {DB_TABLE_WORK_ARTISTS} "
-                f"WHERE role = '{ArtistRole.COMPOSER.value}' AND artist_id = :composer_id)"
+                f"{DB_TABLE_WORKS}.item_id IN (SELECT work_id FROM ({LISTED_WORK_COMPOSERS}) "
+                "WHERE artist_id = :composer_id)"
             )
+        if search and (search_term := create_safe_string(search, True, True)):
+            conditions.append(work_search_sql(search_term, params))
         # works without a composition year drop out once a bound is set
         if year_from is not None:
             params["year_from"] = year_from
@@ -521,7 +559,7 @@ class ClassicalController:
         if year_to is not None:
             params["year_to"] = year_to
             conditions.append(f"{DB_TABLE_WORKS}.composition_year <= :year_to")
-        return await self._ids(DB_TABLE_WORKS, conditions, params, search, sort_key, limit, offset)
+        return await self._ids(DB_TABLE_WORKS, conditions, params, None, sort_key, limit, offset)
 
     async def _ids(
         self,
@@ -585,13 +623,9 @@ class ClassicalController:
         return fanarts
 
     async def _composer_works(self, artist_ids: Sequence[int] | None) -> dict[int, set[int]]:
-        """Return the classical works of the given composers, or of every composer."""
+        """Return the listed classical works of the given composers, or of every composer."""
         params: dict[str, Any] = {}
-        query = (
-            f"SELECT artist_id, work_id FROM {DB_TABLE_WORK_ARTISTS} "
-            f"WHERE role = '{ArtistRole.COMPOSER.value}' "
-            f"AND work_id IN ({self._classical_work_ids(params)})"
-        )
+        query = self._composer_works_query(params)
         if artist_ids is not None:
             query += " AND artist_id IN :artist_ids"
             params["artist_ids"] = list(artist_ids)
@@ -601,10 +635,22 @@ class ClassicalController:
                 works[int(row["artist_id"])].add(int(row["work_id"]))
         return works
 
+    def _composer_works_query(self, params: dict[str, Any]) -> str:
+        """Return a query selecting the composers with their listed works the calling user sees."""
+        return (
+            f"SELECT artist_id, work_id FROM ({LISTED_WORK_COMPOSERS}) "
+            f"WHERE work_id IN (SELECT r.root_id FROM ({WORK_ROOTS}) r "
+            f"WHERE r.item_id IN ({self._classical_work_ids(params)}))"
+        )
+
     async def _performer_credits(
         self, artist_ids: Sequence[int] | None
     ) -> tuple[dict[int, Counter[ArtistRole]], dict[int, set[int]]]:
-        """Return the credit count per performing role and the works of the given performers."""
+        """
+        Return the credit count per performing role and the listed works of performers.
+
+        :param artist_ids: The performers to return, or None for every performer.
+        """
         roles: dict[int, Counter[ArtistRole]] = defaultdict(Counter)
         works: dict[int, set[int]] = defaultdict(set)
         if artist_ids is not None and not artist_ids:
@@ -622,13 +668,66 @@ class ClassicalController:
         ):
             roles[int(row["artist_id"])][ArtistRole(row["role"])] = int(row["credit_count"])
         for row in await self.mass.music.database.get_rows_from_query(
-            f"SELECT DISTINCT ta.artist_id, t.work_id {PERFORMER_CREDITS}{scope} "
-            "AND t.work_id IS NOT NULL",
+            f"SELECT DISTINCT c.artist_id, r.root_id AS work_id "
+            f"FROM (SELECT ta.artist_id, t.work_id {PERFORMER_CREDITS}{scope}) c "
+            f"JOIN ({WORK_ROOTS}) r ON r.item_id = c.work_id",
             params,
             limit=0,
         ):
             works[int(row["artist_id"])].add(int(row["work_id"]))
         return roles, works
+
+    async def _work_parts(self, listed_ids: Iterable[int] | None) -> dict[int, list[int]]:
+        """Return the given listed works, or all of them, each with itself and then its parts."""
+        params: dict[str, Any] = {}
+        roots = "parent_work_id IS NULL"
+        if listed_ids is not None:
+            if not (unique_ids := list(set(listed_ids))):
+                return {}
+            params["listed_ids"] = unique_ids
+            roots = "item_id IN :listed_ids"
+        # the parts of parts, such as the arias of an act, count as parts of the listed work
+        query = (
+            f"WITH RECURSIVE tree(item_id, listed_id) AS (SELECT item_id, item_id "
+            f"FROM {DB_TABLE_WORKS} WHERE {roots} "
+            f"UNION SELECT w.item_id, tree.listed_id "
+            f"FROM {DB_TABLE_WORKS} w JOIN tree ON w.parent_work_id = tree.item_id) "
+            "SELECT tree.item_id, tree.listed_id "
+            f"FROM tree JOIN {DB_TABLE_WORKS} w ON w.item_id = tree.item_id "
+            "ORDER BY tree.item_id != tree.listed_id, w.name_sort, w.item_id"
+        )
+        parts: dict[int, list[int]] = defaultdict(list)
+        for row in await self.mass.music.database.get_rows_from_query(query, params, limit=0):
+            parts[int(row["listed_id"])].append(int(row["item_id"]))
+        return parts
+
+    async def _part_names(self, work_ids: Sequence[int]) -> dict[int, list[str]]:
+        """Return the names of the parts of the given works in the library, by work id."""
+        names: dict[int, list[str]] = defaultdict(list)
+        if not work_ids:
+            return names
+        for row in await self.mass.music.database.get_rows_from_query(
+            f"SELECT parent_work_id, name FROM {DB_TABLE_WORKS} "
+            "WHERE parent_work_id IN :work_ids ORDER BY name_sort, item_id",
+            {"work_ids": list(work_ids)},
+            limit=0,
+        ):
+            names[int(row["parent_work_id"])].append(row["name"])
+        return names
+
+    async def _listed_work_performances(
+        self, listed_ids: Iterable[int] | None
+    ) -> dict[int, list[_Performance]]:
+        """Return the performances of the given listed works or of all, including their parts'."""
+        parts = await self._work_parts(listed_ids)
+        performances = await self._performances(
+            None if listed_ids is None else [x for ids in parts.values() for x in ids]
+        )
+        listed: dict[int, list[_Performance]] = defaultdict(list)
+        for listed_id, work_ids in parts.items():
+            for work_id in work_ids:
+                listed[listed_id].extend(performances[work_id])
+        return listed
 
     async def _performances(self, work_ids: Iterable[int] | None) -> dict[int, list[_Performance]]:
         """Return the performances of the given classical works, or of every classical work."""
@@ -803,11 +902,20 @@ def _build_performance(
 
 def _build_recording(
     work: ItemMapping,
+    parent_work: ItemMapping | None,
     performance: _Performance,
     tracks: dict[int, Track],
     albums: dict[int, ItemMapping],
 ) -> Recording:
-    """Build a Recording from a performance and its library tracks and albums."""
+    """
+    Build a Recording from a performance and its library tracks and albums.
+
+    :param work: The work of the performance.
+    :param parent_work: The work that work is a part of, if any.
+    :param performance: The performance to build the recording of.
+    :param tracks: The library tracks of the performance, by track id.
+    :param albums: The albums of the performance, by album id.
+    """
     movement_tracks: list[Track] = []
     for track_id, appearance in performance.tracks:
         if not (track := tracks.get(track_id)):
@@ -827,6 +935,7 @@ def _build_recording(
     return Recording(
         key=performance.key,
         work=work,
+        parent_work=parent_work,
         tracks=movement_tracks,
         credits=sorted(performing_credits.values(), key=lambda x: PERFORMING_ROLES.index(x.role)),
         year=performance.year,
