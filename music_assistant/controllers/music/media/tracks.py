@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Final, Never, cast
 from aiohttp import ClientError
 from music_assistant_models.auth import Scope
 from music_assistant_models.enums import (
+    ArtistRole,
     ExternalID,
     ListingType,
     MediaType,
@@ -39,6 +40,7 @@ from music_assistant_models.helpers import create_safe_string
 from music_assistant_models.media_items import (
     Album,
     Artist,
+    Credit,
     ItemMapping,
     ItemMappingSummary,
     ProviderMapping,
@@ -51,6 +53,7 @@ from music_assistant.constants import (
     DB_TABLE_ALBUM_TRACKS,
     DB_TABLE_ALBUMS,
     DB_TABLE_TRACK_ARTISTS,
+    DB_TABLE_TRACK_CREDITS,
     DB_TABLE_TRACKS,
 )
 from music_assistant.controllers.metadata.constants import MUSICBRAINZ_LINK_DOMAINS
@@ -301,6 +304,7 @@ class TracksController(MediaControllerBase[Track]):
                     'media_type', 'artist',
                     'external_ids', json({self._external_ids_query(MediaType.ARTIST, "artists")})
                 )) FROM artists JOIN track_artists on track_artists.track_id = tracks.item_id  WHERE artists.item_id = track_artists.artist_id) AS artists,
+            {self._credits_query()} AS credits,
             (SELECT
                 json_object(
                 'item_id', albums.item_id,
@@ -332,6 +336,7 @@ class TracksController(MediaControllerBase[Track]):
             {self._summary_base_columns()},
             tracks.version,
             tracks.duration,
+            tracks.is_classical,
             json_extract(tracks.metadata, '$.explicit') AS explicit,
             json_extract(tracks.metadata, '$.release_date') AS release_date,
             {self._provider_mappings_query()} AS provider_mappings,
@@ -865,6 +870,7 @@ class TracksController(MediaControllerBase[Track]):
         await self.mass.music.database.delete(DB_TABLE_ALBUM_TRACKS, {"track_id": db_id})
         # delete entry(s) from trackartists table
         await self.mass.music.database.delete(DB_TABLE_TRACK_ARTISTS, {"track_id": db_id})
+        await self.mass.music.database.delete(DB_TABLE_TRACK_CREDITS, {"track_id": db_id})
 
     async def remove_album_link(self, item_id: str | int, album_id: str | int) -> None:
         """
@@ -1888,8 +1894,10 @@ class TracksController(MediaControllerBase[Track]):
         await self.set_external_ids(db_id, item.external_ids)
         # update/set provider_mappings table
         await self.set_provider_mappings(db_id, item.provider_mappings)
-        # set track artist(s)
-        await self._set_track_artists(db_id, item.artists)
+        # set track artist(s) and credits
+        resolved_artists: dict[tuple[str, str], int] = {}
+        await self._set_track_artists(db_id, item.artists, resolved_artists=resolved_artists)
+        await self._set_credits(db_id, item.credits, resolved_artists=resolved_artists)
         # handle track album
         if item.album:
             await self._set_track_album(
@@ -1944,9 +1952,15 @@ class TracksController(MediaControllerBase[Track]):
             cur_item.provider_mappings, update.provider_mappings, overwrite
         )
         await self.set_provider_mappings(db_id, provider_mappings, overwrite)
-        # set track artist(s)
+        # set track artist(s) and credits
         artists = update.artists if overwrite else cur_item.artists + update.artists
-        await self._set_track_artists(db_id, artists, overwrite=overwrite)
+        resolved_artists: dict[tuple[str, str], int] = {}
+        await self._set_track_artists(
+            db_id, artists, overwrite=overwrite, resolved_artists=resolved_artists
+        )
+        await self._set_credits(
+            db_id, update.credits, overwrite=overwrite, resolved_artists=resolved_artists
+        )
         # update/set track album
         if update.album and set_album:
             await self._set_track_album(
@@ -2116,6 +2130,7 @@ class TracksController(MediaControllerBase[Track]):
         db_id: int,
         artists: Iterable[Artist | ItemMapping],
         overwrite: bool = False,
+        resolved_artists: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """
         Store Track Artists.
@@ -2123,7 +2138,62 @@ class TracksController(MediaControllerBase[Track]):
         An empty set of artists never clears the stored rows: a track without any
         artist can not be played or resolved.
         """
-        await self._set_main_artists(DB_TABLE_TRACK_ARTISTS, "track_id", db_id, artists, overwrite)
+        await self._set_main_artists(
+            DB_TABLE_TRACK_ARTISTS, "track_id", db_id, artists, overwrite, resolved_artists
+        )
+
+    async def _set_credits(
+        self,
+        db_id: int,
+        item_credits: Iterable[Credit],
+        overwrite: bool = False,
+        resolved_artists: dict[tuple[str, str], int] | None = None,
+    ) -> None:
+        """
+        Store the credits of a track other than its main artists, replaced on overwrite.
+
+        :param db_id: Library id of the track.
+        :param item_credits: The track's credits; main artist credits are left out.
+        :param overwrite: Replace the stored credits, as a refresh from the source does.
+        :param resolved_artists: Library ids of the artists resolved so far, by provider and item id.
+        """
+        resolved = {} if resolved_artists is None else resolved_artists
+        rows = [
+            (credit, await self._get_credit_artist_id(credit.artist, resolved))
+            for credit in item_credits
+            if credit.role != ArtistRole.MAIN_ARTIST
+        ]
+        if not rows:
+            # a source without credits keeps the stored ones, like an empty artists list does
+            return
+        if overwrite:
+            await self.mass.music.database.execute_write(
+                f"DELETE FROM {DB_TABLE_TRACK_CREDITS} WHERE track_id = :db_id",
+                {"db_id": db_id},
+            )
+        for credit, artist_id in rows:
+            await self.mass.music.database.execute_write(
+                f"INSERT OR IGNORE INTO {DB_TABLE_TRACK_CREDITS}"
+                "(track_id, artist_id, role, instrument, position) "
+                "VALUES (:track_id, :artist_id, :role, :instrument, :position)",
+                {
+                    "track_id": db_id,
+                    "artist_id": artist_id,
+                    "role": credit.role.value,
+                    "instrument": credit.instrument or "",
+                    "position": credit.position,
+                },
+            )
+
+    async def _get_credit_artist_id(
+        self, artist: Artist | ItemMapping, resolved_artists: dict[tuple[str, str], int]
+    ) -> int:
+        """Return the library ID of a credited artist."""
+        key = (artist.provider, artist.item_id)
+        artists = self.mass.music.artists
+        artist_id = resolved_artists.get(key) or await artists.get_or_add_library_artist_id(artist)
+        resolved_artists[key] = artist_id
+        return artist_id
 
     @staticmethod
     def _library_filter_parts(explicit: bool | None) -> list[str]:
@@ -2153,6 +2223,30 @@ class TracksController(MediaControllerBase[Track]):
                 return "artists.search_name DESC, tracks.search_name ASC"
             return "artists.search_name ASC, tracks.search_name ASC"
         return super()._get_sort_sql(field, direction)
+
+    def _credits_query(self) -> str:
+        """Return a subquery selecting the credits other than the main artists, in role order."""
+        role_order = " ".join(
+            f"WHEN '{role.value}' THEN {idx}" for idx, role in enumerate(ArtistRole)
+        )
+        # json_group_array following the order of an ordered subquery is undocumented
+        # sqlite behavior (see _adapt_query_for_collections)
+        return f"""(SELECT JSON_GROUP_ARRAY(json(credit)) FROM (
+            SELECT json_object(
+                'artist', json_object(
+                    'item_id', artists.item_id,
+                    'provider', 'library',
+                    'name', artists.name,
+                    'sort_name', artists.sort_name,
+                    'media_type', 'artist'
+                ),
+                'role', c.role,
+                'instrument', NULLIF(c.instrument, ''),
+                'position', c.position
+            ) AS credit
+            FROM {DB_TABLE_TRACK_CREDITS} c JOIN artists ON artists.item_id = c.artist_id
+            WHERE c.track_id = {DB_TABLE_TRACKS}.item_id
+            ORDER BY CASE c.role {role_order} ELSE {len(ArtistRole)} END, c.position, c.rowid))"""
 
     async def _sync_details_query_parts(
         self, provider_mappings: Iterable[ProviderMapping]
@@ -2191,6 +2285,7 @@ class TracksController(MediaControllerBase[Track]):
         item = cast("TrackSummary", super()._parse_summary_row(db_row, hidden_sources))
         item.version = db_row["version"] or ""
         item.duration = db_row["duration"] or 0
+        item.is_classical = bool(db_row["is_classical"])
         item.metadata.explicit = None if db_row["explicit"] is None else bool(db_row["explicit"])
         if raw_release_date := db_row["release_date"]:
             item.metadata.release_date = datetime.fromisoformat(raw_release_date)

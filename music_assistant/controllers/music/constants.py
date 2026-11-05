@@ -16,7 +16,7 @@ CONF_KEEP_REMASTERS_APART: Final[str] = "keep_remasters_apart"
 # setup_data key: the account a provider instance is bound to
 CONF_BOUND_ACCOUNT_ID: Final[str] = "bound_account_id"
 
-DB_SCHEMA_VERSION: Final[int] = 74
+DB_SCHEMA_VERSION: Final[int] = 75
 # headroom kept free on top of what moving the audio analysis out of library.db writes
 DB_FREE_SPACE_MARGIN: Final[int] = 100 * 1024 * 1024
 
