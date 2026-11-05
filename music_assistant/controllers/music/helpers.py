@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import fields, replace
 from datetime import datetime
@@ -50,6 +52,8 @@ MIN_FTS_TERM_LENGTH: Final[int] = 3
 _GENRE_LOOKUP_TABLE: Final[str] = "temp.genre_lookup"
 # the TEMP table is shared by everything on the library connection, so one user at a time
 _genre_lookup_lock = asyncio.Lock()
+
+TRAILING_VOCALS: Final = re.compile(r"\s*\bvocals\Z", re.IGNORECASE | re.ASCII)
 
 
 class ResumePoint(NamedTuple):
@@ -167,6 +171,21 @@ async def genre_lookup_table(
             # shared connection is still in progress
             await database.execute(f"DELETE FROM {_GENRE_LOOKUP_TABLE}")
             await database.commit()
+
+
+def instrument_label(instrument: str | None, artist_name: str) -> str:
+    """
+    Return the instrument of a credit as shown after the name of its artist.
+
+    A voice shows alone, such as "tenor" for "tenor vocals". Empty for plain vocals and when
+    the name already includes it, such as "string quartet" for the Brodsky Quartet.
+
+    :param instrument: The instrument of the credit.
+    :param artist_name: The name of the credited artist.
+    """
+    label = TRAILING_VOCALS.sub("", instrument or "").strip()
+    words = _words(label)
+    return "" if words and words[-1] in _words(artist_name) else label
 
 
 def sort_search_result[SortItemT: MediaItemType | ItemMapping](
@@ -508,3 +527,15 @@ def fill_track_from_recording(track: Track, recording: MusicBrainzRecording) -> 
         if is_valid_isrc(isrc):
             track.add_external_id(ExternalID.ISRC, isrc)
     return track.external_ids != known_ids
+
+
+def _words(text: str) -> list[str]:
+    """
+    Return the words of a text, lowercased and without accents.
+
+    Punctuation splits words, as in the frontend, where create_safe_string drops it.
+    """
+    folded = "".join(
+        x for x in unicodedata.normalize("NFD", text) if not unicodedata.combining(x)
+    ).lower()
+    return re.findall(r"[^\W_]+", folded)
