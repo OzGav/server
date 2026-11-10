@@ -1,0 +1,21 @@
+{
+  "song": {
+    "id": { "value": "s1" },
+    "title": { "value": "Habibi", "originalValue": "حبيبي" },
+    "artists": [{ "id": { "value": "ar1" }, "name": { "value": "Fairuz", "originalValue": "فيروز" } }],
+    "albumId": { "value": "a1" },
+    "durationMs": 245600,
+    "trackNumber": 3,
+    "discNumber": 1,
+    "releaseDate": "1972-05-01",
+    "genres": ["Arabic"],
+    "isExplicit": false,
+    "isrc": "LBA011200001",
+    "hasLyrics": true,
+    "popularity": 87,
+    "artwork": [
+      { "url": "https://img.anghami.com/s1-160.jpg", "width": 160, "height": 160 },
+      { "url": "https://img.anghami.com/s1-640.jpg", "width": 640, "height": 640 }
+    ]
+  }
+}

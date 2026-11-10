@@ -1,0 +1,8 @@
+{
+  "syncedLyrics": {
+    "lines": [
+      { "text": "First line", "startTimeMs": "1500" },
+      { "text": "Second line", "startTimeMs": "65250" }
+    ]
+  }
+}

@@ -61,6 +61,8 @@ APP_VAR_NAMES = (
     "lastfm_api_key",
     "lastfm_api_secret",
     "acoustid_api_key",
+    "anghami_client_id",
+    "anghami_client_secret",
 )
 
 # Fixed tag mixed into the per-key keystream. Combined with the per-build random salt stored

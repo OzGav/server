@@ -1,0 +1,11 @@
+{
+  "stream": {
+    "manifestUrl": "https://stream.anghami.com/s1/master.m3u8?sig=abc",
+    "drmScheme": "DRM_SCHEME_UNSPECIFIED",
+    "expiresInSeconds": 900,
+    "availableQualities": [
+      { "label": "Standard (128 kbps)", "bitrateKbps": 128, "codec": "aac" },
+      { "label": "High (320 kbps)", "bitrateKbps": 320, "codec": "aac" }
+    ]
+  }
+}

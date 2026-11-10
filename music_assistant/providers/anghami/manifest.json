@@ -1,0 +1,12 @@
+{
+  "type": "music",
+  "domain": "anghami",
+  "stage": "beta",
+  "name": "Anghami",
+  "description": "Stream music from Anghami with your own Anghami account.",
+  "codeowners": ["@OzGav"],
+  "tier": "community",
+  "requirements": [],
+  "documentation": "https://music-assistant.io/music-providers/anghami/",
+  "multi_instance": true
+}

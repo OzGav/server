@@ -1,0 +1,25 @@
+{
+  "setup_flow": {
+    "authenticate": {
+      "title": "Connect your Anghami account",
+      "description": "The button below opens a browser window where you sign in to Anghami and allow Music Assistant to use your account. Come back here once you are done."
+    },
+    "abort": {
+      "missing_credentials": "This Music Assistant build can not connect to Anghami. Please report this to the Music Assistant team.",
+      "login_failed": "Could not link your Anghami account. Please start the setup again.",
+      "anghami_unreachable": "Could not reach Anghami. Please check your internet connection and start the setup again.",
+      "playback_not_allowed": "Music Assistant needs permission to play music from your Anghami account. Please start the setup again and allow playback when Anghami asks.",
+      "account_already_configured": "This Anghami account is already used by another Anghami provider in Music Assistant. Each account can only be added once. Sign in with a different account, or remove the other Anghami provider first."
+    }
+  },
+  "media": {
+    "recommendations": {
+      "featured": { "name": "Featured" },
+      "new_releases": { "name": "New releases" },
+      "charts": { "name": "Charts" }
+    }
+  },
+  "manifest": {
+    "description": "Stream music from Anghami with your own Anghami account."
+  }
+}

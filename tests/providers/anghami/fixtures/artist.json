@@ -1,0 +1,12 @@
+{
+  "artist": {
+    "id": { "value": "ar1" },
+    "name": { "value": "Fairuz", "originalValue": "فيروز" },
+    "bio": { "value": "Lebanese singer.", "originalValue": "مغنية لبنانية." },
+    "genres": ["Arabic"],
+    "followerCount": "1000000",
+    "isVerified": true,
+    "artwork": [{ "url": "https://img.anghami.com/ar1-640.jpg", "width": 640, "height": 640 }],
+    "nationality": "LB"
+  }
+}

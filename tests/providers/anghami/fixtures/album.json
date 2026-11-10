@@ -1,0 +1,15 @@
+{
+  "album": {
+    "id": { "value": "a1" },
+    "title": { "value": "Best of Fairuz", "originalValue": "أفضل فيروز" },
+    "artists": [{ "id": { "value": "ar1" }, "name": { "value": "Fairuz", "originalValue": "فيروز" } }],
+    "albumType": "ALBUM_TYPE_COMPILATION",
+    "releaseDate": "1972-05-01",
+    "genres": ["Arabic"],
+    "trackCount": 12,
+    "artwork": [{ "url": "https://img.anghami.com/a1-640.jpg", "width": 640, "height": 640 }],
+    "label": "Voix de l'Orient",
+    "upc": "0724383628027",
+    "popularity": 70
+  }
+}

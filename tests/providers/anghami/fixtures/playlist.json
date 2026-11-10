@@ -1,0 +1,18 @@
+{
+  "playlist": {
+    "id": { "value": "p1" },
+    "name": { "value": "Morning Coffee", "originalValue": "قهوة الصباح" },
+    "description": { "value": "Start the day slowly.", "originalValue": "" },
+    "visibility": "PLAYLIST_VISIBILITY_PUBLIC",
+    "ownerId": { "value": "u1" },
+    "ownerName": "Anghami",
+    "coverArtwork": { "url": "https://img.anghami.com/p1.jpg", "width": 300, "height": 300 },
+    "itemCount": 3,
+    "totalDurationMs": "600000"
+  },
+  "items": [
+    { "content": { "songId": { "value": "s1" }, "title": "Habibi", "subtitle": "Fairuz" }, "position": 0 },
+    { "content": { "episodeId": { "value": "e1" }, "title": "An episode" }, "position": 1 }
+  ],
+  "nextPageToken": "page-2"
+}
