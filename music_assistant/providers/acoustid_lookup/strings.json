@@ -1,8 +1,8 @@
 {
   "config_entries": {
     "api_key": {
-      "label": "AcoustID API key",
-      "description": "Optional. Music Assistant ships with a shared AcoustID API key, so this can be left empty. Provide your own free key from https://acoustid.org/api-key if you prefer to use a dedicated one. AcoustID requests that high-traffic deployments notify the project in advance — see https://acoustid.org/webservice for details."
+      "label": "AcoustID user key",
+      "description": "Your own AcoustID user key. AcoustID needs one for every lookup from 1 January 2027. Sign in at https://acoustid.org/api-key to get it."
     },
     "min_score": {
       "label": "Minimum match score",
