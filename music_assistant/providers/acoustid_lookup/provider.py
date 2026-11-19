@@ -13,10 +13,12 @@ import numpy as np
 from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import ConfigEntryType, ExternalID, MediaType, StreamType
 from music_assistant_models.errors import (
+    LoginFailed,
     MusicAssistantError,
     RateLimited,
     ResourceTemporarilyUnavailable,
     RetriesExhausted,
+    SetupFailedError,
     UnsupportedSystemError,
 )
 from music_assistant_models.helpers import create_safe_string
@@ -41,8 +43,8 @@ if TYPE_CHECKING:
     from music_assistant.mass import MusicAssistant
 
 
-# the user key is stored under the name of the API key setting it replaced
-CONF_USER_KEY = "api_key"
+CONF_USER_KEY = "user_key"
+CONF_USER_KEY_NOTE = "user_key_note"
 CONF_MIN_SCORE = "min_score"
 CONF_WRITE_TAGS_BACK = "write_tags_back"
 CONF_ANALYSE_STREAMING = "analyse_streaming"
@@ -106,8 +108,8 @@ class AcoustidLookupProvider(AudioAnalysisProvider):
         # Populated once a real chromaprint fingerprinter is built; stays empty while no
         # native fingerprinter exists, in which case its errors cannot be raised either.
         self._fingerprint_errors: tuple[type[BaseException], ...] = ()
-        # Set once AcoustID refuses our keys; saving the settings reloads the provider.
-        self._lookups_refused = False
+        # Set once AcoustID refuses our keys and the unload that follows is scheduled.
+        self._keys_refused = False
 
     async def handle_async_init(self) -> None:
         """
@@ -132,10 +134,10 @@ class AcoustidLookupProvider(AudioAnalysisProvider):
         """Return config entries for this provider."""
         return (
             ConfigEntry(
-                key=CONF_USER_KEY,
-                type=ConfigEntryType.SECURE_STRING,
+                key=CONF_USER_KEY_NOTE,
+                type=ConfigEntryType.ALERT,
                 required=False,
-                default_value=None,
+                hidden=self._get_user_key() is not None,
             ),
             ConfigEntry(
                 key=CONF_MIN_SCORE,
@@ -296,7 +298,7 @@ class AcoustidLookupProvider(AudioAnalysisProvider):
 
     def _get_user_key(self) -> str | None:
         """Return the user's own AcoustID user key, if one is set."""
-        user_key = self.config.get_value(CONF_USER_KEY)
+        user_key = self.get_setup_value(CONF_USER_KEY)
         return user_key if isinstance(user_key, str) and user_key else None
 
     async def _start_analysis(
@@ -312,7 +314,7 @@ class AcoustidLookupProvider(AudioAnalysisProvider):
         :param streamdetails: Stream details for the track being analysed.
         :param audio_format: PCM format of the incoming audio stream.
         """
-        if self._lookups_refused:
+        if self._keys_refused:
             return False
         # Streaming-provider tracks are opt-in — local files always analyse.
         if streamdetails.stream_type != StreamType.LOCAL_FILE and not self.config.get_value(
@@ -457,7 +459,7 @@ class AcoustidLookupProvider(AudioAnalysisProvider):
             return None
 
         try:
-            response = await self._lookup(user_key, fingerprint, duration_for_lookup)
+            response = await self._lookup(fingerprint, duration_for_lookup)
         except (aiohttp.ClientError, RetriesExhausted, TimeoutError, json.JSONDecodeError) as err:
             # Some aiohttp exceptions (e.g. ClientResponseError) stringify with the
             # full request URL, which includes the keys as query params.
@@ -582,13 +584,10 @@ class AcoustidLookupProvider(AudioAnalysisProvider):
     # None can signal an auth/bad-request failure as well as "no match", so don't cache it
     @use_cache(ACOUSTID_LOOKUP_CACHE_TTL, cache_none=False)
     @throttle_with_retries
-    async def _lookup(
-        self, user_key: str | None, fingerprint: str, duration: int
-    ) -> dict[str, Any] | None:
+    async def _lookup(self, fingerprint: str, duration: int) -> dict[str, Any] | None:
         """
         Look up a fingerprint against the AcoustID web service.
 
-        :param user_key: The user's own AcoustID user key, if one is set.
         :param fingerprint: Base64 chromaprint fingerprint string.
         :param duration: Full track duration in seconds. AcoustID expects the
             track length here, not the duration of audio actually fingerprinted.
@@ -602,7 +601,8 @@ class AcoustidLookupProvider(AudioAnalysisProvider):
             "duration": str(duration),
             "format": "json",
         }
-        if user_key:
+        # read here, not passed in, so the key stays out of the cache key
+        if user_key := self._get_user_key():
             params["user"] = user_key
         async with self.mass.http_session.get(ACOUSTID_LOOKUP_URL, params=params) as response:
             if response.status == 429:
@@ -611,7 +611,12 @@ class AcoustidLookupProvider(AudioAnalysisProvider):
             if 500 <= response.status < 600:
                 raise ResourceTemporarilyUnavailable("AcoustID server error", backoff_time=30)
             if response.status == 400:
-                self._check_refused_keys(await response.json(content_type=None), user_key)
+                self._check_refused_keys(
+                    await response.json(content_type=None), has_user_key=bool(user_key)
+                )
+                return None
+            if response.status in (401, 403):
+                self.logger.warning("AcoustID refused the lookup (HTTP %d)", response.status)
                 return None
             if response.status >= 400:
                 self.logger.debug("AcoustID returned HTTP %d — discarding result", response.status)
@@ -628,29 +633,37 @@ class AcoustidLookupProvider(AudioAnalysisProvider):
             return None
         return payload
 
-    def _check_refused_keys(self, payload: Any, user_key: str | None) -> None:
-        """Pause all lookups, and say why, when AcoustID refuses the keys we send."""
+    def _check_refused_keys(self, payload: Any, *, has_user_key: bool) -> None:
+        """Unload the provider, with the reason for the user, when AcoustID refuses our keys."""
         error = payload.get("error") if isinstance(payload, dict) else None
         code = error.get("code") if isinstance(error, dict) else None
         message = str(error.get("message", "")) if isinstance(error, dict) else ""
+        reason: MusicAssistantError
         if code == ACOUSTID_ERROR_INVALID_APIKEY:
-            reason = "AcoustID no longer accepts the Music Assistant application key"
+            reason = SetupFailedError(
+                "AcoustID refused the Music Assistant application key",
+                translation_key="app_key_refused",
+                translation_owner=f"provider.{self.domain}",
+            )
         elif code == ACOUSTID_ERROR_INVALID_USER_APIKEY:
-            reason = "AcoustID does not accept the user key in the provider settings"
-        elif code == ACOUSTID_ERROR_MISSING_PARAMETER and not user_key and "user" in message:
-            reason = "AcoustID needs a user key in the provider settings"
+            reason = LoginFailed(
+                "AcoustID refused the user key",
+                translation_key="user_key_invalid",
+                translation_owner=f"provider.{self.domain}",
+            )
+        elif code == ACOUSTID_ERROR_MISSING_PARAMETER and not has_user_key and "user" in message:
+            reason = LoginFailed(
+                "AcoustID needs a user key",
+                translation_key="user_key_missing",
+                translation_owner=f"provider.{self.domain}",
+            )
         else:
-            self.logger.debug("AcoustID returned HTTP 400 — discarding result: %s", message)
+            self.logger.warning("AcoustID refused the lookup: %s", message)
             return
-        if self._lookups_refused:
+        if self._keys_refused:
             return
-        self._lookups_refused = True
-        if code == ACOUSTID_ERROR_INVALID_APIKEY:
-            self.logger.error("%s, so lookups are paused", reason)
-            return
-        self.logger.error(
-            "%s, so lookups are paused. Get your user key from %s", reason, ACOUSTID_USER_KEY_URL
-        )
+        self._keys_refused = True
+        self.unload_with_error(reason)
 
     async def _fetch_mb_extras(
         self, mbid: str, *, include_artist_mbids: bool = True

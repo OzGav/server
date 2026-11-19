@@ -1,8 +1,11 @@
 {
   "config_entries": {
-    "api_key": {
+    "user_key": {
       "label": "AcoustID user key",
-      "description": "Your own AcoustID user key. AcoustID needs one for every lookup from 1 January 2027. Sign in at https://acoustid.org/api-key to get it."
+      "description": "Your own AcoustID user key. AcoustID is going to need one for every lookup. Sign in at https://acoustid.org/api-key to get it."
+    },
+    "user_key_note": {
+      "label": "AcoustID is going to need your own user key for lookups. Get it from https://acoustid.org/api-key and use Reconfigure to add it."
     },
     "min_score": {
       "label": "Minimum match score",
@@ -19,5 +22,10 @@
   },
   "manifest": {
     "description": "Identifies local audio files using AcoustID/Chromaprint fingerprinting and fills in their MusicBrainz recording ID for subsequent metadata enrichment."
+  },
+  "errors": {
+    "app_key_refused": "AcoustID no longer accepts the key Music Assistant uses for lookups. Lookups are off until Music Assistant is updated.",
+    "user_key_invalid": "AcoustID does not accept your user key. Get your key from https://acoustid.org/api-key and use Reconfigure to enter it again.",
+    "user_key_missing": "AcoustID needs your own user key for lookups. Get it from https://acoustid.org/api-key and use Reconfigure to add it."
   }
 }
