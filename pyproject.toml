@@ -342,7 +342,7 @@ no-binary-package = ["urllib3-future"]
 torch = {index = "pytorch-cpu"}
 torchaudio = {index = "pytorch-cpu"}
 # TEMP(classical): use the unreleased classical models until they are published
-music-assistant-models = {git = "file:///home/ma/models", branch = "classical-stage1-rb36"}
+music-assistant-models = {git = "https://github.com/OzGav/models", rev = "5a2685a9fd3b67372fa92eca8acee1b5a8afa3b6"}
 
 [build-system]
 build-backend = "setuptools.build_meta"
