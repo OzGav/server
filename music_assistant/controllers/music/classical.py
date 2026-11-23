@@ -588,6 +588,8 @@ class ClassicalController:
         :param item_id: The library id of the work.
         """
         work = _with_title_work_type(await self.mass.music.works.get_library_item(item_id))
+        # opening the page updates the work's metadata when it is due, as for other library items
+        self.mass.metadata.schedule_update_metadata(work)
         related = [*work.parts, *work.arrangement_of, *work.arrangements]
         shown_works = (work, *related, *([work.parent_work] if work.parent_work else []))
         versions = await self._shown_work_versions(shown_works)
