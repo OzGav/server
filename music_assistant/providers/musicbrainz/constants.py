@@ -31,6 +31,7 @@ SUPPORTED_FEATURES: set[ProviderFeature] = {
     ProviderFeature.ARTIST_METADATA,
     ProviderFeature.ALBUM_METADATA,
     ProviderFeature.TRACK_METADATA,
+    ProviderFeature.WORK_METADATA,
     ProviderFeature.RECOMMENDATIONS,
 }
 
@@ -43,6 +44,9 @@ URL_RELATION_TYPE_MAPPING: dict[str, LinkType] = {
     "discogs": LinkType.DISCOGS,
     "official homepage": LinkType.WEBSITE,
 }
+
+# The host of the free score library a work's "download for free" URL relation can point to.
+IMSLP_HOST = "imslp.org"
 
 # Social network relations use a single MB type but multiple destinations,
 # so we sniff the URL host to pick a more specific LinkType.

@@ -3,7 +3,7 @@ Rich metadata enrichment for the Metadata Controller.
 
 Provides the MetadataEnrichmentMixin, mixed into the MetaDataController, with the
 per-mediatype updaters that merge metadata from the music and metadata providers
-into library items (artists, albums, tracks, playlists, audiobooks and podcasts).
+into library items (artists, albums, tracks, playlists, audiobooks, podcasts and works).
 """
 
 from __future__ import annotations
@@ -468,7 +468,7 @@ class MetadataEnrichmentMixin:
         return replacements
 
     def _replaces_stored_values(
-        self, item: Artist | Album | Track, force_refresh: bool, source_failed: bool
+        self, item: Artist | Album | Track | Work, force_refresh: bool, source_failed: bool
     ) -> bool:
         """
         Return whether a refresh may write its values over the stored ones of an item.
@@ -930,6 +930,71 @@ class MetadataEnrichmentMixin:
         # set timestamp, used to determine when this function was last called
         podcast.metadata.last_refresh = int(time())
         await self.mass.music.podcasts.update_item_in_library(podcast.item_id, podcast)
+
+    async def _update_work_metadata(self, work: Work, force_refresh: bool = False) -> None:
+        """
+        Get/update rich metadata for a work.
+
+        :param work: The library work.
+        :param force_refresh: Update it even when its last update is still recent.
+        """
+        language_outdated = self._description_language_outdated(work.metadata)
+        needs_refresh = (
+            time() - (work.metadata.last_refresh or 0)
+        ) > REFRESH_INTERVAL or language_outdated
+        if not (force_refresh or needs_refresh):
+            return
+
+        self.logger.debug("Updating metadata for Work %s", work.name)
+        sources: list[tuple[int, MediaItemMetadata]] = []
+        retry_soon = False
+        online_enabled = bool(self.config.get_value(CONF_ENABLE_ONLINE_METADATA) and work.mbid)
+        for provider in self.providers:
+            if ProviderFeature.WORK_METADATA not in provider.supported_features:
+                continue
+            if not (online_enabled or provider.is_local):
+                continue
+            try:
+                # a forced refresh asks the provider again, rather than reading a cached result
+                async with self.mass.cache.handle_refresh(force_refresh):
+                    metadata = await provider.get_work_metadata(work)
+            except _TEMPORARY_ERRORS as err:
+                retry_soon = True
+                self.logger.debug(
+                    "Metadata for Work %s is not available from provider %s right now: %s",
+                    work.name,
+                    provider.name,
+                    err,
+                )
+                continue
+            except Exception as err:
+                self.logger.warning(
+                    "Error fetching metadata for Work %s from provider %s: %s",
+                    work.name,
+                    provider.name,
+                    err,
+                    exc_info=err if self.logger.isEnabledFor(10) else None,
+                )
+                continue
+            if metadata:
+                sources.append((_metadata_source_rank(provider), metadata))
+                merge_metadata(work.metadata, _without_description(metadata))
+                self.logger.debug(
+                    "Fetched metadata for Work %s on provider %s", work.name, provider.name
+                )
+        if replacements := self._apply_fresh_values(
+            work.metadata,
+            sources,
+            (),
+            self._replaces_stored_values(work, force_refresh, retry_soon),
+            language_outdated,
+        ):
+            await self.mass.music.works.replace_metadata(work.item_id, replacements)
+        # set timestamp, used to determine when this function was last called
+        work.metadata.last_refresh = _refresh_timestamp(
+            retry_soon, self.language_changed if language_outdated else 0
+        )
+        await self.mass.music.works.update_item_in_library(work.item_id, work)
 
     async def _link_artist_to_musicbrainz(
         self,

@@ -1,25 +1,25 @@
 """
 Wikipedia Metadata provider for Music Assistant.
 
-Provides artist biographies in the user's preferred language, resolving the
-article through MusicBrainz URL relations and (where MusicBrainz lacks coverage)
-Wikidata sitelinks.
+Provides artist biographies and notes on classical works in the user's preferred
+language, resolving the article through MusicBrainz URL relations and (where
+MusicBrainz lacks coverage) Wikidata sitelinks.
 """
 
 from __future__ import annotations
 
 from json import JSONDecodeError
-from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import unquote, urlparse
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from urllib.parse import quote, unquote, urlparse
 
 import aiohttp
-from music_assistant_models.enums import ProviderFeature
+from music_assistant_models.enums import LinkType, ProviderFeature
 from music_assistant_models.errors import (
     InvalidDataError,
     RateLimited,
     ResourceTemporarilyUnavailable,
 )
-from music_assistant_models.media_items import MediaItemMetadata
+from music_assistant_models.media_items import MediaItemLink, MediaItemMetadata
 
 from music_assistant.constants import MASS_USER_AGENT
 from music_assistant.controllers.cache import use_cache
@@ -32,7 +32,7 @@ from music_assistant.models.metadata_provider import MetadataProvider
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigEntry, ProviderConfig
-    from music_assistant_models.media_items import Artist
+    from music_assistant_models.media_items import Artist, Work
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
@@ -41,7 +41,10 @@ if TYPE_CHECKING:
     from music_assistant.providers.musicbrainz.models import MusicBrainzRelation
 
 
-SUPPORTED_FEATURES: set[ProviderFeature] = {ProviderFeature.ARTIST_METADATA}
+SUPPORTED_FEATURES: set[ProviderFeature] = {
+    ProviderFeature.ARTIST_METADATA,
+    ProviderFeature.WORK_METADATA,
+}
 
 WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
 
@@ -80,15 +83,66 @@ class WikipediaMetadataProvider(MetadataProvider):
         """Retrieve metadata for an artist on Wikipedia."""
         if not artist.mbid:
             return None
+        relations = await self._artist_relations(artist.mbid)
+        if not relations:
+            return None
+        if not (article := await self._article_intro(relations)):
+            return None
+        self.logger.debug("Found bio for %s on Wikipedia in %s", artist.name, article.lang)
+        return MediaItemMetadata(description=article.intro, description_language=article.lang)
 
+    async def get_work_metadata(self, work: Work) -> MediaItemMetadata | None:
+        """Retrieve metadata for a work on Wikipedia."""
+        if not work.mbid:
+            return None
+        relations = await self._work_relations(work.mbid)
+        if not relations:
+            return None
+        if not (article := await self._article_intro(relations)):
+            return None
+        self.logger.debug("Found notes for %s on Wikipedia in %s", work.name, article.lang)
+        return MediaItemMetadata(
+            description=article.intro,
+            description_language=article.lang,
+            links={MediaItemLink(type=LinkType.WIKIPEDIA, url=article.url)},
+        )
+
+    async def _artist_relations(self, mbid: str) -> list[MusicBrainzRelation] | None:
+        """Return the MusicBrainz URL relations for an artist."""
+        if (mb_provider := self._musicbrainz_provider()) is None:
+            return None
+        try:
+            details = await mb_provider.get_artist_details(mbid)
+        except InvalidDataError:
+            return None
+        return details.relations
+
+    async def _work_relations(self, mbid: str) -> list[MusicBrainzRelation] | None:
+        """Return the MusicBrainz URL relations for a work."""
+        if (mb_provider := self._musicbrainz_provider()) is None:
+            return None
+        try:
+            details = await mb_provider.get_work_details(mbid)
+        except InvalidDataError:
+            return None
+        return details.relations if details else None
+
+    def _musicbrainz_provider(self) -> MusicbrainzProvider | None:
+        """Return the MusicBrainz provider, if it is loaded."""
+        return cast("MusicbrainzProvider | None", self.mass.get_provider("musicbrainz"))
+
+    async def _article_intro(self, relations: list[MusicBrainzRelation]) -> _Article | None:
+        """
+        Return the Wikipedia article MusicBrainz links an item to, with its intro.
+
+        The intro is in the user's preferred language, else in English.
+
+        :param relations: The MusicBrainz URL relations of the item.
+        """
         preferred_lang = self.mass.metadata.preferred_language
         languages: list[str] = [preferred_lang]
         if preferred_lang != "en":
             languages.append("en")
-
-        relations = await self._musicbrainz_relations(artist.mbid)
-        if not relations:
-            return None
 
         titles_by_lang = _wiki_titles_by_lang(relations)
 
@@ -103,20 +157,8 @@ class WikipediaMetadataProvider(MetadataProvider):
         for lang in languages:
             if title := titles_by_lang.get(lang):
                 if extract := await self._fetch_bio(lang, title):
-                    self.logger.debug("Found bio for %s on Wikipedia in %s", artist.name, lang)
-                    return MediaItemMetadata(description=extract, description_language=lang)
+                    return _Article(lang, title, extract)
         return None
-
-    async def _musicbrainz_relations(self, mbid: str) -> list[MusicBrainzRelation] | None:
-        """Return the MusicBrainz URL relations for an artist."""
-        mb_provider = cast("MusicbrainzProvider | None", self.mass.get_provider("musicbrainz"))
-        if mb_provider is None:
-            return None
-        try:
-            details = await mb_provider.get_artist_details(mbid)
-        except InvalidDataError:
-            return None
-        return details.relations
 
     @use_cache(86400 * 90, persistent=True)
     async def _wikidata_sitelinks(self, qid: str, languages: tuple[str, ...]) -> dict[str, str]:
@@ -212,6 +254,20 @@ class WikipediaMetadataProvider(MetadataProvider):
                 return cast("dict[str, Any]", await response.json())
         except (aiohttp.ClientError, TimeoutError, JSONDecodeError) as err:
             raise ResourceTemporarilyUnavailable("Wikipedia request failed") from err
+
+
+class _Article(NamedTuple):
+    """A Wikipedia article and its intro."""
+
+    lang: str
+    title: str
+    intro: str
+
+    @property
+    def url(self) -> str:
+        """Return the web address of the article."""
+        title = quote(self.title.replace(" ", "_"), safe="()")
+        return f"https://{self.lang}.wikipedia.org/wiki/{title}"
 
 
 def _wiki_titles_by_lang(relations: list[MusicBrainzRelation]) -> dict[str, str]:
