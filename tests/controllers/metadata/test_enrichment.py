@@ -776,6 +776,113 @@ async def test_forced_update_ignores_the_stored_copy_a_provider_miss_returns() -
     assert written == {"label": "New label"}
 
 
+# an artist on two streaming services, the one in the library first
+_SPOTIFY = ProviderMapping(
+    item_id="spotify", provider_domain="spotify", provider_instance="spotify_1", in_library=True
+)
+_TIDAL = ProviderMapping(item_id="tidal", provider_domain="tidal", provider_instance="tidal_1")
+
+
+def _artist_on_services(
+    enrichment: MetadataEnrichmentMixin, answers: dict[str, MediaItemMetadata | Exception | None]
+) -> AsyncMock:
+    """
+    Let the music sources of an artist answer and return the stubbed artist lookup.
+
+    :param enrichment: The enrichment mixin to set the sources up on.
+    :param answers: What each music source supplies by item id, an error it raises, or None
+        when it hands back the stored library item.
+    """
+    mass = _mass(enrichment)
+    mass.get_provider = MagicMock(
+        side_effect=lambda instance_id, **_kwargs: (
+            None
+            if instance_id == "musicbrainz"
+            else MagicMock(
+                domain=instance_id.removesuffix("_1"),
+                instance_id=instance_id,
+                is_streaming_provider=instance_id != "folder_1",
+            )
+        )
+    )
+
+    def _answer(item_id: str, instance: str, **_kwargs: Any) -> Artist | Album | Track:
+        answer = answers[item_id]
+        if isinstance(answer, Exception):
+            raise answer
+        if answer is None:
+            return _item(MediaType.ARTIST, MediaItemMetadata())
+        return _provider_item(MediaType.ARTIST, answer, instance)
+
+    mass.music.artists.get_provider_item = AsyncMock(side_effect=_answer)
+    return cast("AsyncMock", mass.music.artists.get_provider_item)
+
+
+def _asked(lookup: AsyncMock) -> list[str]:
+    """Return the item ids an artist lookup was asked for, in order."""
+    return [call.args[0] for call in lookup.await_args_list]
+
+
+@pytest.mark.asyncio
+async def test_artist_update_asks_one_streaming_service() -> None:
+    """Of two streaming services only the first is asked, and its values replace stored ones."""
+    enrichment = _enrichment()
+    lookup = _artist_on_services(
+        enrichment,
+        {
+            "spotify": MediaItemMetadata(style="Spotify style"),
+            "tidal": MediaItemMetadata(style="Tidal style"),
+        },
+    )
+    artist = _item(MediaType.ARTIST, MediaItemMetadata(style="Old style"), _SPOTIFY, _TIDAL)
+
+    written = await _update(enrichment, artist, force_refresh=True)
+
+    assert _asked(lookup) == ["spotify"]
+    # the skipped service does not count as a source that could not be reached
+    assert written == {"style": "Spotify style"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "miss", [MediaNotFoundError("gone"), None], ids=["not_found", "stored_copy"]
+)
+async def test_artist_update_asks_the_next_streaming_service_after_a_miss(
+    miss: MediaNotFoundError | None,
+) -> None:
+    """A streaming service that does not find the artist is followed by the next one."""
+    enrichment = _enrichment()
+    lookup = _artist_on_services(
+        enrichment, {"spotify": miss, "tidal": MediaItemMetadata(style="Tidal style")}
+    )
+    artist = _item(MediaType.ARTIST, MediaItemMetadata(style="Old style"), _SPOTIFY, _TIDAL)
+
+    written = await _update(enrichment, artist, force_refresh=True)
+
+    assert _asked(lookup) == ["spotify", "tidal"]
+    assert written == {"style": "Tidal style"}
+
+
+@pytest.mark.asyncio
+async def test_artist_update_asks_the_music_folder_and_one_streaming_service() -> None:
+    """The music folder is asked next to the one streaming service."""
+    enrichment = _enrichment()
+    lookup = _artist_on_services(
+        enrichment,
+        {
+            "folder": MediaItemMetadata(mood="Folder mood"),
+            "spotify": MediaItemMetadata(style="Spotify style"),
+            "tidal": MediaItemMetadata(style="Tidal style"),
+        },
+    )
+    artist = _item(MediaType.ARTIST, MediaItemMetadata(), _FOLDER, _SPOTIFY, _TIDAL)
+
+    await _update(enrichment, artist, force_refresh=False)
+
+    assert _asked(lookup) == ["folder", "spotify"]
+    assert (artist.metadata.mood, artist.metadata.style) == ("Folder mood", "Spotify style")
+
+
 @pytest.mark.asyncio
 async def test_a_run_that_only_fills_gaps_keeps_a_stored_description() -> None:
     """A forced update with an unreachable source keeps a stored text in another language."""

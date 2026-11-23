@@ -136,7 +136,7 @@ class MetadataEnrichmentMixin:
         self, artist: Artist, force_refresh: bool = False
     ) -> None:
         """Get/update rich metadata for an artist."""
-        # collect metadata from all (online) music + metadata providers
+        # collect metadata from the music providers and the (online) metadata providers
         # NOTE: we only do/allow this every REFRESH_INTERVAL
         language_outdated = self._description_language_outdated(artist.metadata)
         needs_refresh = (
@@ -159,11 +159,13 @@ class MetadataEnrichmentMixin:
         if TYPE_CHECKING:
             local_provs = cast("set[str]", local_provs)
 
-        # collect metadata from all [music] providers
-        # note that we sort the providers by priority so that we always
-        # prefer local providers over online providers
+        # collect metadata from the music providers by priority, local ones first; the
+        # instance breaks a tie so the same streaming service is asked on every refresh
+        streaming_answered = False
         for prov_mapping in sorted(
-            artist.provider_mappings, key=lambda x: x.priority, reverse=True
+            artist.provider_mappings,
+            key=lambda x: (x.priority, x.provider_instance),
+            reverse=True,
         ):
             prov = self.mass.get_provider(
                 prov_mapping.provider_instance, provider_type=MusicProvider
@@ -171,6 +173,9 @@ class MetadataEnrichmentMixin:
             if prov is None:
                 # a music source that is set up but unreachable has no say this time
                 source_missing |= self._music_source_unreachable(prov_mapping.provider_instance)
+                continue
+            # only one streaming service is asked to save calls, the others have the same artist
+            if prov.is_streaming_provider and streaming_answered:
                 continue
             # prefer domain for streaming providers as the catalog is the same across instances
             prov_key = prov.domain if prov.is_streaming_provider else prov.instance_id
@@ -186,6 +191,7 @@ class MetadataEnrichmentMixin:
                 # a provider miss hands back the stored library item, which is not fresh
                 if prov_item.provider != "library":
                     sources.append((_music_source_rank(prov), prov_item.metadata))
+                    streaming_answered |= prov.is_streaming_provider
                 merge_metadata(artist.metadata, _without_description(prov_item.metadata))
 
         # The musicbrainz ID is mandatory for all metadata lookups
