@@ -30,6 +30,7 @@ from music_assistant_models.media_items import (
     ProviderMapping,
     Track,
     UniqueList,
+    Work,
     WorkMovement,
 )
 
@@ -2901,14 +2902,14 @@ def _work(name: str) -> MusicBrainzWork:
     return MusicBrainzWork.from_raw(_work_lookup(name))
 
 
-async def test_work_details_requests_aliases_and_artist_work_and_series_relations() -> None:
+async def test_work_details_requests_aliases_and_artist_work_series_and_url_relations() -> None:
     """Request the names and relations a work is enriched from and parse the work off the lookup."""
     provider, get_data = _provider(_work_lookup("symphony_5"))
 
     work = await provider.get_work_details(SYMPHONY_5_MBID)
 
     get_data.assert_awaited_once_with(
-        f"work/{SYMPHONY_5_MBID}?inc=aliases+artist-rels+work-rels+series-rels"
+        f"work/{SYMPHONY_5_MBID}?inc=aliases+artist-rels+work-rels+series-rels+url-rels"
     )
     assert work is not None
     assert (work.id, work.title, work.type) == (
@@ -2962,6 +2963,67 @@ def test_work_parses_attributes_and_relation_targets() -> None:
     series = next(relation for relation in work.relations if relation.series)
     assert series.attribute_values == {"number": "op. 67"}
     assert series.url is None
+
+
+def test_work_parses_the_url_of_a_url_relation() -> None:
+    """A work's URL relation, such as its Wikidata link, keeps the linked URL."""
+    lookup = _work_lookup("symphony_5")
+    lookup["relations"].append(
+        {
+            "type": "wikidata",
+            "target-type": "url",
+            "direction": "forward",
+            "url": {"resource": "https://www.wikidata.org/wiki/Q200298"},
+        }
+    )
+
+    relation = MusicBrainzWork.from_raw(lookup).relations[-1]
+
+    assert relation.type == "wikidata"
+    assert relation.url is not None
+    assert relation.url.resource == "https://www.wikidata.org/wiki/Q200298"
+
+
+async def test_work_metadata_links_its_score_on_imslp_and_its_allmusic_page() -> None:
+    """A work's IMSLP and AllMusic relations become its links; others are left out."""
+    lookup = _work_lookup("symphony_5")
+    for relation_type, url in (
+        ("download for free", "https://imslp.org/wiki/Symphony_No.5,_Op.67_(Beethoven)"),
+        ("download for free", "https://www.example.org/scores/symphony-5"),
+        ("allmusic", "https://www.allmusic.com/composition/mc0002364307"),
+        ("wikidata", "https://www.wikidata.org/wiki/Q200298"),
+    ):
+        lookup["relations"].append(
+            {"type": relation_type, "target-type": "url", "url": {"resource": url}}
+        )
+    provider, _ = _provider(lookup)
+    work = Work(item_id="1", provider="library", name="Symphony No. 5", provider_mappings=set())
+    work.add_external_id(ExternalID.MB_WORK, SYMPHONY_5_MBID)
+
+    metadata = await provider.get_work_metadata(work)
+
+    assert metadata is not None
+    assert metadata.links == {
+        MediaItemLink(
+            type=LinkType.IMSLP, url="https://imslp.org/wiki/Symphony_No.5,_Op.67_(Beethoven)"
+        ),
+        MediaItemLink(
+            type=LinkType.ALLMUSIC, url="https://www.allmusic.com/composition/mc0002364307"
+        ),
+    }
+
+
+async def test_work_metadata_is_none_without_a_musicbrainz_id() -> None:
+    """A work MusicBrainz does not know gets no links, without asking MusicBrainz."""
+    provider, get_data = _provider(_work_lookup("symphony_5"))
+
+    assert (
+        await provider.get_work_metadata(
+            Work(item_id="1", provider="library", name="X", provider_mappings=set())
+        )
+        is None
+    )
+    get_data.assert_not_awaited()
 
 
 def test_work_parent_relation_is_the_backward_parts_relation() -> None:

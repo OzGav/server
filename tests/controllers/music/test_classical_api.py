@@ -3012,6 +3012,17 @@ async def test_recordings_read_the_recording_year_of_their_tracks(library: _Libr
     ]
 
 
+async def test_work_page_schedules_a_metadata_update(library: _Library) -> None:
+    """Opening a work schedules its metadata update, which runs when the work is due one."""
+    schedule = library.mass.metadata.schedule_update_metadata
+    schedule.reset_mock()
+
+    work = await library.mass.music.classical.work(library.work_id("Eroica"))
+
+    schedule.assert_called_once()
+    assert schedule.call_args.args[0].uri == work.uri
+
+
 async def test_work_movements_come_from_its_tracks(library: _Library) -> None:
     """Without MusicBrainz movements, the tracks give them their most common name."""
     names = {"k1": "I. Allegro con brio", "b1": "I. Allegro con brio", "k2": "Andante"}

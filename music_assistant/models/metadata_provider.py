@@ -16,6 +16,7 @@ if TYPE_CHECKING:
         MediaItemMetadata,
         Playlist,
         Track,
+        Work,
     )
 
 
@@ -66,5 +67,11 @@ class MetadataProvider(RecommendationsMixin, MusicDiscoveryMixin, Provider):
     async def get_playlist_metadata(self, playlist: Playlist) -> MediaItemMetadata | None:
         """Retrieve metadata for a playlist on this Metadata provider."""
         if ProviderFeature.PLAYLIST_METADATA in self.supported_features:
+            raise NotImplementedError
+        return None
+
+    async def get_work_metadata(self, work: Work) -> MediaItemMetadata | None:
+        """Retrieve metadata for a work on this Metadata provider."""
+        if ProviderFeature.WORK_METADATA in self.supported_features:
             raise NotImplementedError
         return None

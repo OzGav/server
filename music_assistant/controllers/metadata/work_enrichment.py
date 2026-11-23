@@ -54,7 +54,7 @@ from .helpers import (
 if TYPE_CHECKING:
     from collections.abc import Collection, Hashable, Sequence
 
-    from music_assistant_models.media_items import Album, WorkMovement
+    from music_assistant_models.media_items import Album, MediaItemType, WorkMovement
 
     from music_assistant import MusicAssistant
     from music_assistant.providers.musicbrainz.models import (
@@ -69,8 +69,8 @@ class WorkEnrichmentMixin:
     MusicBrainz work enrichment for the MetaDataController.
 
     Expects to be mixed with a class providing ``mass``, ``logger``, ``_logged_hints``,
-    ``preferred_language``, ``_musicbrainz_provider``, ``_follow_merged_id`` and
-    ``_name_after_musicbrainz``.
+    ``preferred_language``, ``schedule_update_metadata``, ``_musicbrainz_provider``,
+    ``_follow_merged_id`` and ``_name_after_musicbrainz``.
     """
 
     if TYPE_CHECKING:
@@ -80,6 +80,10 @@ class WorkEnrichmentMixin:
 
         @property
         def preferred_language(self) -> str: ...  # noqa: D102
+
+        def schedule_update_metadata(  # noqa: D102
+            self, item: MediaItemType, force_refresh: bool = False
+        ) -> None: ...
 
         def _musicbrainz_provider(self) -> MusicbrainzProvider | None: ...
 
@@ -141,6 +145,7 @@ class WorkEnrichmentMixin:
             return work
         works = self.mass.music.works
         first_lookup = reload or not work.metadata.last_musicbrainz_lookup
+        newly_linked = not (reload or work.metadata.last_musicbrainz_lookup)
         hierarchy = await self._musicbrainz_work_hierarchy(musicbrainz, work, force_refresh)
         if not hierarchy:
             work.metadata.last_musicbrainz_lookup = int(time())
@@ -200,6 +205,9 @@ class WorkEnrichmentMixin:
         looked_up = int(time())
         given.metadata.last_musicbrainz_lookup = work.metadata.last_musicbrainz_lookup = looked_up
         await works.mark_musicbrainz_lookup(int(work.item_id), looked_up)
+        # a reload is part of a refresh of the work, which updates its metadata itself
+        if newly_linked and work.mbid:
+            self.schedule_update_metadata(work)
         return work
 
     async def _set_parent_work(

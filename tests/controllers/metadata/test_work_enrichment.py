@@ -334,7 +334,9 @@ def _spotify_instances() -> Mock:
 def _scheduled(ctrl: MetaDataController) -> list[str]:
     """Return the names of the artists scheduled for a metadata refresh."""
     schedule = cast("Mock", ctrl.schedule_update_metadata)
-    return [call.args[0].name for call in schedule.call_args_list]
+    return [
+        call.args[0].name for call in schedule.call_args_list if isinstance(call.args[0], Artist)
+    ]
 
 
 def _symphony_5(token: str) -> tuple[MusicBrainzWork, MusicBrainzWork, MusicBrainzArtist]:
@@ -406,6 +408,23 @@ async def test_work_is_filled_in_from_its_musicbrainz_work(mass: MusicAssistant)
     assert stored.metadata.last_musicbrainz_lookup is not None
     # the work type makes its tracks classical
     assert (await mass.music.tracks.get_library_item(track.item_id)).is_classical
+
+
+async def test_work_linked_for_the_first_time_has_its_metadata_updated(
+    mass: MusicAssistant,
+) -> None:
+    """A work's first link schedules its metadata update; a refresh of the work does not."""
+    symphony, movement, _ = _symphony_5(_token())
+    work, _, ctrl = await _add_symphony_5(mass, symphony, movement)
+    schedule = cast("Mock", ctrl.schedule_update_metadata)
+
+    stored = await _enrich(ctrl, work)
+
+    assert [x.args[0].item_id for x in schedule.call_args_list] == [stored.item_id]
+    schedule.reset_mock()
+    await _enrich(ctrl, work)
+    await ctrl.refresh_work_tree(stored)
+    schedule.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -1872,7 +1891,7 @@ async def test_composer_musicbrainz_does_not_confirm_gets_no_musicbrainz_id(
 
     assert stored.mbid == symphony.id
     assert [(x.item_id, x.mbid) for x in stored.composers] == [(x.item_id, None) for x in composers]
-    cast("Mock", ctrl.schedule_update_metadata).assert_not_called()
+    assert not _scheduled(ctrl)
 
 
 async def test_library_composers_named_by_a_name_leave_out_the_others(
@@ -2408,7 +2427,7 @@ async def test_composer_without_a_musicbrainz_id_is_found_by_its_exact_name(
     stored = await _enrich(ctrl, work)
 
     assert [(x.item_id, x.mbid) for x in stored.composers] == [(composer.item_id, None)]
-    cast("Mock", ctrl.schedule_update_metadata).assert_not_called()
+    assert not _scheduled(ctrl)
 
 
 async def test_composer_the_library_lacks_is_not_added(mass: MusicAssistant) -> None:
@@ -3300,7 +3319,7 @@ async def test_composer_with_life_dates_gets_a_period_right_away(mass: MusicAssi
 
     stored = await mass.music.artists.get_library_item(composer.item_id)
     assert stored.period == Period.CLASSICAL
-    cast("Mock", ctrl.schedule_update_metadata).assert_not_called()
+    assert not _scheduled(ctrl)
 
 
 async def test_composer_period_needs_a_classical_composer(mass: MusicAssistant) -> None:
