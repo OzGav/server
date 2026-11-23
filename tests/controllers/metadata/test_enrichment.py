@@ -883,6 +883,198 @@ async def test_artist_update_asks_the_music_folder_and_one_streaming_service() -
     assert (artist.metadata.mood, artist.metadata.style) == ("Folder mood", "Spotify style")
 
 
+def _online_and_service(
+    enrichment: MetadataEnrichmentMixin,
+    online: MediaItemMetadata,
+    service: MediaItemMetadata | None = None,
+) -> Artist:
+    """
+    Return an artist in the music folder and on a music service, with an online provider.
+
+    :param enrichment: The enrichment mixin to set the sources up on.
+    :param online: What the online metadata provider supplies.
+    :param service: What the music service supplies.
+    """
+    mappings = _sources(
+        enrichment,
+        MediaType.ARTIST,
+        folder=MediaItemMetadata(mood="Folder mood"),
+        service=service or MediaItemMetadata(style="Service style"),
+        online=online,
+    )
+    return cast("Artist", _item(MediaType.ARTIST, MediaItemMetadata(), *mappings))
+
+
+def _online_images(found: bool) -> UniqueList[MediaItemImage] | None:
+    """Return the images an online provider finds, or None when it finds none."""
+    return UniqueList([_image("online.jpg", "fanarttv")]) if found else None
+
+
+def _artist_lookup(enrichment: MetadataEnrichmentMixin) -> AsyncMock:
+    """Return the stubbed lookup of an artist on its music sources."""
+    return cast("AsyncMock", _mass(enrichment).music.artists.get_provider_item)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("online_image", "asked"),
+    [(True, ["folder"]), (False, ["folder", "service"])],
+    ids=["online_image", "no_online_image"],
+)
+async def test_artist_update_asks_the_music_service_only_without_an_online_image(
+    online_image: bool, asked: list[str]
+) -> None:
+    """The music service is skipped when the online providers find an image."""
+    enrichment = _enrichment()
+    artist = _online_and_service(enrichment, MediaItemMetadata(images=_online_images(online_image)))
+
+    await _update(enrichment, artist, force_refresh=False)
+
+    assert _asked(_artist_lookup(enrichment)) == asked
+    assert artist.metadata.mood == "Folder mood"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_type", [ImageType.LOGO, ImageType.FANART, ImageType.BANNER])
+async def test_artist_update_asks_the_music_service_without_an_online_main_image(
+    image_type: ImageType,
+) -> None:
+    """An online logo, background or banner alone does not spare the music service."""
+    enrichment = _enrichment()
+    images = UniqueList([MediaItemImage(type=image_type, path="online.jpg", provider="fanarttv")])
+    artist = _online_and_service(enrichment, MediaItemMetadata(images=images))
+
+    await _update(enrichment, artist, force_refresh=False)
+
+    assert _asked(_artist_lookup(enrichment)) == ["folder", "service"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("has_mbid", "online_enabled"), [(False, True), (True, False)], ids=["no_mbid", "online_off"]
+)
+async def test_artist_update_asks_the_music_service_without_online_metadata(
+    has_mbid: bool, online_enabled: bool
+) -> None:
+    """Without a MusicBrainz id or with online metadata off, the music service is asked."""
+    enrichment = _enrichment()
+    artist = _online_and_service(enrichment, MediaItemMetadata(images=_online_images(True)))
+    if not has_mbid:
+        artist.external_ids = set()
+
+    with (
+        patch.object(
+            enrichment.config,
+            "get_value",
+            side_effect=lambda key, *_: key == CONF_ENABLE_ONLINE_METADATA and online_enabled,
+        ),
+        patch.object(enrichment, "_get_artist_mbid", AsyncMock(return_value=None)),
+    ):
+        await _update(enrichment, artist, force_refresh=False)
+
+    assert _asked(_artist_lookup(enrichment)) == ["folder", "service"]
+    assert artist.metadata.style == "Service style"
+
+
+@pytest.mark.asyncio
+async def test_artist_update_asks_online_first_for_an_artist_identified_in_the_same_run() -> None:
+    """A MusicBrainz id found during the update lets an online image spare the music service."""
+    enrichment = _enrichment()
+    artist = _online_and_service(enrichment, MediaItemMetadata(images=_online_images(True)))
+    artist.external_ids = set()
+    found = ("11111111-1111-1111-1111-111111111111", False)
+
+    with patch.object(enrichment, "_get_artist_mbid", AsyncMock(return_value=found)):
+        await _update(enrichment, artist, force_refresh=False)
+
+    assert _asked(_artist_lookup(enrichment)) == ["folder"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("online_image", "genres"),
+    [(False, {"Rock"}), (True, {"Pop"})],
+    ids=["service_asked", "service_skipped"],
+)
+async def test_artist_update_genre_preference_counts_the_music_service_genres(
+    online_image: bool, genres: set[str]
+) -> None:
+    """Music service genres keep online genres out when local genres are preferred."""
+    enrichment = _enrichment()
+    _mass(enrichment).music.genres.has_derived_genre_mappings = AsyncMock(return_value=False)
+    artist = _online_and_service(
+        enrichment,
+        MediaItemMetadata(genres={"Pop"}, images=_online_images(online_image)),
+        service=MediaItemMetadata(genres={"Rock"}),
+    )
+
+    with patch.object(enrichment.config, "get_value", return_value=True):
+        await _update(enrichment, artist, force_refresh=False)
+
+    assert artist.metadata.genres == genres
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("online_image", "bio"),
+    [(False, "Service bio"), (True, "Wikipedia bio")],
+    ids=["service_asked", "service_skipped"],
+)
+async def test_artist_update_takes_the_music_service_bio_only_when_asked(
+    online_image: bool, bio: str
+) -> None:
+    """The music service bio wins over the online one, unless the service is skipped."""
+    enrichment = _enrichment()
+    artist = _online_and_service(
+        enrichment,
+        MediaItemMetadata(
+            description="Wikipedia bio",
+            description_language="en",
+            images=_online_images(online_image),
+        ),
+        service=MediaItemMetadata(description="Service bio", description_language="en"),
+    )
+    artist.metadata.description, artist.metadata.description_language = "Stored bio", "en"
+
+    written = await _update(enrichment, artist, force_refresh=True)
+
+    assert written["description"] == bio
+
+
+@pytest.mark.asyncio
+async def test_forced_artist_update_with_the_music_service_skipped_replaces_stored_values() -> None:
+    """A skipped music service is no unreachable source, so a forced update replaces values."""
+    enrichment = _enrichment()
+    artist = _online_and_service(
+        enrichment,
+        MediaItemMetadata(label="Online label", images=_online_images(True)),
+    )
+    artist.metadata.mood, artist.metadata.label = "Old mood", "Old label"
+
+    with patch(_ENRICHMENT_TIME, return_value=NOW):
+        written = await _update(enrichment, artist, force_refresh=True)
+
+    assert _asked(_artist_lookup(enrichment)) == ["folder"]
+    assert written == {"mood": "Folder mood", "label": "Online label"}
+    assert artist.metadata.last_refresh == NOW
+    _logger(enrichment).info.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_artist_update_asks_the_music_service_when_the_online_provider_fails() -> None:
+    """An online provider failing for now leaves the image to the music service; due again soon."""
+    enrichment = _enrichment()
+    artist = _online_and_service(enrichment, MediaItemMetadata())
+    online = cast("AsyncMock", enrichment.providers[0].get_artist_metadata)
+    online.side_effect = ProviderUnavailableError("down")
+
+    with patch(_ENRICHMENT_TIME, return_value=NOW):
+        await _update(enrichment, artist, force_refresh=False)
+
+    assert _asked(_artist_lookup(enrichment)) == ["folder", "service"]
+    assert artist.metadata.last_refresh == NOW - REFRESH_INTERVAL + REFRESH_RETRY_INTERVAL
+
+
 @pytest.mark.asyncio
 async def test_a_run_that_only_fills_gaps_keeps_a_stored_description() -> None:
     """A forced update with an unreachable source keeps a stored text in another language."""

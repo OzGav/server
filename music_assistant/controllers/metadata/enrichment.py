@@ -19,6 +19,7 @@ import aiohttp
 from music_assistant_models.enums import (
     AlbumType,
     ExternalID,
+    ImageType,
     MediaType,
     ProviderFeature,
     ProviderType,
@@ -159,9 +160,7 @@ class MetadataEnrichmentMixin:
         if TYPE_CHECKING:
             local_provs = cast("set[str]", local_provs)
 
-        # collect metadata from the music providers by priority, local ones first; the
-        # instance breaks a tie so the same streaming service is asked on every refresh
-        streaming_answered = False
+        # collect metadata from the non-streaming music providers by priority, local ones first
         for prov_mapping in sorted(
             artist.provider_mappings,
             key=lambda x: (x.priority, x.provider_instance),
@@ -174,14 +173,11 @@ class MetadataEnrichmentMixin:
                 # a music source that is set up but unreachable has no say this time
                 source_missing |= self._music_source_unreachable(prov_mapping.provider_instance)
                 continue
-            # only one streaming service is asked to save calls, the others have the same artist
-            if prov.is_streaming_provider and streaming_answered:
+            # a streaming service is asked after the online metadata providers, only when they
+            # found no picture
+            if prov.is_streaming_provider or prov.instance_id in unique_keys:
                 continue
-            # prefer domain for streaming providers as the catalog is the same across instances
-            prov_key = prov.domain if prov.is_streaming_provider else prov.instance_id
-            if prov_key in unique_keys:
-                continue
-            unique_keys.add(prov_key)
+            unique_keys.add(prov.instance_id)
             with suppress(MediaNotFoundError):
                 prov_item = await self.mass.music.artists.get_provider_item(
                     prov_mapping.item_id,
@@ -191,7 +187,6 @@ class MetadataEnrichmentMixin:
                 # a provider miss hands back the stored library item, which is not fresh
                 if prov_item.provider != "library":
                     sources.append((_music_source_rank(prov), prov_item.metadata))
-                    streaming_answered |= prov.is_streaming_provider
                 merge_metadata(artist.metadata, _without_description(prov_item.metadata))
 
         # The musicbrainz ID is mandatory for all metadata lookups
@@ -223,20 +218,10 @@ class MetadataEnrichmentMixin:
                 # the id an artist merged on MusicBrainz led to is as reliable as the old one
                 merge_mbid = artist.mbid
 
-        # don't merge online genres on top of source-supplied ones; propagation-derived
-        # genres also count as a local source so they survive metadata refreshes
-        prefer_local_genres = self.config.get_value(CONF_PREFER_LOCAL_GENRES) and (
-            bool(artist.metadata.genres)
-            or await self.mass.music.genres.has_derived_genre_mappings(
-                MediaType.ARTIST, artist.item_id
-            )
-        )
-
         # collect metadata from all [metadata] providers, the online ones only when enabled
         # TODO: Utilize a global (cloud) cache for metadata lookups to save on API calls
         online_enabled = bool(self.config.get_value(CONF_ENABLE_ONLINE_METADATA) and artist.mbid)
-        # a local provider's images replace the stored ones instead of filling gaps
-        local_images: dict[str, list[MediaItemImage]] = {}
+        answers: list[tuple[MetadataProvider, MediaItemMetadata | None]] = []
         for provider in self.providers:
             if ProviderFeature.ARTIST_METADATA not in provider.supported_features:
                 continue
@@ -264,18 +249,48 @@ class MetadataEnrichmentMixin:
                     exc_info=err if self.logger.isEnabledFor(10) else None,
                 )
                 continue
+            answers.append((provider, metadata))
+
+        # a streaming service is only asked when the online metadata providers found no main image
+        online_image = any(
+            image.type == ImageType.THUMB
+            for provider, metadata in answers
+            if metadata and not provider.is_local
+            for image in metadata.images or ()
+        )
+        if not online_image and (
+            streaming := await self._streaming_artist_metadata(artist, force_refresh)
+        ):
+            sources.append((_MUSIC_SERVICE, streaming))
+            merge_metadata(artist.metadata, _without_description(streaming))
+
+        # don't merge online genres on top of source-supplied ones; propagation-derived
+        # genres also count as a local source so they survive metadata refreshes
+        prefer_local_genres = self.config.get_value(CONF_PREFER_LOCAL_GENRES) and (
+            bool(artist.metadata.genres)
+            or await self.mass.music.genres.has_derived_genre_mappings(
+                MediaType.ARTIST, artist.item_id
+            )
+        )
+
+        # a local provider's images replace the stored ones instead of filling gaps
+        local_images: dict[str, list[MediaItemImage]] = {}
+        for provider, answer in answers:
             if provider.is_local:
                 _drop_provider_images(artist.metadata, provider.instance_id)
-                local_images[provider.instance_id] = list(metadata.images or []) if metadata else []
-            if metadata:
+                local_images[provider.instance_id] = list(answer.images or []) if answer else []
+            if answer:
                 if (
                     provider.is_local
-                    and metadata.genres
+                    and answer.genres
                     and self.config.get_value(CONF_PREFER_LOCAL_GENRES)
                 ):
                     prefer_local_genres = True
-                if prefer_local_genres and not provider.is_local:
-                    metadata = replace(metadata, genres=None)
+                metadata = (
+                    replace(answer, genres=None)
+                    if prefer_local_genres and not provider.is_local
+                    else answer
+                )
                 sources.append((_metadata_source_rank(provider), metadata))
                 merge_metadata(artist.metadata, _without_description(metadata))
                 self.logger.debug(
@@ -1222,6 +1237,40 @@ class MetadataEnrichmentMixin:
             if titles:
                 return titles
         return []
+
+    async def _streaming_artist_metadata(
+        self, artist: Artist, force_refresh: bool
+    ) -> MediaItemMetadata | None:
+        """
+        Return the artist's metadata from the first of its streaming services that knows it.
+
+        :param artist: The library artist.
+        :param force_refresh: Whether to ask the streaming service again instead of a cache.
+        """
+        domains: set[str] = set()
+        # the instance breaks a tie so the same streaming service is asked on every refresh
+        for prov_mapping in sorted(
+            artist.provider_mappings,
+            key=lambda x: (x.priority, x.provider_instance),
+            reverse=True,
+        ):
+            prov = self.mass.get_provider(
+                prov_mapping.provider_instance, provider_type=MusicProvider
+            )
+            # the catalog of a streaming service is the same across its instances
+            if prov is None or not prov.is_streaming_provider or prov.domain in domains:
+                continue
+            domains.add(prov.domain)
+            with suppress(MediaNotFoundError):
+                prov_item = await self.mass.music.artists.get_provider_item(
+                    prov_mapping.item_id,
+                    prov_mapping.provider_instance,
+                    force_refresh=force_refresh,
+                )
+                # a provider miss hands back the stored library item, which is not fresh
+                if prov_item.provider != "library":
+                    return prov_item.metadata
+        return None
 
 
 def _fill_album_from_release(
