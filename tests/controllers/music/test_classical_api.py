@@ -6,7 +6,8 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -3051,6 +3052,17 @@ async def test_recordings_read_the_recording_year_of_their_tracks(library: _Libr
         (1961, "Karajan I"),
         (1979, "Bernstein I"),
     ]
+
+
+async def test_work_page_schedules_a_metadata_update(library: _Library) -> None:
+    """Opening a work schedules its metadata update, which runs when the work is due one."""
+    schedule = cast("MagicMock", library.mass.metadata.schedule_update_metadata)
+    schedule.reset_mock()
+
+    work = await library.mass.music.classical.work(library.work_id("Eroica"))
+
+    schedule.assert_called_once()
+    assert schedule.call_args.args[0].uri == work.uri
 
 
 async def test_work_movements_come_from_its_tracks(library: _Library) -> None:

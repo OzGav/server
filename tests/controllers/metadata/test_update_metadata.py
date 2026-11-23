@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import pytest
-from music_assistant_models.enums import ExternalID
+from music_assistant_models.enums import ExternalID, ProviderFeature
 from music_assistant_models.errors import MediaNotFoundError
-from music_assistant_models.media_items import Artist, ProviderMapping
+from music_assistant_models.media_items import Artist, MediaItemMetadata, ProviderMapping, Work
 
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.mass import MusicAssistant
 from music_assistant.providers.musicbrainz.models import MusicBrainzArtist
 
 ARTIST_MBID = "a74b1b7f-71a5-4011-9441-d0b5e4122711"
+WORK_MBID = "d03bff61-26fc-301b-98ac-4d8e85771cbc"
+WORK_NOTES = "The Symphony No. 5 in C minor, Op. 67, is a symphony by Ludwig van Beethoven."
 
 
 @pytest.fixture(name="mass")
@@ -42,6 +44,67 @@ async def _add_artist(mass: MusicAssistant) -> Artist:
             external_ids={(ExternalID.MB_ARTIST, ARTIST_MBID)},
         )
     )
+
+
+async def _add_work(mass: MusicAssistant, mbid: str | None = WORK_MBID) -> Work:
+    """Add a library work, identified on MusicBrainz unless no id is given."""
+    return await mass.music.works.add_item_to_library(
+        Work(
+            item_id="0",
+            provider="library",
+            name="Symphony no. 5",
+            provider_mappings=set(),
+            external_ids={(ExternalID.MB_WORK, mbid)} if mbid else set(),
+        )
+    )
+
+
+def _work_metadata_provider(metadata: MediaItemMetadata | None) -> Mock:
+    """Return an online metadata provider of works that answers with the given metadata."""
+    provider = Mock(supported_features={ProviderFeature.WORK_METADATA}, is_local=False)
+    provider.get_work_metadata = AsyncMock(return_value=metadata)
+    return provider
+
+
+async def test_update_of_a_work_stores_the_description_of_a_provider(
+    mass: MusicAssistant,
+) -> None:
+    """A work's update stores the description a metadata provider finds for it."""
+    work = await _add_work(mass)
+    provider = _work_metadata_provider(
+        MediaItemMetadata(description=WORK_NOTES, description_language="en")
+    )
+
+    with patch.object(
+        type(mass.metadata), "providers", new_callable=PropertyMock, return_value=[provider]
+    ):
+        await mass.metadata.update_metadata(work, force_refresh=True)
+
+    provider.get_work_metadata.assert_awaited_once()
+    stored = await mass.music.works.get_library_item(work.item_id)
+    assert (stored.metadata.description, stored.metadata.description_language) == (
+        WORK_NOTES,
+        "en",
+    )
+    assert stored.metadata.last_refresh
+
+
+async def test_update_of_a_work_without_musicbrainz_id_asks_no_online_provider(
+    mass: MusicAssistant,
+) -> None:
+    """A work not identified on MusicBrainz is not looked up online, but counts as updated."""
+    work = await _add_work(mass, mbid=None)
+    provider = _work_metadata_provider(MediaItemMetadata(description=WORK_NOTES))
+
+    with patch.object(
+        type(mass.metadata), "providers", new_callable=PropertyMock, return_value=[provider]
+    ):
+        await mass.metadata.update_metadata(work, force_refresh=True)
+
+    provider.get_work_metadata.assert_not_awaited()
+    stored = await mass.music.works.get_library_item(work.item_id)
+    assert stored.metadata.description is None
+    assert stored.metadata.last_refresh
 
 
 async def test_update_of_an_item_removed_from_the_library_is_skipped(

@@ -51,6 +51,7 @@ from .api_client import MusicBrainzAPIClient, url_relation_ids
 from .constants import (
     DISCOGRAPHY_MAX_PAGES,
     DISCOGRAPHY_PRIMARY_TYPES,
+    IMSLP_HOST,
     LUCENE_SPECIAL,
     MAX_BARCODE_DETAIL_FETCHES,
     MAX_NAME_SEARCH_DETAIL_FETCHES,
@@ -94,6 +95,7 @@ if TYPE_CHECKING:
         MediaItemType,
         RecommendationFolder,
         Track,
+        Work,
     )
     from music_assistant_models.provider import ProviderManifest
 
@@ -462,6 +464,18 @@ class MusicbrainzProvider(MetadataProvider):
             genres=genres, label=label, release_date=release_date, links=links or None
         )
 
+    async def get_work_metadata(self, work: Work) -> MediaItemMetadata | None:
+        """Surface the links of a MusicBrainz work, such as its score on IMSLP."""
+        if not work.mbid:
+            return None
+        try:
+            details = await self.get_work_details(work.mbid)
+        except InvalidDataError:
+            return None
+        if not details or not (links := self._links_from_relations(details.relations)):
+            return None
+        return MediaItemMetadata(links=links)
+
     async def get_track_metadata(self, track: Track) -> MediaItemMetadata | None:
         """Surface MusicBrainz genres of a track's recording."""
         if not track.mbid:
@@ -700,13 +714,13 @@ class MusicbrainzProvider(MetadataProvider):
 
     async def get_work_details(self, work_id: str) -> MusicBrainzWork | None:
         """
-        Get a Work with its aliases and artist, work and series relations by its MusicBrainz id.
+        Get a Work with its aliases and its artist, work, series and URL relations.
 
         :param work_id: MusicBrainz Work id.
         :return: The work, or None if MusicBrainz does not know it.
         :raises InvalidDataError: If MusicBrainz returns a malformed work.
         """
-        endpoint = f"work/{work_id}?inc=aliases+artist-rels+work-rels+series-rels"
+        endpoint = f"work/{work_id}?inc=aliases+artist-rels+work-rels+series-rels+url-rels"
         if not (result := await self._api_client.get_data(endpoint)):
             return None
         if "id" not in result:
@@ -909,6 +923,12 @@ class MusicbrainzProvider(MetadataProvider):
     def _link_type_for_relation(relation: MusicBrainzRelation) -> LinkType | None:
         if link_type := URL_RELATION_TYPE_MAPPING.get(relation.type):
             return link_type
+        if (
+            relation.type == "download for free"
+            and relation.url
+            and IMSLP_HOST in relation.url.resource.lower()
+        ):
+            return LinkType.IMSLP
         if relation.type == "social network" and relation.url:
             url_lower = relation.url.resource.lower()
             for host, link_type in SOCIAL_HOST_MAPPING:
