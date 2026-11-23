@@ -381,7 +381,7 @@ class MetaDataController(
             return
         last_refresh = item.metadata.last_refresh or 0
         needs_update = (time() - last_refresh) > REFRESH_INTERVAL or (
-            item.media_type in (MediaType.ARTIST, MediaType.ALBUM, MediaType.TRACK)
+            item.media_type in (MediaType.ARTIST, MediaType.ALBUM, MediaType.TRACK, MediaType.WORK)
             and self._description_language_outdated(item.metadata)
         )
         if not needs_update:
@@ -578,6 +578,10 @@ class MetaDataController(
                     if item.media_type == MediaType.PODCAST:
                         await self._update_podcast_metadata(
                             cast("Podcast", item), force_refresh=force_refresh
+                        )
+                    if item.media_type == MediaType.WORK:
+                        await self._update_work_metadata(
+                            cast("Work", item), force_refresh=force_refresh
                         )
                 except MediaNotFoundError:
                     # the item can be removed from the library, or merged into another, while its
