@@ -53,7 +53,7 @@ markdownify==1.2.3
 mashumaro==3.22
 modern_colorthief==0.3.0
 music-assistant-frontend @ https://github.com/music-assistant/frontend/releases/download/2.17.383/music_assistant_frontend-2.17.383-py3-none-any.whl#sha256=1b0390f4e27bcd4d0c025e6948ed8ca19bc1d35362c9114dac743efad09e7d60
-music-assistant-models
+music-assistant-models @ git+https://github.com/OzGav/models@da7a09cea02c01c2486a8d971abcd829b80d4351
 mutagen==1.48.1
 niconico.py-ma==3.0.0
 nnAudio==0.3.4
